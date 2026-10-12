@@ -63,11 +63,18 @@ fn report(
 
 pub fn run(layout: &Layout, install_root: &Path, version: &str, txn: &str) -> i32 {
     let webview = webview2_version();
+    // 副本放在安装根的 health 下（探测不许写 `N`、`L`），读完即删。
+    let scratch = install_root
+        .join(atm_install_state::STATE_DIR)
+        .join("health")
+        .join(format!("probe-read-{txn}"));
     let data = atm_store::probe::run(
         &layout.v3_root,
         &layout.data_dir,
+        &scratch,
         Some(atm_runtime::secrets::check),
     );
+    let _ = std::fs::remove_dir_all(&scratch);
     let report = report(txn, version, &webview, &data);
     let ok = report["ok"] == Value::Bool(true);
     match crate::health::probe_report(install_root, txn, &report) {

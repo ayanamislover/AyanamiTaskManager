@@ -46,6 +46,16 @@ const LEGACY_RECHECK: Duration = Duration::from_secs(5);
 /// a damaged database stays damaged, so a few seconds are all this costs.
 const DAMAGED_RETRY: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(5)];
 
+/// The recovery command the Damaged page shows, for PowerShell (the Windows terminal's default shell): the call
+/// operator and a single-quoted path, so spaces, `$` and backticks in the path are literal. A bare `"…\atm.exe" recover`
+/// is a parse error there (W8 gate peer r1 P2-01).
+fn recover_command(exe: &std::path::Path) -> String {
+    format!(
+        "& '{}' recover --offline",
+        exe.display().to_string().replace('\'', "''")
+    )
+}
+
 /// The wait before the next look at an unreadable database (counting it in `attempts`), or `None` once
 /// the user has to act.
 fn damaged_retry(attempts: &mut usize) -> Option<Duration> {
@@ -305,6 +315,42 @@ mod phase_tests {
         assert_eq!(code(Phase::Damaged), Some("DATABASE_DAMAGED"));
         assert_eq!(code(Phase::Starting), None);
         assert_eq!(code(Phase::Serving { open: true }), None);
+    }
+
+    /// 恢复页的命令在 PowerShell 里原样能跑：用 PowerShell 自己的解析器看，路径里有空格、`$`、反引号、单引号也一样。
+    #[test]
+    fn the_recovery_command_parses_in_powershell_as_one_call_of_the_exe() {
+        use super::recover_command;
+        let ps = std::path::PathBuf::from(
+            std::env::var_os("SystemRoot").unwrap_or("C:\\Windows".into()),
+        )
+        .join("System32")
+        .join("WindowsPowerShell")
+        .join("v1.0")
+        .join("powershell.exe");
+        // 只解析、不执行：报错数、调用运算符，再把命令名与参数原样拼回来。
+        let script = "$t=$null;$e=$null;\
+            $a=[System.Management.Automation.Language.Parser]::ParseInput($env:ATM_TEST_COMMAND,[ref]$t,[ref]$e);\
+            if($e.Count -gt 0){[Console]::Out.Write('ERR '+$e[0].Message);exit 0};\
+            $c=$a.EndBlock.Statements[0].PipelineElements[0];\
+            $rest=($c.CommandElements|Select-Object -Skip 1|ForEach-Object{$_.Extent.Text}) -join ' ';\
+            [Console]::Out.Write([string]$c.InvocationOperator+'|'+$c.CommandElements[0].Value+'|'+$rest)";
+        for exe in [
+            r"C:\Users\u\AppData\Local\AyanamiTaskManager\app-3.0.0\resources\atm.exe",
+            r"C:\Users\Ann O'Neil\My $Apps\a`b\atm.exe",
+        ] {
+            let command = recover_command(std::path::Path::new(exe));
+            let out = std::process::Command::new(&ps)
+                .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .env("ATM_TEST_COMMAND", &command)
+                .output()
+                .unwrap();
+            assert_eq!(
+                String::from_utf8_lossy(&out.stdout),
+                format!("Ampersand|{exe}|recover --offline"),
+                "{command}"
+            );
+        }
     }
 
     /// 库读不出时先再看两次（2 s、5 s），之后才停下等用户恢复。
@@ -1424,7 +1470,7 @@ impl App {
                 "state": "DAMAGED",
                 "generation": generation,
                 "reason": reason,
-                "command": format!("\"{}\" recover --offline", self.layout.cli.exe.display()),
+                "command": recover_command(&self.layout.cli.exe),
                 "dataDir": self.layout.v3_root.display().to_string(),
             });
         }

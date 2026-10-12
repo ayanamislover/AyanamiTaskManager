@@ -11,6 +11,7 @@ use std::path::Path;
 pub mod backup;
 mod chain;
 pub mod conversion;
+pub mod detached;
 mod engine;
 pub mod events;
 pub mod jsjson;

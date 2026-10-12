@@ -82,9 +82,9 @@ fn doctor_offline_reads_files_only() {
 }
 
 /// 上次写到一半被杀、留下热回滚日志：诊断不能拿 `immutable` 读半截的页，也不能把它说成库坏了，
-/// 而且不动它（回滚是下次正常启动的事）。
+/// 而且不动它（回滚是下次正常启动的事）。读的是副本回滚之后、被杀前已提交的状态。
 #[test]
-fn doctor_offline_names_an_unrolled_journal_and_leaves_it() {
+fn doctor_offline_reads_past_an_unrolled_journal_and_leaves_it() {
     let root = bare_root("cli-doctor-hot-journal");
     let db = root.join("data").join("atm.sqlite");
     let side = root.join("side.sqlite");
@@ -93,8 +93,8 @@ fn doctor_offline_names_an_unrolled_journal_and_leaves_it() {
     let _ = std::fs::remove_file(root.join("data").join("atm.sqlite-shm"));
     let c = rusqlite::Connection::open(&side).unwrap();
     c.execute_batch(
-        "PRAGMA journal_mode = DELETE; PRAGMA cache_size = 1; BEGIN IMMEDIATE;
-         CREATE TABLE hot_journal_probe(x); UPDATE app_meta SET generation = 'NOT-COMMITTED';",
+        "PRAGMA journal_mode = DELETE; CREATE TABLE hot_journal_probe(x);
+         PRAGMA cache_size = 1; BEGIN IMMEDIATE; UPDATE app_meta SET generation = 'NOT-COMMITTED';",
     )
     .unwrap();
     for _ in 0..2000 {
@@ -116,16 +116,61 @@ fn doctor_offline_names_an_unrolled_journal_and_leaves_it() {
     let before = tree(&root);
 
     let run = atm_in(&root, &["--json", "doctor", "--offline"]);
-    assert_eq!(run.code, 1, "{}{}", run.stdout, run.stderr);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
     let v = run.json();
-    assert_ne!(v["database"]["generation"], "NOT-COMMITTED", "{v}");
-    let problem = v["problems"][0].as_str().unwrap();
-    assert!(
-        problem.contains("atm.sqlite-journal") && problem.contains("不是库坏了"),
-        "{v}"
-    );
-    assert!(v["database"]["journal_bytes"].as_u64().unwrap() > 0, "{v}");
+    assert_eq!(v["database"]["generation"], "G", "{v}");
+    assert_eq!(v["database"]["quick_check"], "ok", "{v}");
+    assert_eq!(v["database"]["interrupted_write"], true, "{v}");
+    assert_eq!(v["problems"], json!([]), "{v}");
     assert_eq!(tree(&root), before, "doctor --offline touched the journal");
+
+    // 空的（冷的）日志不是中断的写入：不报 interrupted_write，也不动它。
+    let cold = bare_root("cli-doctor-cold-journal");
+    std::fs::write(cold.join("data").join("atm.sqlite-journal"), b"").unwrap();
+    let before = tree(&cold);
+    let run = atm_in(&cold, &["--json", "doctor", "--offline"]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    assert_eq!(run.json()["database"]["interrupted_write"], false);
+    assert_eq!(tree(&cold), before);
+}
+
+/// 服务被杀、`-wal` 里留着已提交的帧、没有 `-shm`：诊断读得到这些帧（generation 是 WAL 里的新值），
+/// 而且不建 `-shm`、不改任何文件（W8 关口 peer r1 P1-01：只读连接会建 `-shm`）。
+#[test]
+fn doctor_offline_reads_the_wal_of_a_killed_service_without_touching_it() {
+    let root = bare_root("cli-doctor-killed-wal");
+    let data = root.join("data");
+    let db = data.join("atm.sqlite");
+    let side = root.join("killed-side");
+    std::fs::create_dir_all(&side).unwrap();
+    let c = rusqlite::Connection::open(&db).unwrap();
+    c.execute_batch(
+        "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+         UPDATE app_meta SET generation = 'G-IN-THE-WAL';",
+    )
+    .unwrap();
+    std::fs::copy(&db, side.join("db")).unwrap();
+    std::fs::copy(data.join("atm.sqlite-wal"), side.join("wal")).unwrap();
+    drop(c);
+    for f in ["atm.sqlite", "atm.sqlite-wal", "atm.sqlite-shm"] {
+        let _ = std::fs::remove_file(data.join(f));
+    }
+    std::fs::rename(side.join("db"), &db).unwrap();
+    std::fs::rename(side.join("wal"), data.join("atm.sqlite-wal")).unwrap();
+    std::fs::remove_dir(&side).unwrap();
+    let before = tree(&root);
+
+    let run = atm_in(&root, &["--json", "doctor", "--offline"]);
+    assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    let v = run.json();
+    assert_eq!(v["database"]["generation"], "G-IN-THE-WAL", "{v}");
+    assert_eq!(v["database"]["interrupted_write"], false, "{v}");
+    assert_eq!(
+        tree(&root),
+        before,
+        "doctor --offline wrote beside the database"
+    );
+    assert!(!data.join("atm.sqlite-shm").exists());
 }
 
 /// 服务在跑（库开着、有 `-wal`）时照样能诊断，读得到已提交的内容。

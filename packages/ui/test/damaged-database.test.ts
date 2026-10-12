@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { DamagedDatabasePage } from "../src/features/damaged-database.js";
 
 const COMMAND =
-  '"C:\\Users\\u\\AppData\\Local\\AyanamiTaskManager\\app-3.0.0\\resources\\atm.exe" recover --offline';
+  "& 'C:\\Users\\u\\AppData\\Local\\AyanamiTaskManager\\app-3.0.0\\resources\\atm.exe' recover --offline";
 
 function render(): string {
   return renderToStaticMarkup(
@@ -31,9 +31,12 @@ describe("DamagedDatabasePage（W8f-3）", () => {
     const steps = markup.slice(markup.indexOf("<ol"), markup.indexOf("</ol>"));
     expect(steps.indexOf("完全退出")).toBeGreaterThan(0);
     expect(steps.indexOf("完全退出")).toBeLessThan(steps.indexOf("重新打开 ATM"));
+    // 命令是给 PowerShell 的（宿主按 PowerShell 的语法拼，W8 关口 peer r1 P2-01），说明里就只说 PowerShell。
     expect(markup).toContain(
-      "&quot;C:\\Users\\u\\AppData\\Local\\AyanamiTaskManager\\app-3.0.0\\resources\\atm.exe&quot; recover --offline",
+      "&amp; &#x27;C:\\Users\\u\\AppData\\Local\\AyanamiTaskManager\\app-3.0.0\\resources\\atm.exe&#x27; recover --offline",
     );
+    expect(steps).toContain("打开 PowerShell");
+    expect(steps).not.toContain("命令提示符");
     expect(markup).toContain("复制恢复命令");
     expect(markup).toContain("file is not a database");
     expect(markup).toContain("01K7GENERATION");

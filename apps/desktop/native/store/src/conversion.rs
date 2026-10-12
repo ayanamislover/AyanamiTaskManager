@@ -16,7 +16,7 @@ use crate::jsjson::{self, Value};
 use crate::legacy::{self, ConvertError, ConvertOptions, LegacySources, Report};
 use crate::pin;
 use atm_install_state::is_path_name;
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
@@ -588,51 +588,42 @@ fn publication_exists(layout: &Layout) -> bool {
     std::fs::read_dir(layout.data()).is_ok_and(|mut d| d.next().is_some())
 }
 
-/// 库内的 `app_meta.generation`（只读打开）。只在 `M` 可信时调用。
-fn published_generation(layout: &Layout) -> Option<String> {
-    read_published_generation(layout).ok()
+/// 库内的 `app_meta.generation`。只在 `M` 可信时调用。
+fn published_generation(layout: &Layout, scratch: &Path) -> Option<String> {
+    read_published_generation(layout, scratch).ok()
 }
 
 /// 同上，读不出时说明原因（[`Startup::Damaged`] 带给用户）。
 ///
-/// 只读：[`decide`] 也是安装探测（[`crate::probe`]）的判定，探测在旧版还在服务时运行，不许写 `N`。
-/// 上次写到一半被杀留下的回滚日志只读连接回滚不了，这里会读不出；runtime 拿到准入后先调
-/// [`roll_back_interrupted_write`]，判定时日志已经不在。
-fn read_published_generation(layout: &Layout) -> std::result::Result<String, String> {
+/// 判定不写 `N` 的库与它旁边的任何文件（[`crate::detached`]）：安装探测在旧版还在服务时也用它；坏库在 S5′ 要
+/// 原样留给用户恢复，读写连接关闭时的 checkpoint 会改掉它的字节（W8 关口 peer r1 P1-01 / P1-02）。
+///
+/// generation 发布后不再改，主文件里 `app_meta` 那一页不论新旧都是同一个值，所以没有热回滚日志时先按 `immutable`
+/// 读主文件：不复制、不写。读不出（或有热日志：上次写到一半被杀，主文件里可能是半截的页）才在 `scratch` 下的
+/// 副本上读——SQLite 在副本上回滚日志、恢复 WAL，读到的是被杀前已提交的状态。热日志本身留给服务正常打开时回滚。
+fn read_published_generation(
+    layout: &Layout,
+    scratch: &Path,
+) -> std::result::Result<String, String> {
     let db = layout.database();
     if !db.is_file() {
         return Err("the database is missing".into());
     }
-    let c = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|e| format!("the database cannot be opened: {e}"))?;
-    c.query_row("SELECT generation FROM app_meta", [], |r| r.get(0))
-        .map_err(|e| format!("the database cannot be read: {e}"))
-}
-
-/// 上次写到一半被杀留下的回滚日志（`atm.sqlite-journal`）：读写打开一次（不建文件），让 SQLite 按它的规则回滚。
-///
-/// 服务第一次打开发布物要把它从 DELETE 切到 WAL，这一刻被杀就会留下热日志。只读的 [`decide`] 回滚不了它，
-/// 读 generation 报 `attempt to write a readonly database`，一次普通的崩溃恢复就被判成了
-/// [`Startup::Damaged`]（W8 关口第 3 次完整发布链之后的掉电复现）。
-///
-/// 只在拿到独占准入之后调（runtime 判定之前）：这时没有别人在用这个库。安装探测不调。
-/// 没有日志时什么都不做，返回 `Ok(false)`；打不开或读不出时返回原因，判定会照实报 Damaged。
-pub fn roll_back_interrupted_write(layout: &Layout) -> std::result::Result<bool, String> {
-    let db = layout.database();
-    let journal = PathBuf::from(format!("{}-journal", db.display()));
-    if !db.is_file() || !journal.exists() {
-        return Ok(false);
+    let query = |c: &Connection| {
+        c.query_row("SELECT generation FROM app_meta", [], |r| {
+            r.get::<_, String>(0)
+        })
+    };
+    if !crate::detached::hot_journal(&db)
+        && let Ok(g) =
+            crate::detached::open_immutable(&db).and_then(|c| query(&c).map_err(|e| e.to_string()))
+    {
+        return Ok(g);
     }
-    let c = Connection::open_with_flags(
-        &db,
-        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .map_err(|e| format!("the database cannot be opened: {e}"))?;
-    c.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
-        r.get::<_, i64>(0)
+    crate::detached::read(&db, scratch, query).map_err(|e| match e {
+        crate::detached::Error::Open(e) => format!("the database cannot be opened: {e}"),
+        crate::detached::Error::Read(e) => format!("the database cannot be read: {e}"),
     })
-    .map_err(|e| format!("the interrupted write cannot be rolled back: {e}"))?;
-    Ok(true)
 }
 
 /// 发布物里库之外的文件：`artifacts\`、`sync\`、`dispatch\` 三个子树里 (相对路径, size, sha256) 的集合摘要。
@@ -742,7 +733,18 @@ pub fn shared_agent_asset(name: &str) -> bool {
 
 /// 07 §4：只看 `M`、发布物的身份与有没有进行中的封存。`legacy_exists` 是 `L` 在不在（[`legacy_present`]）。
 /// 发布之后服务会往附件、sync、dispatch 里写，所以 S6 只认库内 generation；文件摘要只在 S4（服务还没起过）比。
+///
+/// 不写发布物（[`read_published_generation`]）；要在副本上读时，副本放在 `N\runtime\detached-read\`。
 pub fn decide(layout: &Layout, legacy_exists: bool) -> Startup {
+    decide_reading(
+        layout,
+        legacy_exists,
+        &layout.runtime().join("detached-read"),
+    )
+}
+
+/// 同 [`decide`]，副本放在 `scratch`：安装探测连 `N\runtime` 也不许写，副本放在安装根。
+pub fn decide_reading(layout: &Layout, legacy_exists: bool, scratch: &Path) -> Startup {
     if layout.seal_intent().exists() {
         return Startup::ResumeSeal;
     }
@@ -790,7 +792,7 @@ pub fn decide(layout: &Layout, legacy_exists: bool) -> Startup {
                 (Ok(actual), Some(expected)) => actual == *expected,
                 _ => false,
             };
-            match published_generation(layout) {
+            match published_generation(layout, scratch) {
                 Some(g) if g == m.generation && same_files => Startup::FinishPublishing {
                     generation: m.generation,
                 },
@@ -811,7 +813,7 @@ pub fn decide(layout: &Layout, legacy_exists: bool) -> Startup {
                 },
             }
         }
-        Phase::Published => match read_published_generation(layout) {
+        Phase::Published => match read_published_generation(layout, scratch) {
             Ok(g) if g == m.generation => match read_startup_state(layout) {
                 Some(state) if state.generation == m.generation => Startup::SourceConflict(state),
                 _ => Startup::Published(m),

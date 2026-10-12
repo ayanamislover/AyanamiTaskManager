@@ -28,9 +28,9 @@ export function DamagedDatabasePage({
           <ol className="atm-damaged-steps">
             <li>从托盘菜单选「完全退出」，关掉 ATM。恢复时 ATM 不能开着。</li>
             <li>
-              在命令提示符或 PowerShell
-              里运行下面这条命令。它会选最近一份可用的整库备份，输入它显示的备份 ID
-              确认后开始恢复；当前的数据库整体移进 <code>quarantine</code>
+              打开
+              PowerShell（开始菜单搜索「PowerShell」），运行下面这条命令。它会选最近一份可用的整库备份，输入它显示的备份
+              ID 确认后开始恢复；当前的数据库整体移进 <code>quarantine</code>
               ，不会删除。备份之后的修改不会回来。
             </li>
             <li>恢复完成后重新打开 ATM。</li>
@@ -46,7 +46,7 @@ export function DamagedDatabasePage({
             </button>
           </div>
           <p className="atm-muted atm-damaged-hint">
-            命令报告没有可用的备份时，加 <code>--list</code> 可以看每一份备份的问题。
+            命令报告没有可用的备份时，在命令末尾加 <code>--list</code> 可以看每一份备份的问题。
           </p>
           <dl className="atm-source-choice-detail">
             <dt>原因（原文）</dt>

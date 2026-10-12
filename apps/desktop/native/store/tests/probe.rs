@@ -1,7 +1,8 @@
 //! 安装探测（W8a，方案 §6 PROBE）：新版能不能打开或转换这台机器上的数据，全程只读。
 //!
 //! 夹具与 `legacy.rs` 一样用仓库里 2.x 自己的迁移 SQL 建合成的 `L`，`N` 由转换状态机建空库发布。
-//! 每条都核对：探测前后两个根里的文件（路径、大小、修改时间）一个不差，没有多出 `-shm` 之类的文件。
+//! 每条都核对：探测前后两个根里的文件（路径、大小、修改时间、内容）一个不差，没有多出 `-shm` 之类的文件，
+//! 放副本的暂存目录读完即删。
 
 use atm_store::conversion::{self as cv, Layout};
 use atm_store::probe::{Checked, Failure, run};
@@ -71,7 +72,7 @@ fn legacy_root(l: &Path) {
 }
 
 /// 两个根里的每个文件：(相对路径, 大小, 修改时间)。
-fn files(roots: &[&Path]) -> BTreeMap<PathBuf, (u64, SystemTime)> {
+fn files(roots: &[&Path]) -> BTreeMap<PathBuf, (u64, SystemTime, String)> {
     let mut out = BTreeMap::new();
     for root in roots {
         let mut stack = vec![root.to_path_buf()];
@@ -85,7 +86,12 @@ fn files(roots: &[&Path]) -> BTreeMap<PathBuf, (u64, SystemTime)> {
                 if meta.is_dir() {
                     stack.push(e.path());
                 } else {
-                    out.insert(e.path(), (meta.len(), meta.modified().unwrap()));
+                    use sha2::Digest;
+                    let sha = sha2::Sha256::digest(fs::read(e.path()).unwrap())
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect();
+                    out.insert(e.path(), (meta.len(), meta.modified().unwrap(), sha));
                 }
             }
         }
@@ -93,16 +99,124 @@ fn files(roots: &[&Path]) -> BTreeMap<PathBuf, (u64, SystemTime)> {
     out
 }
 
-/// 探测一次，并核对它什么都没写。
+/// 探测一次，并核对它什么都没写、暂存目录没留下东西。
 fn probe(
     n: &Path,
     l: &Path,
     secrets_check: Option<fn(&[u8]) -> bool>,
 ) -> Result<atm_store::probe::Report, Failure> {
+    let scratch = n.parent().unwrap().join("probe-scratch");
     let before = files(&[n, l]);
-    let result = run(n, l, secrets_check);
+    let result = run(n, l, &scratch, secrets_check);
     assert_eq!(files(&[n, l]), before, "the probe wrote something");
+    assert!(!scratch.exists(), "the probe left its copies behind");
     result
+}
+
+fn with_suffix(db: &Path, suffix: &str) -> PathBuf {
+    PathBuf::from(format!("{}{suffix}", db.display()))
+}
+
+/// 把 `db` 切成 WAL、跑 `sql`（不 checkpoint），趁连接开着把主文件与 `-wal`（`keep_shm` 时连 `-shm`）拷出来，
+/// 关掉连接后再拷回去：等于服务在这一刻被杀。
+fn kill_with_frames(db: &Path, sql: &str, keep_shm: bool) {
+    let side = db.parent().unwrap().join("killed-side");
+    let _ = fs::remove_dir_all(&side);
+    fs::create_dir_all(&side).unwrap();
+    let c = Connection::open(db).unwrap();
+    c.execute_batch("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;")
+        .unwrap();
+    c.execute_batch(sql).unwrap();
+    let mut parts = vec!["", "-wal"];
+    if keep_shm {
+        parts.push("-shm");
+    }
+    for part in &parts {
+        fs::copy(with_suffix(db, part), side.join(format!("db{part}"))).unwrap();
+    }
+    drop(c);
+    for part in ["", "-wal", "-shm"] {
+        let _ = fs::remove_file(with_suffix(db, part));
+    }
+    for part in &parts {
+        fs::rename(side.join(format!("db{part}")), with_suffix(db, part)).unwrap();
+    }
+    fs::remove_dir(&side).unwrap();
+    assert!(fs::metadata(with_suffix(db, "-wal")).unwrap().len() > 0);
+}
+
+/// 把 `db` 切成 WAL 并正常关掉：主文件留在 WAL 模式，`-wal` / `-shm` 都不在。
+fn leave_in_wal_mode(db: &Path) {
+    let c = Connection::open(db).unwrap();
+    c.execute_batch(
+        "PRAGMA journal_mode = WAL; CREATE TABLE wal_probe(x); INSERT INTO wal_probe VALUES (1);",
+    )
+    .unwrap();
+    drop(c);
+    assert!(!with_suffix(db, "-wal").exists() && !with_suffix(db, "-shm").exists());
+}
+
+const FUTURE_V3: &str = "INSERT INTO schema_migrations (version, name, sha256, applied_at) VALUES (9999, 'future', 'ab', '2026-10-11T00:00:00.000Z')";
+const FUTURE_2X: &str = "INSERT INTO schema_migrations VALUES (9999, '9999_future.sql', '2026-09-01T00:00:00.000Z', 'ab', 'APPLIED')";
+
+/// W8 关口 peer r1 P1-01：只读连接遇到 WAL 库会建 `-shm`、空的 `-wal`。探测按 `immutable` 读正常关掉的 WAL 库。
+#[test]
+fn a_published_store_left_in_wal_mode_is_read_without_creating_sidecars() {
+    let d = dir("wal-mode-closed");
+    let (n, l) = (d.join("n"), d.join("l"));
+    let layout = Layout::new(&n);
+    cv::fresh_install(&layout, G, AT).unwrap();
+    leave_in_wal_mode(&layout.database());
+    let r = probe(&n, &l, None).unwrap();
+    assert_eq!(r.startup, "PUBLISHED");
+    assert_eq!(scopes(&r.databases), ["v3"]);
+}
+
+/// 服务被杀、`-wal` 里有已提交的帧（有没有 `-shm` 都试）：探测在副本上读到这些帧，源文件一个字节不动。
+/// 帧里登记了一条这个构建不认得的迁移：读到了才会拒绝，所以这也证明读的不是过时的主文件。
+#[test]
+fn a_published_store_killed_with_frames_in_its_wal_is_read_from_a_copy() {
+    for keep_shm in [false, true] {
+        let d = dir(&format!("wal-frames-shm-{keep_shm}"));
+        let (n, l) = (d.join("n"), d.join("l"));
+        let layout = Layout::new(&n);
+        cv::fresh_install(&layout, G, AT).unwrap();
+        kill_with_frames(&layout.database(), FUTURE_V3, keep_shm);
+        assert_eq!(with_suffix(&layout.database(), "-shm").exists(), keep_shm);
+        let e = probe(&n, &l, None).unwrap_err();
+        assert_eq!((e.code, e.scope), ("V3_SCHEMA_UNKNOWN", "v3"), "{e:?}");
+    }
+}
+
+/// 2.x 的源库同样：旧版被杀、`-wal` 里有帧，探测读得到、不建 `-shm`。
+#[test]
+fn a_2x_database_killed_with_frames_in_its_wal_is_read_from_a_copy() {
+    let d = dir("legacy-wal-frames");
+    let (n, l) = (d.join("n"), d.join("l"));
+    legacy_root(&l);
+    kill_with_frames(
+        &l.join("registry").join("registry.sqlite"),
+        FUTURE_2X,
+        false,
+    );
+    let e = probe(&n, &l, None).unwrap_err();
+    assert_eq!(
+        (e.code, e.scope),
+        ("LEGACY_SCHEMA_UNKNOWN", "registry"),
+        "{e:?}"
+    );
+}
+
+/// 空的（冷的）`-journal` 不是热日志：照样按 `immutable` 读，什么都不动。
+#[test]
+fn a_cold_journal_beside_a_published_store_is_ignored() {
+    let d = dir("cold-journal");
+    let (n, l) = (d.join("n"), d.join("l"));
+    let layout = Layout::new(&n);
+    cv::fresh_install(&layout, G, AT).unwrap();
+    fs::write(with_suffix(&layout.database(), "-journal"), b"").unwrap();
+    let r = probe(&n, &l, None).unwrap();
+    assert_eq!(r.startup, "PUBLISHED");
 }
 
 fn scopes(databases: &[Checked]) -> Vec<&'static str> {
@@ -226,8 +340,8 @@ fn a_published_store_must_carry_only_migrations_this_build_knows() {
     assert!(e.detail.contains("differs"), "{e:?}");
 }
 
-/// 上次写到一半被杀、`N` 的库旁留着热回滚日志：探测在旧版还在服务时运行，不许替它回滚（那是写 `N`），
-/// 判定照实报 DAMAGED。回滚留给新版拿到准入之后的启动（W8 关口）。
+/// 上次写到一半被杀、`N` 的库旁留着热回滚日志：探测不许替它回滚（那是写 `N`），在副本上回滚了再读，
+/// 读到的是被杀前已提交的状态；源库与日志原样留给新版启动时回滚（W8 关口）。
 #[test]
 fn a_published_store_with_an_unrolled_journal_is_left_as_it_is() {
     let d = dir("hot-journal");
@@ -239,8 +353,8 @@ fn a_published_store_with_an_unrolled_journal_is_left_as_it_is() {
     fs::copy(&db, &side).unwrap();
     let c = Connection::open(&side).unwrap();
     c.execute_batch(
-        "PRAGMA journal_mode = DELETE; PRAGMA cache_size = 1; BEGIN IMMEDIATE;
-         CREATE TABLE hot_journal_probe(x); UPDATE app_meta SET generation = 'NOT-COMMITTED';",
+        "PRAGMA journal_mode = DELETE; CREATE TABLE hot_journal_probe(x);
+         PRAGMA cache_size = 1; BEGIN IMMEDIATE; UPDATE app_meta SET generation = 'NOT-COMMITTED';",
     )
     .unwrap();
     for _ in 0..2000 {
@@ -259,7 +373,7 @@ fn a_published_store_with_an_unrolled_journal_is_left_as_it_is() {
     drop(c);
 
     let r = probe(&n, &l, None).unwrap();
-    assert_eq!(r.startup, "DAMAGED");
+    assert_eq!(r.startup, "PUBLISHED");
     assert!(PathBuf::from(format!("{}-journal", db.display())).exists());
 }
 

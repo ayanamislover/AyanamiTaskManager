@@ -870,7 +870,7 @@ async function scenarioRecover(executable: string): Promise<void> {
         : "";
       check(
         "smoke 宿主的窗口显示恢复页，命令是它自带的 atm.exe recover --offline",
-        visible && /atm\.exe" recover --offline$/u.test(command),
+        visible && /^& '.+\\atm\.exe' recover --offline$/u.test(command),
         command,
       );
     } finally {

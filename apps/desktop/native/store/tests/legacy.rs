@@ -5257,11 +5257,11 @@ mod w3d {
         assert_eq!(cv::decide(&n, true), Startup::Published(m));
     }
 
-    /// 服务第一次打开发布物（DELETE 切 WAL、写事务）时被杀，留下热回滚日志：这是正常的崩溃恢复，不是库坏了。
-    /// 判定按 S6 照常放行，日志被回滚，事务里没提交的改动不在（W8 关口掉电复现：只读打开报
-    /// `attempt to write a readonly database`，被判成 Damaged）。
+    /// 服务第一次打开发布物（DELETE 切 WAL、写事务）时被杀，留下热回滚日志：这是正常的崩溃恢复，不是库坏了
+    /// （W8 关口掉电复现：只读打开报 `attempt to write a readonly database`，被判成 Damaged）。
+    /// 判定在副本上回滚了再读，按 S6 照常放行；库与日志一字节不动，留给服务正常打开时回滚（peer r1 P1-01 / P1-02）。
     #[test]
-    fn a_hot_journal_left_by_a_kill_is_rolled_back_under_admission_not_damaged() {
+    fn a_hot_journal_left_by_a_kill_is_read_through_a_copy_not_damaged() {
         let (f, root) = json_fixture("w8-hot-journal");
         let n = layout(&f, "n");
         let m = run(&n, &root, G1, None).unwrap();
@@ -5272,8 +5272,8 @@ mod w3d {
         fs::copy(n.database(), &side).unwrap();
         let c = Connection::open(&side).unwrap();
         c.execute_batch(
-            "PRAGMA journal_mode = DELETE; PRAGMA cache_size = 1; BEGIN IMMEDIATE;
-             CREATE TABLE hot_journal_probe(x); UPDATE app_meta SET generation = 'NOT-COMMITTED';",
+            "PRAGMA journal_mode = DELETE; CREATE TABLE hot_journal_probe(x);
+             PRAGMA cache_size = 1; BEGIN IMMEDIATE; UPDATE app_meta SET generation = 'NOT-COMMITTED';",
         )
         .unwrap();
         for _ in 0..2000 {
@@ -5288,30 +5288,92 @@ mod w3d {
         fs::copy(format!("{}-journal", side.display()), &journal).unwrap();
         drop(c);
         let _ = fs::remove_file(&side);
-        // 判定是只读的（安装探测也用它，探测时旧版还在服务）：读不出，而且不动日志与库。
-        let (db_before, journal_before) =
-            (fs::read(n.database()).unwrap(), fs::read(&journal).unwrap());
+        // 主文件里是半截的页：不看日志直接读，读到的是没提交的值。判定不能走这条快路。
+        let torn: String = atm_store::detached::open_immutable(&n.database())
+            .unwrap()
+            .query_row("SELECT generation FROM app_meta", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(torn, "NOT-COMMITTED");
+        let before = data_files(&n);
+        assert_eq!(cv::decide(&n, true), Startup::Published(m));
+        assert_eq!(data_files(&n), before, "decide wrote beside the database");
+        assert!(journal.exists());
+        assert!(
+            !n.runtime().join("detached-read").exists(),
+            "decide left its copy behind"
+        );
+    }
+
+    /// `N\data\` 里每个文件的内容。
+    fn data_files(n: &Layout) -> BTreeMap<String, Vec<u8>> {
+        fs::read_dir(n.data())
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .filter(|p| p.is_file())
+            .map(|p| {
+                (
+                    p.file_name().unwrap().to_string_lossy().into_owned(),
+                    fs::read(&p).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    /// peer r1 P1-02 的反例：WAL 里有已提交的帧、主文件 `app_meta` 那一页坏了、旁边还有一个空的（冷的）`-journal`。
+    /// 判定报 Damaged，库、`-wal`、`-journal` 一字节不动，不多出文件——读写连接关闭时的 checkpoint 会改掉它们。
+    #[test]
+    fn a_damaged_database_with_frames_and_a_cold_journal_is_left_as_it_is() {
+        let (f, root) = json_fixture("w8-cold-journal-damaged");
+        let n = layout(&f, "n");
+        let m = run(&n, &root, G1, None).unwrap();
+        let db = n.database();
+        let (root_page, page_size) = {
+            let c = Connection::open(&db).unwrap();
+            let root_page: i64 = c
+                .query_row(
+                    "SELECT rootpage FROM sqlite_master WHERE name = 'app_meta'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let page_size: i64 = c.query_row("PRAGMA page_size", [], |r| r.get(0)).unwrap();
+            (root_page as usize, page_size as usize)
+        };
+        // 被杀的服务：WAL 里有一张新表与一行，主文件里没有。
+        let side = f.dir.join("cold-journal-side");
+        let _ = fs::remove_dir_all(&side);
+        fs::create_dir_all(&side).unwrap();
+        let c = Connection::open(&db).unwrap();
+        c.execute_batch(
+            "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+             CREATE TABLE wal_only(x); INSERT INTO wal_only VALUES ('committed in the wal');",
+        )
+        .unwrap();
+        let wal = PathBuf::from(format!("{}-wal", db.display()));
+        fs::copy(&db, side.join("db")).unwrap();
+        fs::copy(&wal, side.join("wal")).unwrap();
+        drop(c);
+        let _ = fs::remove_file(PathBuf::from(format!("{}-shm", db.display())));
+        fs::copy(side.join("db"), &db).unwrap();
+        fs::copy(side.join("wal"), &wal).unwrap();
+        fs::remove_dir_all(&side).unwrap();
+        assert!(fs::metadata(&wal).unwrap().len() > 0);
+        let mut bytes = fs::read(&db).unwrap();
+        bytes[(root_page - 1) * page_size..root_page * page_size].fill(0x5a);
+        fs::write(&db, &bytes).unwrap();
+        fs::write(PathBuf::from(format!("{}-journal", db.display())), b"").unwrap();
+
+        let before = data_files(&n);
         match cv::decide(&n, true) {
-            Startup::Damaged { reason, .. } => assert!(reason.contains("readonly"), "{reason}"),
+            Startup::Damaged { generation, .. } => assert_eq!(generation, m.generation),
             other => panic!("{other:?}"),
         }
         assert_eq!(
-            fs::read(n.database()).unwrap(),
-            db_before,
-            "decide wrote the database"
+            data_files(&n),
+            before,
+            "decide changed the damaged database"
         );
-        assert_eq!(
-            fs::read(&journal).unwrap(),
-            journal_before,
-            "decide touched the journal"
-        );
-
-        // 拿到准入的 runtime 先回滚，判定照常放行，事务里没提交的改动不在。
-        assert_eq!(cv::roll_back_interrupted_write(&n), Ok(true));
-        assert!(!journal.exists(), "the hot journal was rolled back");
-        assert_eq!(cv::decide(&n, true), Startup::Published(m));
-        assert_eq!(generation_of(&n.database()), G1);
-        assert_eq!(cv::roll_back_interrupted_write(&n), Ok(false));
+        assert!(!n.runtime().join("detached-read").exists());
     }
 
     /// 封存被杀在任何一步，再调用都按记下的种类与目标续做；目标名撞了换名，目标里已有的东西不覆盖。

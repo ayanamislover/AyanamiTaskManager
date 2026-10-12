@@ -7,14 +7,14 @@
 //! 的熔断、`runtime\user-quit.json` 的用户退出标记。
 //!
 //! 只读的意思是不改任何文件，也不取服务的准入锁（取了会让同时启动的服务以为另一个实例在跑）。
-//! 整库没有 `-wal` 时按 `immutable` 打开，SQLite 不会建 `-wal` / `-shm`；有 `-wal` 时说明服务在跑或上次没正常退出，
-//! 按只读打开，读得到 `-wal` 里已提交的内容。服务在跑时照样能用：诊断挂住的服务正需要它。
-//! 有 `-journal` 时也不用 `immutable`：那是上次写到一半被中断留下的回滚日志，`immutable` 会无视它、读到半截的页。
-//! 只读连接回滚不了它，打不开时如实说「正常启动一次会回滚」，不说库坏了（W8 关口，ATM-D-529）。
+//! 整库经 [`atm_store::detached`] 读：没有 `-wal` 帧、没有热回滚日志时按 `immutable` 读源文件；否则（服务在跑、
+//! 上次没正常退出、上次写到一半被杀）把库与 `-wal`、热日志复制到 `%TEMP%\atm-doctor-read\` 下读副本，读完即删。
+//! 只读连接对 WAL 库并不只读，会建、改 `-shm`（W8 关口 peer r1 P1-01）。服务在跑时照样能用：诊断挂住的服务正需要它。
+//! 热回滚日志如实报出（`interrupted_write`），读的是 SQLite 在副本上回滚之后的状态；它不算问题，正常启动时服务会回滚。
 
 use crate::discover::{self, Unavailable};
 use atm_store::conversion::{Layout, ManifestState, read_manifest};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 
@@ -153,18 +153,19 @@ fn database(path: &Path, problems: &mut Vec<String>) -> Value {
         path.file_name().unwrap_or_default().to_string_lossy()
     ));
     let wal_bytes = std::fs::metadata(&wal).ok().map(|m| m.len());
-    let journal = path.with_file_name(format!(
-        "{}-journal",
-        path.file_name().unwrap_or_default().to_string_lossy()
-    ));
-    let journal_bytes = std::fs::metadata(&journal).ok().map(|m| m.len());
+    let interrupted = atm_store::detached::hot_journal(path);
     let mut out = json!({
         "exists": true,
         "size_bytes": meta.len(),
         "wal_bytes": wal_bytes,
-        "journal_bytes": journal_bytes,
+        "interrupted_write": interrupted,
     });
-    match read_database(path, wal_bytes.is_none() && journal_bytes.is_none()) {
+    let scratch = std::env::temp_dir().join("atm-doctor-read");
+    let read = atm_store::detached::read(path, &scratch, read_database).map_err(|e| match e {
+        atm_store::detached::Error::Open(e) => e,
+        atm_store::detached::Error::Read(e) => e.to_string(),
+    });
+    match read {
         Ok(facts) => {
             if facts["quick_check"] != "ok" {
                 problems.push(format!("整库完整性检查没有通过：{}", facts["quick_check"]));
@@ -173,44 +174,19 @@ fn database(path: &Path, problems: &mut Vec<String>) -> Value {
                 o.extend(f);
             }
         }
-        Err(e) if journal_bytes.is_some() => {
-            problems.push(format!(
-                "整库旁边有没回滚的日志 {}：上次写到一半被中断。正常启动一次 ATM 会先回滚它再用；\
-                 这不是库坏了，不要因此从备份恢复（只读诊断回滚不了它：{e}）",
-                journal.display()
-            ));
-            out["error"] = json!(e.to_string());
-        }
         Err(e) => {
-            problems.push(format!("整库打不开：{e}"));
-            out["error"] = json!(e.to_string());
+            problems.push(if interrupted {
+                format!("整库打不开：{e}（库旁有上次写入中断留下的回滚日志，读的是回滚之后的副本）")
+            } else {
+                format!("整库打不开：{e}")
+            });
+            out["error"] = json!(e);
         }
     }
     out
 }
 
-fn read_database(path: &Path, immutable: bool) -> rusqlite::Result<Value> {
-    let mut uri = String::from("file:///");
-    for c in path.to_string_lossy().replace('\\', "/").chars() {
-        match c {
-            '?' => uri.push_str("%3f"),
-            '#' => uri.push_str("%23"),
-            '%' => uri.push_str("%25"),
-            ' ' => uri.push_str("%20"),
-            c => uri.push(c),
-        }
-    }
-    uri.push_str(if immutable {
-        "?mode=ro&immutable=1"
-    } else {
-        "?mode=ro"
-    });
-    let conn = Connection::open_with_flags(
-        &uri,
-        OpenFlags::SQLITE_OPEN_READ_ONLY
-            | OpenFlags::SQLITE_OPEN_URI
-            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )?;
+fn read_database(conn: &Connection) -> rusqlite::Result<Value> {
     conn.busy_timeout(std::time::Duration::from_secs(2))?;
     conn.pragma_update(None, "query_only", true)?;
     let (schema_version, generation, converted_from) = conn.query_row(
