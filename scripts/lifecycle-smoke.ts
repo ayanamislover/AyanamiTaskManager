@@ -35,6 +35,7 @@ import {
   waitUntil,
   type SmokeHost,
 } from "./smoke-host.js";
+import { resolveSystemTool } from "./system-tar.js";
 
 const native = join(repoRoot, "apps", "desktop", "native");
 const reportPath = join(outputRoot, "lifecycle-smoke-report.json");
@@ -267,7 +268,10 @@ async function scenarios(executable: string, box: ReturnType<typeof sandbox>): P
 
 /** 这次登录：`whoami /logonid` 的 `S-1-5-5-X-Y` 写成宿主记的样子（X、Y 各 8 位十六进制）。 */
 function thisLogon(): string | null {
-  const sid = spawnSync("whoami.exe", ["/logonid"], { encoding: "utf8", windowsHide: true })
+  const sid = spawnSync(resolveSystemTool("whoami"), ["/logonid"], {
+    encoding: "utf8",
+    windowsHide: true,
+  })
     .stdout.trim()
     .match(/^S-1-5-5-(\d+)-(\d+)$/u);
   if (sid === null) return null;

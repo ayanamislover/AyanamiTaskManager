@@ -51,6 +51,7 @@ import {
   nativeRelease,
   packageNative,
 } from "./package-native.js";
+import { resolveSystemTool } from "./system-tar.js";
 
 const root = resolve(process.cwd());
 const drillRoot = resolve(root, "output", "drill");
@@ -443,7 +444,10 @@ function keepaliveOff(sandbox: Sandbox, why: string, label = ""): void {
 
 /** This logon as the launcher and the host name it: `whoami /logonid` = S-1-5-5-X-Y, X and Y in 8 hex digits. */
 function thisLogon(): string | null {
-  const sid = spawnSync("whoami.exe", ["/logonid"], { encoding: "utf8", windowsHide: true })
+  const sid = spawnSync(resolveSystemTool("whoami"), ["/logonid"], {
+    encoding: "utf8",
+    windowsHide: true,
+  })
     .stdout.trim()
     .match(/^S-1-5-5-(\d+)-(\d+)$/u);
   if (sid === null) return null;
