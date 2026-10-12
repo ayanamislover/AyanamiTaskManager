@@ -50,7 +50,7 @@ describe("预算判定（08 §3）", () => {
       conversionMs: 60_000,
       idlePrivate: 40 * MIB,
       agentPrivate: 60 * MIB,
-      closedOverIdle: 15 * MIB,
+      closedOverIdle: 50 * MIB,
       closedDrift: 5 * MIB,
       backgroundHealthMs: 500,
       windowVisibleMs: 1_200,
@@ -75,7 +75,7 @@ describe("预算判定（08 §3）", () => {
     const byItem = Object.fromEntries(verdicts.map((verdict) => [verdict.item, verdict]));
     expect(byItem["冷启动 · 后台健康（中位）"]).toMatchObject({ measured: 220, samples: 5 });
     expect(byItem["冷启动 · 窗口可见（中位）"]).toMatchObject({ measured: 1000, samples: 5 });
-    expect(byItem["关开窗不上涨"]!.measured).toBe(2);
+    expect(byItem["关开窗不上涨"]!.measured).toBe(1.5);
   });
 
   it("中位数不被一轮慢的拖过线，但中位数本身过线就红", () => {
@@ -108,16 +108,27 @@ describe("预算判定（08 §3）", () => {
     }
   });
 
-  it("关窗后高出空闲 15 MiB 以上、或一轮比一轮涨超过 5 MiB，都红", () => {
+  const closedCycles = (values: number[]) =>
+    values.map((value) => ({ closed: series(value * MIB), webviewGoneMs: 300 }));
+
+  it("关窗后高出空闲 50 MiB 以上、或第 2 轮起涨超过 5 MiB，都红", () => {
     const high = passing();
-    high.memory!.cycles[3]!.closed = series(26 * MIB);
+    high.memory!.cycles[3]!.closed = series(61 * MIB);
     expect(failing(high)).toContain("关窗后 Private");
     const drift = passing();
-    drift.memory!.cycles = [10, 12, 14, 16, 16].map((value) => ({
-      closed: series(value * MIB),
-      webviewGoneMs: 300,
-    }));
+    drift.memory!.cycles = closedCycles([10, 12, 14, 16, 18]);
     expect(failing(drift)).toEqual(["关开窗不上涨"]);
+  });
+
+  // ATM-D-492：第 1 轮是系统组件（IME、DirectX、WebView2 嵌入层）首次加载进主进程，不作基线。
+  it("第 1 轮的跳升不算上涨，之后持平就达标", () => {
+    const input = passing();
+    input.memory!.cycles = closedCycles([48.2, 53.9, 53.7, 52.0, 53.8]);
+    input.memory!.idle = series(7.6 * MIB);
+    expect(failing(input)).toEqual([]);
+    // 只有两轮时看不出第 2 轮之后的趋势：不算达标。
+    input.memory!.cycles = closedCycles([48.2, 53.9]);
+    expect(failing(input)).toEqual(["关开窗不上涨"]);
   });
 
   it("没量到就不算达标：缺转换、缺内存、缺冷启动样本都红", () => {

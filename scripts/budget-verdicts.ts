@@ -10,7 +10,9 @@ export const BUDGET = {
   conversionMs: 60_000,
   idlePrivate: 40 * MIB,
   agentPrivate: 60 * MIB,
-  closedOverIdle: 15 * MIB,
+  // 关窗后两条于 2026-10-12 经用户同意修订（ATM-D-492）：开窗时 Windows 往主进程加载的 IME/TSF、
+  // D2D/DWrite/D3D11/DComp 与 WebView2 嵌入层关窗后不卸载。原线是 +15 MiB、末轮 ≤ 第 1 轮 + 5 MiB。
+  closedOverIdle: 50 * MIB,
   closedDrift: 5 * MIB,
   backgroundHealthMs: 500,
   windowVisibleMs: 1_200,
@@ -121,24 +123,25 @@ export function budgetVerdicts(input: VerdictInput, samplesPerScene = 5): Verdic
   const closedMax = closed.length === 0 ? null : Math.max(...closed);
   line(
     "关窗后 Private",
-    "每轮 ≤ 后台空闲 + 15 MiB",
+    "每轮 ≤ 后台空闲 + 50 MiB",
     closedMax === null ? null : mib(closedMax),
     closed.length,
     idle !== null &&
       closed.length > 0 &&
       closed.every((value) => value <= idle + BUDGET.closedOverIdle),
   );
-  const first = closed[0];
+  // 第 1 轮是系统组件首次加载进主进程，不作基线：从第 2 轮起看是否还在涨。
+  const base = closed[1];
   const last = closed.at(-1);
   line(
     "关开窗不上涨",
-    "最后一轮 ≤ 第一轮 + 5 MiB",
-    first === undefined || last === undefined ? null : mib(last - first),
+    "最后一轮 ≤ 第 2 轮 + 5 MiB",
+    base === undefined || last === undefined ? null : mib(last - base),
     closed.length,
-    closed.length >= 2 &&
-      first !== undefined &&
+    closed.length >= 3 &&
+      base !== undefined &&
       last !== undefined &&
-      last <= first + BUDGET.closedDrift,
+      last <= base + BUDGET.closedDrift,
   );
   const gone = (memory?.cycles ?? []).map((cycle) => cycle.webviewGoneMs);
   line(
