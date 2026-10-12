@@ -141,6 +141,27 @@ async function untilLogged(host: Host, needle: string, timeoutMs: number): Promi
   return false;
 }
 
+/**
+ * 重启后没变健康时留下的线索：下一轮会清空 N，所以当场记下进程是否还在、M / A / 启动状态与宿主日志的末尾
+ * （W8 关口第 3 次完整发布链：PUBLISHED 点重启后不健康，证据被下一轮清掉）。不读凭据：descriptor 不看。
+ */
+function unhealthyDetail(host: Host): Record<string, unknown> {
+  const tail = (path: string, lines: number) =>
+    existsSync(path) ? readFileSync(path, "utf8").trim().split(/\r?\n/u).slice(-lines) : null;
+  return {
+    exitCode: host.child.exitCode,
+    manifest: readJson<{ phase: string; generation: string }>(join(n, "conversion.json")),
+    authority: readJson<{ authority: string; by: string; generation: string }>(
+      join(n, "authority.json"),
+    ),
+    startupState: readJson<{ state: string; reason: string }>(
+      join(n, "runtime", "startup-state.json"),
+    ),
+    progress: readProgress(),
+    hostLog: tail(join(n, "logs", "host.log"), 12),
+  };
+}
+
 async function untilHealthy(host: Host, timeoutMs: number): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
@@ -273,7 +294,15 @@ async function cutDuringConversion(executable: string, reference: Reference): Pr
 
       const restarted = startHost(executable);
       try {
-        if (!check(`${label}：原样重启后健康`, await untilHealthy(restarted, 180_000))) continue;
+        const restartedHealthy = await untilHealthy(restarted, 180_000);
+        if (
+          !check(
+            `${label}：原样重启后健康`,
+            restartedHealthy,
+            restartedHealthy ? undefined : unhealthyDetail(restarted),
+          )
+        )
+          continue;
         const manifest = readJson<Manifest>(join(n, "conversion.json"));
         check(
           `${label}：conversion.json 是 PUBLISHED`,
@@ -551,7 +580,15 @@ async function scenarioWrites(executable: string): Promise<void> {
     );
 
     host = startHost(executable);
-    if (!check(`第 ${round} 轮：原样重启后健康`, await untilHealthy(host, 60_000))) return;
+    const restartedHealthy = await untilHealthy(host, 60_000);
+    if (
+      !check(
+        `第 ${round} 轮：原样重启后健康`,
+        restartedHealthy,
+        restartedHealthy ? undefined : unhealthyDetail(host),
+      )
+    )
+      return;
     const health = integrity();
     check(
       `第 ${round} 轮：库 integrity_check 为 ok`,

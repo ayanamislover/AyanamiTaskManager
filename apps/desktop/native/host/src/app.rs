@@ -41,6 +41,18 @@ const BOOT_RETRY_WINDOW: Duration = Duration::from_secs(600);
 const BOOT_RETRY_LIMIT: usize = 5;
 /// The 2.x service has not quiesced yet: look again this often (not counted as a failure).
 const LEGACY_RECHECK: Duration = Duration::from_secs(5);
+/// The published database could not be read (07 S5'): look again after these waits before telling
+/// the user to restore. Another program (antivirus, backup software) may hold the file for a moment;
+/// a damaged database stays damaged, so a few seconds are all this costs.
+const DAMAGED_RETRY: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(5)];
+
+/// The wait before the next look at an unreadable database (counting it in `attempts`), or `None` once
+/// the user has to act.
+fn damaged_retry(attempts: &mut usize) -> Option<Duration> {
+    let wait = DAMAGED_RETRY.get(*attempts).copied()?;
+    *attempts += 1;
+    Some(wait)
+}
 const MAX_QUEUED_CALLS: usize = 256;
 /// 同时在途的界面请求（W5e）：超过就回 SERVICE_BUSY，不排队（一个失控的渲染端占不满入口的工作线程）。
 const MAX_UI_IN_FLIGHT: usize = 64;
@@ -142,6 +154,8 @@ pub struct App {
     /// The running (or last) boot's hand-over slot.
     boot: Option<Arc<BootSlot<Booted>>>,
     boot_failures: Vec<Instant>,
+    /// Boots that found the published database unreadable since the last serving one ([`damaged_retry`]).
+    damaged_attempts: usize,
     /// The last reason the 2.x service was waited for, logged once per change.
     legacy_wait: Option<String>,
     queued: Vec<QueuedCall>,
@@ -292,6 +306,19 @@ mod phase_tests {
         assert_eq!(code(Phase::Starting), None);
         assert_eq!(code(Phase::Serving { open: true }), None);
     }
+
+    /// 库读不出时先再看两次（2 s、5 s），之后才停下等用户恢复。
+    #[test]
+    fn an_unreadable_database_is_looked_at_twice_more_before_the_user_is_asked() {
+        use super::damaged_retry;
+        use std::time::Duration;
+        let mut attempts = 0;
+        assert_eq!(damaged_retry(&mut attempts), Some(Duration::from_secs(2)));
+        assert_eq!(damaged_retry(&mut attempts), Some(Duration::from_secs(5)));
+        assert_eq!(damaged_retry(&mut attempts), None);
+        assert_eq!(damaged_retry(&mut attempts), None);
+        assert_eq!(attempts, 2);
+    }
 }
 
 #[cfg(test)]
@@ -414,6 +441,7 @@ pub fn run(
         boot_attempt: 0,
         boot: None,
         boot_failures: Vec::new(),
+        damaged_attempts: 0,
         legacy_wait: None,
         queued: Vec::new(),
         ui: None,
@@ -565,6 +593,7 @@ impl App {
         }
         match booted.0 {
             Ok(Started::Serving(mut serving)) => {
+                self.damaged_attempts = 0;
                 crate::log(
                     &self.layout.v3_root,
                     &format!(
@@ -616,6 +645,19 @@ impl App {
                 self.service = Service::Conflict { held: conflicted };
                 self.answer_queued();
                 self.source_settled(Some(state));
+            }
+            Err(BootError::Damaged { generation, reason })
+                if let Some(wait) = damaged_retry(&mut self.damaged_attempts) =>
+            {
+                crate::log(
+                    &self.layout.v3_root,
+                    &format!(
+                        "DATABASE_DAMAGED: generation {generation}: {reason}; looking again in {} s",
+                        wait.as_secs()
+                    ),
+                );
+                self.service = Service::Retrying;
+                after(wait, &self.proxy, UserEvent::RetryService);
             }
             Err(BootError::Damaged { generation, reason }) => {
                 crate::log(

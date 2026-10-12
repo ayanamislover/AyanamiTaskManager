@@ -594,13 +594,21 @@ fn published_generation(layout: &Layout) -> Option<String> {
 }
 
 /// 同上，读不出时说明原因（[`Startup::Damaged`] 带给用户）。
+///
+/// 读写打开（不建文件）：服务第一次打开发布物时要把它从 DELETE 切到 WAL，这一刻被杀会留下热回滚日志；
+/// 只读连接回滚不了它，报 `attempt to write a readonly database`，于是一次正常的崩溃恢复被当成了库坏了
+/// （W8 关口第 3 次完整发布链之后的掉电复现）。读写连接按 SQLite 的规则先回滚日志（或恢复 WAL），
+/// 再读 generation。这时已经拿到独占准入，`M` 可信，没有别人在用这个库。
 fn read_published_generation(layout: &Layout) -> std::result::Result<String, String> {
     let db = layout.database();
     if !db.is_file() {
         return Err("the database is missing".into());
     }
-    let c = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)
-        .map_err(|e| format!("the database cannot be opened: {e}"))?;
+    let c = Connection::open_with_flags(
+        &db,
+        OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|e| format!("the database cannot be opened: {e}"))?;
     c.query_row("SELECT generation FROM app_meta", [], |r| r.get(0))
         .map_err(|e| format!("the database cannot be read: {e}"))
 }
@@ -993,8 +1001,10 @@ pub enum Step {
     Verified,
     /// `M.phase = PUBLISHING` 写完、改名之前。
     BeforeRename,
-    /// 改名成功之后、`M.phase = PUBLISHED` 之前（F5）。
+    /// 改名成功之后、`A` 与 `M.phase = PUBLISHED` 之前（F5）。
     Renamed,
+    /// `A = v3 by publish` 写完、`M.phase = PUBLISHED` 之前（W8 关口掉电演练）。
+    AuthorityWritten,
 }
 
 pub use crate::progress::ProgressFn;
@@ -1284,7 +1294,7 @@ fn attempt(layout: &Layout, opts: RunOptions<'_>, m: &mut Manifest) -> Result<Ma
     }
     rename_durable(&data, &layout.data(), false)?;
     checkpoint(opts.hook, Step::Renamed, "PUBLISHING")?;
-    publish(layout, m, opts.at)?;
+    publish(layout, m, opts.at, opts.hook)?;
     crate::progress::set("PUBLISHED", 1, 1);
     Ok(m.clone())
 }
@@ -1303,11 +1313,18 @@ fn seal_data_only(layout: &Layout, at: &str) -> Result<()> {
     Ok(())
 }
 
-/// PUBLISHED：`M.phase = PUBLISHED`，再写 `A = v3 by publish`，最后删掉 staging 里的源副本。
-fn publish(layout: &Layout, m: &mut Manifest, at: &str) -> Result<()> {
-    m.phase = Phase::Published;
-    m.published_at = Some(at.to_string());
-    write_manifest(layout, m)?;
+/// PUBLISHED：先写 `A = v3 by publish`（绑定这一代），再写 `M.phase = PUBLISHED`，最后删掉 staging 里的源副本。
+///
+/// 顺序反过来时，强杀在两次写之间会留下 `M = PUBLISHED`、没有 `A`：下次启动 §6 把 `A` 缺失当成冲突，
+/// 首次转换刚做完就要用户选数据来源（W8 关口第 3 次完整发布链的掉电演练）。现在这一刻 `M` 还是 PUBLISHING，
+/// 发布物的身份对得上，下次启动按 S4 补完。于是 `M = PUBLISHED` 时 `A` 一定写过：之后它缺失或损坏，
+/// 才是 B3 说的「不猜」。setup 只在 `M` 已是 PUBLISHED 时写回滚用的 `A`（07 §8），这里先写的 `A` 不影响它。
+fn publish(
+    layout: &Layout,
+    m: &mut Manifest,
+    at: &str,
+    hook: &mut dyn FnMut(Step) -> bool,
+) -> Result<()> {
     write_authority(
         layout,
         &Authority {
@@ -1319,6 +1336,10 @@ fn publish(layout: &Layout, m: &mut Manifest, at: &str) -> Result<()> {
             accepted_source_digest: None,
         },
     )?;
+    checkpoint(hook, Step::AuthorityWritten, "PUBLISHING")?;
+    m.phase = Phase::Published;
+    m.published_at = Some(at.to_string());
+    write_manifest(layout, m)?;
     let _ = std::fs::remove_dir_all(layout.staging(&m.generation).join("src"));
     Ok(())
 }
@@ -1328,7 +1349,7 @@ pub fn finish_publishing(layout: &Layout, at: &str) -> Result<Manifest> {
     let ManifestState::Present(mut m) = read_manifest(layout) else {
         return Err(Error::Io(std::io::Error::other("no manifest to finish")));
     };
-    publish(layout, &mut m, at)?;
+    publish(layout, &mut m, at, &mut |_| true)?;
     Ok(m)
 }
 
@@ -1368,7 +1389,7 @@ pub fn fresh_install(layout: &Layout, generation: &str, at: &str) -> Result<Mani
     };
     write_manifest(layout, &m)?;
     rename_durable(&data, &layout.data(), false)?;
-    publish(layout, &mut m, at)?;
+    publish(layout, &mut m, at, &mut |_| true)?;
     let _ = std::fs::remove_dir_all(&staging);
     Ok(m)
 }

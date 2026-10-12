@@ -4933,7 +4933,8 @@ mod w3d {
     }
 
     /// 每个阶段被杀之后：SNAPSHOT / IMPORT / VERIFY 与改名之前按 S3 丢弃重来，改名之后按 S4 补完；
-    /// 最后都落到同一份业务内容，数据根不变。
+    /// 最后都落到同一份业务内容，数据根不变。`A` 写完、`M` 还没写 PUBLISHED 时被杀也按 S4 补完，不会因为
+    /// `M = PUBLISHED` 而 `A` 缺失被当成冲突（W8 关口掉电演练）。
     #[test]
     fn every_interruption_resumes_to_the_same_publication() {
         let (f, root) = json_fixture("w3d-resume");
@@ -4947,6 +4948,7 @@ mod w3d {
             Step::Verified,
             Step::BeforeRename,
             Step::Renamed,
+            Step::AuthorityWritten,
         ]
         .into_iter()
         .enumerate()
@@ -4957,7 +4959,9 @@ mod w3d {
                 other => panic!("{step:?}: {other:?}"),
             }
             let m = match cv::decide(&n, true) {
-                Startup::Restart { generation } if step != Step::Renamed => {
+                Startup::Restart { generation }
+                    if !matches!(step, Step::Renamed | Step::AuthorityWritten) =>
+                {
                     assert_eq!(generation, G1);
                     assert!(!n.data().exists(), "{step:?}: nothing may be published yet");
                     cv::discard_attempt(&n, &generation)
@@ -4969,6 +4973,14 @@ mod w3d {
                 Startup::FinishPublishing { generation } if step == Step::Renamed => {
                     assert_eq!(generation, G1);
                     assert_eq!(cv::read_authority(&n), AuthorityState::Missing);
+                    cv::finish_publishing(&n, AT).unwrap_or_else(|e| panic!("{step:?}: {e:?}"))
+                }
+                Startup::FinishPublishing { generation } if step == Step::AuthorityWritten => {
+                    assert_eq!(generation, G1);
+                    assert!(
+                        matches!(cv::read_authority(&n), AuthorityState::Present(a) if a.authority == "v3" && a.generation.as_deref() == Some(G1)),
+                        "{step:?}: A is written before M"
+                    );
                     cv::finish_publishing(&n, AT).unwrap_or_else(|e| panic!("{step:?}: {e:?}"))
                 }
                 other => panic!("{step:?}: {other:?}"),
@@ -5243,6 +5255,53 @@ mod w3d {
 
         fs::write(&db, &good).unwrap();
         assert_eq!(cv::decide(&n, true), Startup::Published(m));
+    }
+
+    /// 服务第一次打开发布物（DELETE 切 WAL、写事务）时被杀，留下热回滚日志：这是正常的崩溃恢复，不是库坏了。
+    /// 判定按 S6 照常放行，日志被回滚，事务里没提交的改动不在（W8 关口掉电复现：只读打开报
+    /// `attempt to write a readonly database`，被判成 Damaged）。
+    #[test]
+    fn a_hot_journal_left_by_a_kill_is_recovered_not_damaged() {
+        let (f, root) = json_fixture("w8-hot-journal");
+        let n = layout(&f, "n");
+        let m = run(&n, &root, G1, None).unwrap();
+        // 在副本上开一个不提交的写事务，脏页溢写进主文件、日志变「热」；趁事务还开着把两个文件拷回发布物，
+        // 等于进程在这一刻被杀。
+        let side = f.dir.join("hot-journal-side.sqlite");
+        let _ = fs::remove_file(&side);
+        fs::copy(n.database(), &side).unwrap();
+        let c = Connection::open(&side).unwrap();
+        c.execute_batch(
+            "PRAGMA journal_mode = DELETE; PRAGMA cache_size = 1; BEGIN IMMEDIATE;
+             CREATE TABLE hot_journal_probe(x); UPDATE app_meta SET generation = 'NOT-COMMITTED';",
+        )
+        .unwrap();
+        for _ in 0..2000 {
+            c.execute(
+                "INSERT INTO hot_journal_probe VALUES (?1)",
+                [&"y".repeat(500)],
+            )
+            .unwrap();
+        }
+        let journal = PathBuf::from(format!("{}-journal", n.database().display()));
+        fs::copy(&side, n.database()).unwrap();
+        fs::copy(format!("{}-journal", side.display()), &journal).unwrap();
+        drop(c);
+        let _ = fs::remove_file(&side);
+        // 只读打开确实过不去：这就是被误判的那种状态。
+        let ro =
+            Connection::open_with_flags(n.database(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+                .unwrap();
+        assert!(
+            ro.query_row("SELECT generation FROM app_meta", [], |r| r
+                .get::<_, String>(0))
+                .is_err()
+        );
+        drop(ro);
+
+        assert_eq!(cv::decide(&n, true), Startup::Published(m));
+        assert!(!journal.exists(), "the hot journal was rolled back");
+        assert_eq!(generation_of(&n.database()), G1);
     }
 
     /// 封存被杀在任何一步，再调用都按记下的种类与目标续做；目标名撞了换名，目标里已有的东西不覆盖。
@@ -6953,7 +7012,8 @@ mod fault_matrix {
                 other => panic!("{other:?}"),
             })
             .collect();
-        assert_eq!(after, [&n.manifest(), &n.authority()]);
+        // 先 `A` 后 `M`（07 §3 PUBLISHED 一行的 W8 关口修订）：`M = PUBLISHED` 时 `A` 一定写过。
+        assert_eq!(after, [&n.authority(), &n.manifest()]);
         assert!(
             ops[..publish]
                 .iter()
@@ -7130,7 +7190,8 @@ mod fault_matrix {
         restarts_cleanly(&n, &root, &clean, &before);
     }
 
-    /// 发布物已经改名到位，之后写 `M = PUBLISHED` 失败（不是被杀）：`M` 留在 PUBLISHING，下次按 S4 认发布物、补写 PUBLISHED 与 `A`。
+    /// 发布物已经改名到位、`A` 已写，之后写 `M = PUBLISHED` 失败（不是被杀）：`M` 留在 PUBLISHING，下次按 S4 认发布物、
+    /// 补写 PUBLISHED（`A` 再写一次，同一代）。
     #[test]
     fn a_failure_after_the_publishing_rename_finishes_later() {
         use atm_install_state::durable::{self, Op};
@@ -7155,7 +7216,9 @@ mod fault_matrix {
         assert!(r.is_err(), "{r:?}");
         assert_eq!(phase_on_disk(&n), Phase::Publishing);
         assert!(n.data().is_dir());
-        assert_eq!(cv::read_authority(&n), AuthorityState::Missing);
+        assert!(
+            matches!(cv::read_authority(&n), AuthorityState::Present(a) if a.authority == "v3" && a.generation.as_deref() == Some(G1))
+        );
         assert_eq!(
             cv::decide(&n, true),
             Startup::FinishPublishing {
