@@ -84,7 +84,11 @@ fn files(roots: &[&Path]) -> BTreeMap<PathBuf, (u64, SystemTime, String)> {
                 let e = e.unwrap();
                 // 库旁边会冒出别的程序的临时文件（实测有 `ATM.SQLITE-SHM.tmp`，随建随删，见 `conversion.rs` 的
                 // `publication_digest`）：不属于探测，不记。列出后又消失的同理。
-                if e.file_name().to_string_lossy().to_ascii_uppercase().ends_with("-SHM.TMP") {
+                if e.file_name()
+                    .to_string_lossy()
+                    .to_ascii_uppercase()
+                    .ends_with("-SHM.TMP")
+                {
                     continue;
                 }
                 let Ok(meta) = e.metadata() else {
