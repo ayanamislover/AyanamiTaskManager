@@ -82,7 +82,14 @@ fn files(roots: &[&Path]) -> BTreeMap<PathBuf, (u64, SystemTime, String)> {
             };
             for e in entries {
                 let e = e.unwrap();
-                let meta = e.metadata().unwrap();
+                // 库旁边会冒出别的程序的临时文件（实测有 `ATM.SQLITE-SHM.tmp`，随建随删，见 `conversion.rs` 的
+                // `publication_digest`）：不属于探测，不记。列出后又消失的同理。
+                if e.file_name().to_string_lossy().to_ascii_uppercase().ends_with("-SHM.TMP") {
+                    continue;
+                }
+                let Ok(meta) = e.metadata() else {
+                    continue;
+                };
                 if meta.is_dir() {
                     // 目录也记（只记在不在）：在 `N` 里建暂存目录会连带建出 `N\runtime`，文件看不出来。
                     // 不比目录的修改时间：NTFS 目录索引里的时间是延迟更新的，读到的可能是旧值。
@@ -97,6 +104,7 @@ fn files(roots: &[&Path]) -> BTreeMap<PathBuf, (u64, SystemTime, String)> {
                             .map(|b| format!("{b:02x}"))
                             .collect(),
                         Err(err) if err.raw_os_error() == Some(33) => "locked".into(),
+                        Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
                         Err(err) => panic!("{}: {err}", e.path().display()),
                     };
                     out.insert(e.path(), (meta.len(), meta.modified().unwrap(), sha));
@@ -476,4 +484,20 @@ fn a_database_that_is_written_without_pause_is_refused_as_busy() {
     writer.execute_batch("ROLLBACK").unwrap();
     assert_eq!(probe(&n, &l, None).unwrap().startup, "FIRST_CONVERSION");
     drop(writer);
+}
+
+/// 探测的副本放在调用方给的暂存目录（安装根下），不放 `N` 里：判定若用 runtime 自己的 `N\runtime\detached-read\`，
+/// 读完会连同新建的上级一起拿掉，前后快照看不出它写过 `N`。这里让 `N\runtime` 被一个文件占着、在 `N` 里建不出目录：
+/// 探测照样读到 `-wal` 里那条不认得的迁移、拒绝；在 `N` 里放副本的话读不出，会按损坏放行。
+#[test]
+fn the_probe_keeps_its_copies_out_of_n() {
+    let d = dir("scratch-outside-n");
+    let (n, l) = (d.join("n"), d.join("l"));
+    let layout = Layout::new(&n);
+    cv::fresh_install(&layout, G, AT).unwrap();
+    kill_with_frames(&layout.database(), FUTURE_V3, false);
+    let _ = fs::remove_dir_all(layout.runtime());
+    fs::write(layout.runtime(), b"not a directory").unwrap();
+    let e = probe(&n, &l, None).unwrap_err();
+    assert_eq!((e.code, e.scope), ("V3_SCHEMA_UNKNOWN", "v3"), "{e:?}");
 }
