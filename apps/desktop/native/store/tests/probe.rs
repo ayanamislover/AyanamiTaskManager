@@ -84,6 +84,9 @@ fn files(roots: &[&Path]) -> BTreeMap<PathBuf, (u64, SystemTime, String)> {
                 let e = e.unwrap();
                 let meta = e.metadata().unwrap();
                 if meta.is_dir() {
+                    // 目录也记（只记在不在）：在 `N` 里建暂存目录会连带建出 `N\runtime`，文件看不出来。
+                    // 不比目录的修改时间：NTFS 目录索引里的时间是延迟更新的，读到的可能是旧值。
+                    out.insert(e.path(), (0, SystemTime::UNIX_EPOCH, "dir".into()));
                     stack.push(e.path());
                 } else {
                     use sha2::Digest;
