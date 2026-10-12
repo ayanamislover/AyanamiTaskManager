@@ -380,6 +380,11 @@
   padding-left: 20px;
   line-height: 1.6;
 }
+/* 行内的目录名与参数：和派单页一样用 Cascadia Mono（没有连字，`--list` 不会连成一条长划）。 */
+.atm-damaged-steps code,
+.atm-damaged-hint code {
+  font: 12px var(--atm-mono);
+}
 .atm-damaged-command {
   display: block;
   padding: 10px 12px;

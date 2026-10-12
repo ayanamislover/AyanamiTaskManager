@@ -45,7 +45,7 @@ export function DamagedDatabasePage({
               复制恢复命令
             </button>
           </div>
-          <p className="atm-muted">
+          <p className="atm-muted atm-damaged-hint">
             命令报告没有可用的备份时，加 <code>--list</code> 可以看每一份备份的问题。
           </p>
           <dl className="atm-source-choice-detail">
