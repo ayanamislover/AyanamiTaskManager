@@ -13,6 +13,10 @@
  *               阶段（SNAPSHOT / IMPORT 过半 / VERIFY / PUBLISHING / PUBLISHED）就强杀，原样重启。重启后：
  *               健康；conversion.json 是 PUBLISHED，业务摘要与一次干净转换逐表相同；3.x 业务内容相同；
  *               库 integrity_check 为 ok；staging 只剩发布的那一代；authority 指向它；L 的业务内容没动。
+ *   writes      全新 3.x 宿主上 Agent 连续写（建任务、项目进度、记录，各带 op_id），在确定性的随机时刻
+ *               强杀，原样重启，共 8 轮。每轮：库 integrity_check 为 ok；已确认的写入都在、各只有一份；任务数
+ *               与 work.created 事件数一致；断电时在途的那一条用同一 op_id 重放后恰好一份（断电前已提交的
+ *               认出回执、没提交的写入一次）；全部已确认的重放都认出回执，库里一条没多。
  *
  * 报告写 output/power-loss/report.json。
  */
@@ -295,6 +299,282 @@ async function scenarioConversion(executable: string): Promise<void> {
   await cutDuringConversion(executable, reference);
 }
 
+// ---------------------------------------------------------------- 场景：日常写入中掉电
+
+const WRITE_PROJECT = "PLD";
+const WRITE_ROUNDS = 8;
+
+type Runtime = { endpoint: string; token: string };
+type Op = {
+  opId: string;
+  kind: "task" | "progress" | "record";
+  marker: string;
+  path: string;
+  body: object;
+};
+
+function runtime(): Runtime {
+  return JSON.parse(readFileSync(runtimeFile(n), "utf8")) as Runtime;
+}
+
+async function post(rt: Runtime, path: string, body: object) {
+  const response = await agentFetch(`${rt.endpoint}${path}`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${rt.token}`, "content-type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const text = Buffer.from(await response.arrayBuffer()).toString("utf8");
+  let json: Record<string, unknown> | null = null;
+  try {
+    json = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    // 非 JSON 回包原样留在 text 里。
+  }
+  return { status: response.status, json, text };
+}
+
+/** 第 i 个写入：建任务、写项目进度、写记录，轮着来；标记串写进标题 / 摘要，按它在库里找。 */
+function nthOp(round: number, index: number, session: string): Op {
+  const marker = `pl-${round}-${index}`;
+  const base = `/api/v1/projects/${WRITE_PROJECT}`;
+  switch (index % 3) {
+    case 0:
+      return {
+        opId: `${marker}-task`,
+        kind: "task",
+        marker,
+        path: `${base}/work-items`,
+        body: {
+          op_id: `${marker}-task`,
+          session,
+          items: [{ client_ref: "t", title: marker, status: "READY" }],
+        },
+      };
+    case 1:
+      return {
+        opId: `${marker}-progress`,
+        kind: "progress",
+        marker,
+        path: `${base}/progress-updates`,
+        body: { op_id: `${marker}-progress`, session, scope: "project", summary: marker },
+      };
+    default:
+      return {
+        opId: `${marker}-record`,
+        kind: "record",
+        marker,
+        path: `${base}/records`,
+        body: {
+          op_id: `${marker}-record`,
+          session,
+          kind: "FACT",
+          title: marker,
+          summary: marker,
+        },
+      };
+  }
+}
+
+/** 库里每个标记出现几次（只读打开；宿主在跑，WAL 下读不阻塞写）。 */
+function markerCounts(): { counts: Map<string, number>; tasks: number; created: number } {
+  const db = new DatabaseSync(join(n, "data", "atm.sqlite"), { readOnly: true });
+  try {
+    const project = db.prepare("SELECT id FROM projects WHERE code = ?").get(WRITE_PROJECT) as
+      | { id: string }
+      | undefined;
+    if (!project) throw new Error(`没有项目 ${WRITE_PROJECT}`);
+    const counts = new Map<string, number>();
+    const add = (rows: Array<{ marker: string }>, kind: string) => {
+      for (const row of rows)
+        counts.set(`${row.marker}#${kind}`, (counts.get(`${row.marker}#${kind}`) ?? 0) + 1);
+    };
+    add(
+      db
+        .prepare("SELECT title AS marker FROM work_items WHERE project_id = ?")
+        .all(project.id) as Array<{ marker: string }>,
+      "task",
+    );
+    add(
+      db
+        // 项目级进度（scope: project）落在 project_updates；progress_updates 是任务级的。
+        .prepare("SELECT summary AS marker FROM project_updates WHERE project_id = ?")
+        .all(project.id) as Array<{ marker: string }>,
+      "progress",
+    );
+    add(
+      db
+        .prepare("SELECT title AS marker FROM records WHERE project_id = ?")
+        .all(project.id) as Array<{ marker: string }>,
+      "record",
+    );
+    const tasks = (
+      db.prepare("SELECT count(*) AS c FROM work_items WHERE project_id = ?").get(project.id) as {
+        c: number;
+      }
+    ).c;
+    const created = (
+      db
+        .prepare("SELECT count(*) AS c FROM events WHERE project_id = ? AND type = 'work.created'")
+        .get(project.id) as { c: number }
+    ).c;
+    return { counts, tasks, created };
+  } finally {
+    db.close();
+  }
+}
+
+const countOf = (snapshot: ReturnType<typeof markerCounts>, op: Op) =>
+  snapshot.counts.get(`${op.marker}#${op.kind}`) ?? 0;
+
+/** 确定性的「随机」：同一个种子每次演练都在同样的时刻断电，可以复现。 */
+function lcg(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (Math.imul(state, 1664525) + 1013904223) >>> 0;
+    return state / 0x1_0000_0000;
+  };
+}
+
+async function scenarioWrites(executable: string): Promise<void> {
+  scenario = "writes";
+  // 空 L：没有 2.x 数据，宿主是全新的 3.x；项目由 Agent 建。
+  rmSync(dataDir, { recursive: true, force: true, maxRetries: 2 });
+  mkdirSync(dataDir, { recursive: true });
+  rmSync(homeDir, { recursive: true, force: true, maxRetries: 2 });
+  mkdirSync(join(homeDir, "Roaming"), { recursive: true });
+  mkdirSync(join(homeDir, "Local"), { recursive: true });
+  let host = startHost(executable);
+  if (!check("全新宿主健康", await untilHealthy(host, 60_000))) return;
+  const created = await post(runtime(), "/api/v1/projects", {
+    name: "掉电演练",
+    code: WRITE_PROJECT,
+    op_id: "power-loss-project",
+  });
+  if (
+    !check(
+      "建项目",
+      [200, 201].includes(created.status) && created.json?.ok === true,
+      created.text.slice(0, 300),
+    )
+  )
+    return;
+  // Agent 的写入要带会话（atm_begin）；会话落在库里，重启之后照样能用。
+  const begun = await post(runtime(), "/api/v1/sessions", {
+    project_code: WRITE_PROJECT,
+    mode: "project",
+    agent_id: "power-loss-drill",
+    client_kind: "release-drill",
+  });
+  const session = String(
+    (begun.json?.session as string | undefined) ??
+      ((begun.json?.result as Record<string, unknown> | undefined)?.session as
+        | string
+        | undefined) ??
+      "",
+  );
+  if (!check("开会话", session.length > 0, begun.text.slice(0, 300))) return;
+
+  const random = lcg(0x5eed);
+  const acked: Op[] = [];
+  for (let round = 1; round <= WRITE_ROUNDS; round += 1) {
+    process.stdout.write(`\n[writes] 第 ${round} 轮\n`);
+    const rt = runtime();
+    const cutAfterMs = 300 + Math.floor(random() * 1200);
+    let inFlight: Op | null = null;
+    let index = 0;
+    let stop = false;
+    // 错误当场接住、事后再报：断电前的 sleep 里没人等它，拒绝没人接会让整个演练进程崩掉。
+    const writer = (async () => {
+      while (!stop) {
+        const op = nthOp(round, index, session);
+        index += 1;
+        inFlight = op;
+        try {
+          const result = await post(rt, op.path, op.body);
+          if (result.status >= 200 && result.status < 300 && result.json?.ok === true) {
+            acked.push(op);
+            inFlight = null;
+          } else {
+            throw new Error(`写入被拒：${op.opId} ${result.status} ${result.text.slice(0, 300)}`);
+          }
+        } catch (error) {
+          // 断电那一刻的请求：连接断了。别的错误照实报。
+          if (!stop) throw error;
+          return;
+        }
+      }
+    })().then(
+      () => null,
+      (error: unknown) => error,
+    );
+    await sleep(cutAfterMs);
+    stop = true;
+    await powerCut(host);
+    const failure = await writer;
+    check(`第 ${round} 轮：写入只在断电时中断`, failure === null, String(failure));
+    const lost = inFlight as Op | null;
+    check(
+      `第 ${round} 轮：断电前确认了 ${acked.length} 条写入，断电时${lost ? `正在写 ${lost.opId}` : "没有在途写入"}`,
+      true,
+    );
+
+    host = startHost(executable);
+    if (!check(`第 ${round} 轮：原样重启后健康`, await untilHealthy(host, 60_000))) return;
+    const health = integrity();
+    check(
+      `第 ${round} 轮：库 integrity_check 为 ok`,
+      Object.values(health).every((v) => v === "ok") && Object.keys(health).length > 0,
+      health,
+    );
+    const before = markerCounts();
+    const missing = acked.filter((op) => countOf(before, op) !== 1);
+    check(
+      `第 ${round} 轮：已确认的 ${acked.length} 条写入都在、各只有一份`,
+      missing.length === 0,
+      missing.slice(0, 10).map((op) => `${op.opId}=${countOf(before, op)}`),
+    );
+    check(`第 ${round} 轮：任务数与 work.created 事件数一致`, before.tasks === before.created, {
+      tasks: before.tasks,
+      created: before.created,
+    });
+
+    const rt2 = runtime();
+    if (lost) {
+      const was = countOf(before, lost);
+      const replay = await post(rt2, lost.path, lost.body);
+      const after = markerCounts();
+      check(
+        `第 ${round} 轮：在途的 ${lost.opId} 重放后恰好一份（断电前${was === 1 ? "已提交" : "未提交"}，重放${replay.json?.replayed === true ? "认出回执" : "写入"}）`,
+        replay.json?.ok === true &&
+          countOf(after, lost) === 1 &&
+          (was === 1) === (replay.json?.replayed === true),
+        { status: replay.status, body: replay.text.slice(0, 300), was },
+      );
+      acked.push(lost);
+    }
+    // 已确认的全部重放一遍：都应认出回执、不再写。
+    const snapshot = markerCounts();
+    const notReplayed: string[] = [];
+    for (const op of acked) {
+      const replay = await post(rt2, op.path, op.body);
+      if (replay.json?.ok !== true || replay.json?.replayed !== true)
+        notReplayed.push(`${op.opId} ${replay.status}`);
+    }
+    const afterReplay = markerCounts();
+    check(
+      `第 ${round} 轮：${acked.length} 条重放都认出回执`,
+      notReplayed.length === 0,
+      notReplayed.slice(0, 10),
+    );
+    check(
+      `第 ${round} 轮：重放之后库里一条没多`,
+      acked.every((op) => countOf(afterReplay, op) === countOf(snapshot, op)) &&
+        afterReplay.tasks === snapshot.tasks,
+    );
+  }
+  await powerCut(host);
+}
+
 // ---------------------------------------------------------------- 主流程
 
 const only = process.argv.includes("--only")
@@ -302,6 +582,7 @@ const only = process.argv.includes("--only")
   : [];
 const SCENARIOS: Array<[string, (executable: string) => Promise<void>]> = [
   ["conversion", scenarioConversion],
+  ["writes", scenarioWrites],
 ];
 for (const name of only)
   if (!SCENARIOS.some(([known]) => known === name)) throw new Error(`没有这个场景：${name}`);
