@@ -75,7 +75,8 @@ describe("预算判定（08 §3）", () => {
     const byItem = Object.fromEntries(verdicts.map((verdict) => [verdict.item, verdict]));
     expect(byItem["冷启动 · 后台健康（中位）"]).toMatchObject({ measured: 220, samples: 5 });
     expect(byItem["冷启动 · 窗口可见（中位）"]).toMatchObject({ measured: 1000, samples: 5 });
-    expect(byItem["关开窗不上涨"]!.measured).toBe(1.5);
+    // 16.5 − 第 3 轮的 15.5。
+    expect(byItem["关开窗不上涨"]!.measured).toBe(1);
   });
 
   it("中位数不被一轮慢的拖过线，但中位数本身过线就红", () => {
@@ -111,23 +112,31 @@ describe("预算判定（08 §3）", () => {
   const closedCycles = (values: number[]) =>
     values.map((value) => ({ closed: series(value * MIB), webviewGoneMs: 300 }));
 
-  it("关窗后高出空闲 50 MiB 以上、或第 2 轮起涨超过 5 MiB，都红", () => {
+  it("关窗后高出空闲 50 MiB 以上、或第 3 轮起涨超过 5 MiB，都红", () => {
     const high = passing();
     high.memory!.cycles[3]!.closed = series(61 * MIB);
     expect(failing(high)).toContain("关窗后 Private");
     const drift = passing();
-    drift.memory!.cycles = closedCycles([10, 12, 14, 16, 18]);
+    drift.memory!.cycles = closedCycles([10, 12, 14, 17, 20]);
+    expect(failing(drift)).toEqual(["关开窗不上涨"]);
+    // 恰好 +5 MiB 还算达标，多一点就红。
+    drift.memory!.cycles = closedCycles([10, 12, 14, 16, 19]);
+    expect(failing(drift)).toEqual([]);
+    drift.memory!.cycles = closedCycles([10, 12, 14, 16, 19.01]);
     expect(failing(drift)).toEqual(["关开窗不上涨"]);
   });
 
-  // ATM-D-492：第 1 轮是系统组件（IME、DirectX、WebView2 嵌入层）首次加载进主进程，不作基线。
-  it("第 1 轮的跳升不算上涨，之后持平就达标", () => {
+  // ATM-D-492 / ATM-D-519：前两轮是系统组件（IME、DirectX、WebView2 嵌入层）加载进主进程，不作基线。
+  it("前两轮的跳升不算上涨，之后持平就达标", () => {
     const input = passing();
     input.memory!.cycles = closedCycles([48.2, 53.9, 53.7, 52.0, 53.8]);
     input.memory!.idle = series(7.6 * MIB);
     expect(failing(input)).toEqual([]);
-    // 只有两轮时看不出第 2 轮之后的趋势：不算达标。
-    input.memory!.cycles = closedCycles([48.2, 53.9]);
+    // W8 关口第 2 次完整发布链：组件到第 3 轮才加载完，第 2 轮作基线时 +5.39 MiB 判红。
+    input.memory!.cycles = closedCycles([46.04, 49.11, 54.42, 54.39, 54.5]);
+    expect(failing(input)).toEqual([]);
+    // 只有三轮时看不出第 3 轮之后的趋势：不算达标。
+    input.memory!.cycles = closedCycles([48.2, 53.9, 53.7]);
     expect(failing(input)).toEqual(["关开窗不上涨"]);
   });
 

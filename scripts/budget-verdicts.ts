@@ -130,15 +130,16 @@ export function budgetVerdicts(input: VerdictInput, samplesPerScene = 5): Verdic
       closed.length > 0 &&
       closed.every((value) => value <= idle + BUDGET.closedOverIdle),
   );
-  // 第 1 轮是系统组件首次加载进主进程，不作基线：从第 2 轮起看是否还在涨。
-  const base = closed[1];
+  // 前两轮是系统组件（IME、DirectX、WebView2 嵌入层）加载进主进程，不作基线：从第 3 轮起看是否还在涨
+  // （ATM-D-492；W8 关口实测加载到第 3 轮才完，ATM-D-519）。
+  const base = closed[2];
   const last = closed.at(-1);
   line(
     "关开窗不上涨",
-    "最后一轮 ≤ 第 2 轮 + 5 MiB",
+    "最后一轮 ≤ 第 3 轮 + 5 MiB",
     base === undefined || last === undefined ? null : mib(last - base),
     closed.length,
-    closed.length >= 3 &&
+    closed.length >= 4 &&
       base !== undefined &&
       last !== undefined &&
       last <= base + BUDGET.closedDrift,
