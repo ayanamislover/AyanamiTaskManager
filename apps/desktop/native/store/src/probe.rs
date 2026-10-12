@@ -1,6 +1,8 @@
 //! 安装探测（方案 §6 PROBE、06 :345）：新版能不能打开或转换这台机器上的数据。setup 在旧版还在服务时运行它，
-//! 所以全程只读——不做转换，不写 `N` 与 `L`，不起服务。库都经 [`crate::detached`] 读：能 `immutable` 就直接读，
-//! 否则在安装根下的暂存目录里读副本（只读连接对 WAL 库并不只读，会建、改 `-shm` 与 `-wal`，W8 关口 peer r1 P1-01）。
+//! 所以全程只读——不做转换，不写 `N` 与 `L`，不起服务。库都经 [`crate::detached`] 读：先按 SQLite 的锁协议冻结源库
+//! （旧版这时可能正在写），再按 `immutable` 读，或在安装根下的暂存目录里读副本（只读连接对 WAL 库并不只读，会建、改
+//! `-shm` 与 `-wal`，W8 关口 peer r1 P1-01；不冻结会读到没提交的内容，r2 P1-02）。旧版一直在写、冻结不了就拒绝
+//! （`V3_BUSY` / `LEGACY_BUSY`），让 setup 稍后重来。
 //!
 //! 与 2.0 的 `probeDataRoot` 同一个问题、换成 3.0 的两处数据：
 //! - `N` 里服务会打开的发布物：已应用的迁移都是这个构建认得的（[`crate::check_applied`]），不是更新的 3.x 写的；
@@ -92,6 +94,13 @@ pub fn run(
     // 读不了 `L` 就当它在：下面的检查会报出具体原因。
     let legacy_exists = crate::conversion::legacy_present(legacy).unwrap_or(true);
     let startup = decide_reading(&layout, legacy_exists, scratch);
+    // 判定读不出 `N` 时按损坏放行、不查迁移（升级后由恢复页处理）。可读不出若只是旧版一直在写，库并没有坏，
+    // 不能就此跳过迁移检查：拒绝，让 setup 稍后重来。
+    if let Startup::Damaged { reason, .. } = &startup
+        && reason.starts_with(crate::conversion::BUSY)
+    {
+        return Err(fail("V3_BUSY", "v3", reason.clone()));
+    }
     let mut databases = Vec::new();
 
     // N：服务会打开的那份发布物。隔离、封存、重做的发布物不会被打开，不查。
@@ -104,6 +113,7 @@ pub fn run(
             detached::Error::Open(e) => {
                 fail("V3_UNREADABLE", "v3", format!("{}: {e}", db.display()))
             }
+            detached::Error::Busy(e) => fail("V3_BUSY", "v3", e),
             detached::Error::Read(e) => {
                 let code = match e {
                     crate::StoreError::MigrationMismatch(_) => "V3_SCHEMA_UNKNOWN",
@@ -141,6 +151,7 @@ pub fn run(
                     detached::Error::Open(e) => {
                         fail("LEGACY_UNREADABLE", scope, format!("{shown}: {e}"))
                     }
+                    detached::Error::Busy(e) => fail("LEGACY_BUSY", scope, e),
                     detached::Error::Read(e) => {
                         let code = match e {
                             ConvertError::UnsupportedSchema(_) => "LEGACY_SCHEMA_UNKNOWN",

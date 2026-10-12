@@ -162,7 +162,7 @@ fn database(path: &Path, problems: &mut Vec<String>) -> Value {
     });
     let scratch = std::env::temp_dir().join("atm-doctor-read");
     let read = atm_store::detached::read(path, &scratch, read_database).map_err(|e| match e {
-        atm_store::detached::Error::Open(e) => e,
+        atm_store::detached::Error::Open(e) | atm_store::detached::Error::Busy(e) => e,
         atm_store::detached::Error::Read(e) => e.to_string(),
     });
     match read {

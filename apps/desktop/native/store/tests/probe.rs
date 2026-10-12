@@ -90,10 +90,15 @@ fn files(roots: &[&Path]) -> BTreeMap<PathBuf, (u64, SystemTime, String)> {
                     stack.push(e.path());
                 } else {
                     use sha2::Digest;
-                    let sha = sha2::Sha256::digest(fs::read(e.path()).unwrap())
-                        .iter()
-                        .map(|b| format!("{b:02x}"))
-                        .collect();
+                    // 开着写事务的连接独占着 `-shm` 上的写锁字节，别人读不了那里（ERROR_LOCK_VIOLATION）：只比大小与时间。
+                    let sha = match fs::read(e.path()) {
+                        Ok(bytes) => sha2::Sha256::digest(bytes)
+                            .iter()
+                            .map(|b| format!("{b:02x}"))
+                            .collect(),
+                        Err(err) if err.raw_os_error() == Some(33) => "locked".into(),
+                        Err(err) => panic!("{}: {err}", e.path().display()),
+                    };
                     out.insert(e.path(), (meta.len(), meta.modified().unwrap(), sha));
                 }
             }
@@ -436,5 +441,39 @@ fn a_2x_root_in_use_is_read_without_touching_it() {
         .unwrap();
     let r = probe(&n, &l, None).unwrap();
     assert_eq!(r.startup, "FIRST_CONVERSION");
+    drop(writer);
+}
+
+/// W8 关口 peer r2：旧版一直占着写锁（写事务开着不提交），探测冻结不了库，就拒绝（`*_BUSY`），让 setup 稍后重来。
+/// `N` 不按损坏放行（那会跳过迁移检查），也不读冻结不了的内容。等待期限是 `detached::PATIENCE`。
+#[test]
+fn a_database_that_is_written_without_pause_is_refused_as_busy() {
+    let d = dir("busy-v3");
+    let (n, l) = (d.join("n"), d.join("l"));
+    let layout = Layout::new(&n);
+    cv::fresh_install(&layout, G, AT).unwrap();
+    let writer = Connection::open(layout.database()).unwrap();
+    writer
+        .execute_batch(
+            "PRAGMA journal_mode = WAL; BEGIN IMMEDIATE; UPDATE app_meta SET instance_epoch = 'busy';",
+        )
+        .unwrap();
+    let e = probe(&n, &l, None).unwrap_err();
+    assert_eq!((e.code, e.scope), ("V3_BUSY", "v3"), "{e:?}");
+    writer.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(probe(&n, &l, None).unwrap().startup, "PUBLISHED");
+    drop(writer);
+
+    let d = dir("busy-legacy");
+    let (n, l) = (d.join("n"), d.join("l"));
+    legacy_root(&l);
+    let writer = Connection::open(l.join("registry").join("registry.sqlite")).unwrap();
+    writer
+        .execute_batch("PRAGMA journal_mode = WAL; BEGIN IMMEDIATE; DELETE FROM schema_migrations WHERE version = 1;")
+        .unwrap();
+    let e = probe(&n, &l, None).unwrap_err();
+    assert_eq!((e.code, e.scope), ("LEGACY_BUSY", "registry"), "{e:?}");
+    writer.execute_batch("ROLLBACK").unwrap();
+    assert_eq!(probe(&n, &l, None).unwrap().startup, "FIRST_CONVERSION");
     drop(writer);
 }

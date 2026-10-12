@@ -593,14 +593,18 @@ fn published_generation(layout: &Layout, scratch: &Path) -> Option<String> {
     read_published_generation(layout, scratch).ok()
 }
 
+/// [`Startup::Damaged`] 的原因以它开头：库没坏，是别的程序一直在写、冻结不了。安装探测据此拒绝，而不是放行。
+pub const BUSY: &str = "the database is busy";
+
 /// 同上，读不出时说明原因（[`Startup::Damaged`] 带给用户）。
 ///
 /// 判定不写 `N` 的库与它旁边的任何文件（[`crate::detached`]）：安装探测在旧版还在服务时也用它；坏库在 S5′ 要
 /// 原样留给用户恢复，读写连接关闭时的 checkpoint 会改掉它的字节（W8 关口 peer r1 P1-01 / P1-02）。
 ///
-/// generation 发布后不再改，主文件里 `app_meta` 那一页不论新旧都是同一个值，所以没有热回滚日志时先按 `immutable`
-/// 读主文件：不复制、不写。读不出（或有热日志：上次写到一半被杀，主文件里可能是半截的页）才在 `scratch` 下的
-/// 副本上读——SQLite 在副本上回滚日志、恢复 WAL，读到的是被杀前已提交的状态。热日志本身留给服务正常打开时回滚。
+/// 读的是 SQLite 正常打开时会看到的已提交状态：`-wal` 有帧就连同它一起读（在副本上），热日志先在副本上回滚。
+/// 不单读主文件：generation 发布后虽然不再改，主文件里那一页却可能坏了而 `-wal` 里的是好的，单读主文件会把
+/// 可读的错值当成代际不符、隔离掉这一代（W8 关口 peer r2 P1-01）。热日志本身留给服务正常打开时回滚。
+/// 别的程序一直在写、冻结不了（[`crate::detached::Error::Busy`]）也算读不出：不是这一代的证据。
 fn read_published_generation(
     layout: &Layout,
     scratch: &Path,
@@ -614,14 +618,9 @@ fn read_published_generation(
             r.get::<_, String>(0)
         })
     };
-    if !crate::detached::hot_journal(&db)
-        && let Ok(g) =
-            crate::detached::open_immutable(&db).and_then(|c| query(&c).map_err(|e| e.to_string()))
-    {
-        return Ok(g);
-    }
     crate::detached::read(&db, scratch, query).map_err(|e| match e {
         crate::detached::Error::Open(e) => format!("the database cannot be opened: {e}"),
+        crate::detached::Error::Busy(e) => format!("{BUSY}: {e}"),
         crate::detached::Error::Read(e) => format!("the database cannot be read: {e}"),
     })
 }

@@ -1,0 +1,321 @@
+//! 不写源目录地读（`detached`）在源库正被别的连接写时的行为（W8 关口 peer r2 P1-01、P1-02、P2-01）。
+//!
+//! 写者都在另一条线程、用另一个连接：冻结按 SQLite 的字节锁协议挡住它们，读完才放行。每条都核对两件事：
+//! 读到的是某一次提交后的状态，而且写者在读的这段时间里确实没有完成（不是碰巧没撞上）。
+
+use atm_store::conversion as cv;
+use atm_store::detached::{self, Error};
+use rusqlite::{Connection, params};
+use std::cell::RefCell;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+
+const G: &str = "01K0000000000000000000000G";
+const AT: &str = "2026-10-12T00:00:00.000Z";
+
+fn dir(name: &str) -> PathBuf {
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../target"));
+    let d = target.join("store-tests").join("detached").join(name);
+    let _ = fs::remove_dir_all(&d);
+    fs::create_dir_all(&d).unwrap();
+    d
+}
+
+/// 源库放在 `d\src\` 里，暂存目录在它旁边（不许在源目录里）。
+fn source(d: &Path, name: &str) -> PathBuf {
+    let src = d.join("src");
+    fs::create_dir_all(&src).unwrap();
+    src.join(name)
+}
+
+fn suffix(p: &Path, s: &str) -> PathBuf {
+    PathBuf::from(format!("{}{s}", p.display()))
+}
+
+/// 给写者的那段时间：写者没被挡住的话，这段时间足够它做完。
+const WINDOW: Duration = Duration::from_millis(400);
+
+/// 在另一条线程上跑 `write`，返回「它做完了」的信号。
+fn writer(db: &Path, write: impl FnOnce(&Connection) + Send + 'static) -> mpsc::Receiver<()> {
+    let (done, finished) = mpsc::channel();
+    let db = db.to_path_buf();
+    thread::spawn(move || {
+        let c = Connection::open(&db).unwrap();
+        c.busy_timeout(Duration::from_secs(30)).unwrap();
+        write(&c);
+        done.send(()).unwrap();
+    });
+    finished
+}
+
+fn blocked_for_the_window(finished: &mpsc::Receiver<()>) {
+    thread::sleep(WINDOW);
+    assert!(
+        finished.try_recv().is_err(),
+        "the writer finished while the source was being read"
+    );
+}
+
+/// peer r2 P1-01：主文件里 generation 那一页可读却是错值，`-wal` 里同一页是对的。判定读的是 SQLite 正常打开时
+/// 看到的已提交状态（连同 `-wal`），不是单独的主文件：不能把这个错值当成代际不符去隔离这一代。
+#[test]
+fn a_wrong_generation_in_the_main_file_is_overridden_by_the_valid_wal() {
+    let d = dir("generation-in-wal");
+    let layout = cv::Layout::new(d.join("n"));
+    let m = cv::fresh_install(&layout, G, AT).unwrap();
+    let db = layout.database();
+    // 在旁边一份上写出 WAL（generation 那一页随之进 WAL），再连同 WAL 放回来，像服务被杀时那样。
+    let side = d.join("side.sqlite");
+    fs::copy(&db, &side).unwrap();
+    let c = Connection::open(&side).unwrap();
+    c.execute_batch(
+        "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+         UPDATE app_meta SET instance_epoch = 'new-epoch';",
+    )
+    .unwrap();
+    fs::copy(&side, &db).unwrap();
+    fs::copy(suffix(&side, "-wal"), suffix(&db, "-wal")).unwrap();
+    drop(c);
+    let mut bytes = fs::read(&db).unwrap();
+    let at = bytes
+        .windows(G.len())
+        .position(|w| w == G.as_bytes())
+        .unwrap();
+    bytes[at + G.len() - 1] = b'H';
+    fs::write(&db, bytes).unwrap();
+    assert!(detached::wal_has_frames(&db));
+
+    let wal = fs::read(suffix(&db, "-wal")).unwrap();
+    assert_eq!(cv::decide(&layout, false), cv::Startup::Published(m));
+    // 判定也没动源：主文件仍是那个错值，WAL 原样。
+    assert!(
+        fs::read(&db)
+            .unwrap()
+            .windows(G.len())
+            .all(|w| w != G.as_bytes())
+    );
+    assert_eq!(fs::read(suffix(&db, "-wal")).unwrap(), wal);
+}
+
+/// peer r2 P1-02（回滚日志模式）：读的时候另一个连接开写事务、小缓存把脏页溢写进库文件。冻结时它连 SHARED 都拿不到，
+/// 读到的是已提交的 1；读完它才写完。
+#[test]
+fn a_rollback_journal_writer_waits_until_the_read_is_done() {
+    let d = dir("rollback-writer");
+    let db = source(&d, "source.sqlite");
+    let c = Connection::open(&db).unwrap();
+    c.execute_batch(
+        "PRAGMA journal_mode = DELETE; CREATE TABLE marker(x); INSERT INTO marker VALUES (1);
+         CREATE TABLE filler(x);",
+    )
+    .unwrap();
+    drop(c);
+    let finished = RefCell::new(None);
+    let value = detached::read(&db, &d.join("scratch"), |reader| {
+        *finished.borrow_mut() = Some(writer(&db, |w| {
+            w.execute_batch("PRAGMA cache_size = 1; BEGIN IMMEDIATE; UPDATE marker SET x = 2;")
+                .unwrap();
+            for _ in 0..2000 {
+                w.execute("INSERT INTO filler VALUES (?1)", params!["x".repeat(500)])
+                    .unwrap();
+            }
+            w.execute_batch("COMMIT").unwrap();
+        }));
+        blocked_for_the_window(finished.borrow().as_ref().unwrap());
+        reader.query_row("SELECT x FROM marker", [], |r| r.get::<_, i64>(0))
+    });
+    assert_eq!(value.unwrap(), 1);
+    finished
+        .into_inner()
+        .unwrap()
+        .recv_timeout(Duration::from_secs(30))
+        .unwrap();
+    let after: i64 = detached::read(&db, &d.join("scratch"), |c| {
+        c.query_row("SELECT x FROM marker", [], |r| r.get(0))
+    })
+    .unwrap();
+    assert_eq!(after, 2);
+}
+
+/// 同一条查询读两张表：中间另一个连接把两张表一起改掉并 checkpoint。读到的必须是同一次提交的两个值。
+fn two_tables_in_one_query(db: &Path, scratch: &Path) -> (i64, i64) {
+    let finished = RefCell::new(None);
+    let pair = detached::read(db, scratch, |reader| {
+        let mut stmt =
+            reader.prepare("SELECT x FROM left_value UNION ALL SELECT x FROM right_value")?;
+        let mut rows = stmt.query([])?;
+        let left = rows.next()?.unwrap().get::<_, i64>(0)?;
+        *finished.borrow_mut() = Some(writer(db, |w| {
+            w.execute_batch(
+                "BEGIN; UPDATE left_value SET x = 1; UPDATE right_value SET x = 1; COMMIT;
+                 PRAGMA wal_checkpoint(TRUNCATE);",
+            )
+            .unwrap();
+        }));
+        blocked_for_the_window(finished.borrow().as_ref().unwrap());
+        let right = rows.next()?.unwrap().get::<_, i64>(0)?;
+        Ok::<_, rusqlite::Error>((left, right))
+    })
+    .unwrap();
+    finished
+        .into_inner()
+        .unwrap()
+        .recv_timeout(Duration::from_secs(30))
+        .unwrap();
+    pair
+}
+
+fn two_tables(db: &Path) -> Connection {
+    let c = Connection::open(db).unwrap();
+    c.execute_batch(
+        "PRAGMA journal_mode = WAL; CREATE TABLE left_value(x); CREATE TABLE right_value(x);
+         INSERT INTO left_value VALUES (0); INSERT INTO right_value VALUES (0);",
+    )
+    .unwrap();
+    c
+}
+
+/// peer r2 P1-02（WAL，正常关闭、没有别的连接）：新连接拿不到 SHARED，追加与 checkpoint 都等读完。
+#[test]
+fn a_new_wal_connection_waits_until_the_query_is_done() {
+    let d = dir("wal-new-connection");
+    let db = source(&d, "source.sqlite");
+    drop(two_tables(&db));
+    assert!(!suffix(&db, "-shm").exists() && !detached::wal_has_frames(&db));
+    assert_eq!(two_tables_in_one_query(&db, &d.join("scratch")), (0, 0));
+}
+
+/// 同上，但 WAL 库正被另一个连接开着（握着 SHARED、`-shm` 在，`-wal` 刚 checkpoint 成空的）：它不必再拿 PENDING，
+/// 挡住它的是 `-shm` 上的写锁与 checkpoint 锁。
+#[test]
+fn a_live_wal_connection_waits_until_the_query_is_done() {
+    let d = dir("wal-live-connection");
+    let db = source(&d, "source.sqlite");
+    let live = two_tables(&db);
+    live.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+    assert!(suffix(&db, "-shm").exists() && !detached::wal_has_frames(&db));
+    assert_eq!(two_tables_in_one_query(&db, &d.join("scratch")), (0, 0));
+    let after: (i64, i64) = live
+        .query_row(
+            "SELECT (SELECT x FROM left_value), (SELECT x FROM right_value)",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(after, (1, 1));
+}
+
+/// 开着的写事务一直不提交（WAL 的写锁一直被占着）：冻结不了，期限到了报 Busy，不读不确定的内容。
+#[test]
+fn a_writer_that_never_lets_go_is_reported_busy() {
+    let d = dir("busy");
+    let db = source(&d, "source.sqlite");
+    let live = two_tables(&db);
+    live.execute_batch("BEGIN IMMEDIATE; UPDATE left_value SET x = 7;")
+        .unwrap();
+    let r = detached::read_patiently(&db, &d.join("scratch"), Duration::from_millis(300), |c| {
+        c.query_row("SELECT x FROM left_value", [], |r| r.get::<_, i64>(0))
+    });
+    assert!(matches!(r, Err(Error::Busy(_))), "{r:?}");
+    live.execute_batch("COMMIT").unwrap();
+    let r = detached::read_patiently(&db, &d.join("scratch"), Duration::from_millis(300), |c| {
+        c.query_row("SELECT x FROM left_value", [], |r| r.get::<_, i64>(0))
+    });
+    assert_eq!(r.unwrap(), 7);
+
+    // 回滚日志模式里握着 EXCLUSIVE 的写者同理。
+    let db = source(&d, "rollback.sqlite");
+    let c = Connection::open(&db).unwrap();
+    c.execute_batch("PRAGMA journal_mode = DELETE; CREATE TABLE t(x); INSERT INTO t VALUES (1);")
+        .unwrap();
+    c.execute_batch("BEGIN EXCLUSIVE; UPDATE t SET x = 2;")
+        .unwrap();
+    let r = detached::read_patiently(&db, &d.join("scratch"), Duration::from_millis(300), |c| {
+        c.query_row("SELECT x FROM t", [], |r| r.get::<_, i64>(0))
+    });
+    assert!(matches!(r, Err(Error::Busy(_))), "{r:?}");
+    c.execute_batch("ROLLBACK").unwrap();
+}
+
+/// peer r2 P2-01：暂存目录还不存在、却落在源目录里，照样拒绝，也不在源目录里建任何东西；不存在而在源目录外的，
+/// 按需建出来，读完连同新建的上级一起拿掉。
+#[test]
+fn a_scratch_inside_the_source_is_refused_even_before_it_exists() {
+    let d = dir("scratch-location");
+    let src = d.join("src");
+    fs::create_dir_all(&src).unwrap();
+    let db = src.join("source.sqlite");
+    let c = Connection::open(&db).unwrap();
+    c.execute_batch("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; CREATE TABLE marker(x); INSERT INTO marker VALUES (1);")
+        .unwrap();
+    let q = |c: &Connection| c.query_row("SELECT x FROM marker", [], |r| r.get::<_, i64>(0));
+
+    for scratch in [
+        src.join("new-parent").join("scratch"),
+        src.join("scratch"),
+        src.clone(),
+        d.join("elsewhere").join("..").join("src").join("x"),
+    ] {
+        let r = detached::read(&db, &scratch, q);
+        assert!(
+            matches!(r, Err(Error::Open(_))),
+            "{}: {r:?}",
+            scratch.display()
+        );
+    }
+    let mut left: Vec<_> = fs::read_dir(&src)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    left.sort();
+    assert_eq!(
+        left,
+        ["source.sqlite", "source.sqlite-shm", "source.sqlite-wal"]
+    );
+    assert!(!d.join("elsewhere").exists());
+
+    let outside = d.join("new-a").join("new-b").join("scratch");
+    assert_eq!(detached::read(&db, &outside, q).unwrap(), 1);
+    assert!(
+        !d.join("new-a").exists(),
+        "the directories made for the copy are removed"
+    );
+    drop(c);
+}
+
+/// 被杀的进程留在暂存目录里的副本，下一次读时清掉；活着的进程的留着。
+#[test]
+fn copies_left_by_a_dead_process_are_swept_on_the_next_read() {
+    let d = dir("sweep");
+    let db = source(&d, "source.sqlite");
+    let c = Connection::open(&db).unwrap();
+    c.execute_batch("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; CREATE TABLE marker(x); INSERT INTO marker VALUES (1);")
+        .unwrap();
+    let scratch = d.join("scratch");
+    // 一个已经退出的进程的 pid。
+    let mut child = std::process::Command::new("cmd")
+        .args(["/c", "exit"])
+        .spawn()
+        .unwrap();
+    let dead = child.id();
+    child.wait().unwrap();
+    let left = scratch.join(format!("read-{dead}-0"));
+    let alive = scratch.join(format!("read-{}-999", std::process::id()));
+    for dir in [&left, &alive] {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("db.sqlite"), b"left over").unwrap();
+    }
+    let v = detached::read(&db, &scratch, |c| {
+        c.query_row("SELECT x FROM marker", [], |r| r.get::<_, i64>(0))
+    });
+    assert_eq!(v.unwrap(), 1);
+    assert!(!left.exists());
+    assert!(alive.exists());
+    drop(c);
+}
