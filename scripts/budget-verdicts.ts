@@ -18,6 +18,33 @@ export const BUDGET = {
   windowVisibleMs: 1_200,
 } as const;
 
+/**
+ * 08 §1：内存各场景、关开窗轮数与冷启动都量 5 次（ATM-D-519：关开窗保持 5 轮）。少于这个数的报告只能当诊断看：
+ * 对应那一项判不达标，组装与发布也就不认（W8 关口 peer r1 P2-02）。
+ */
+export const MIN_SAMPLES = 5;
+
+/** 08 §3 的全部验收项，按 {@link budgetVerdicts} 的顺序。报告里必须一条不少、一条不多。 */
+export const BUDGET_ITEMS = [
+  "payload",
+  "更新 zip",
+  "首次转换（样本库）",
+  "后台空闲 Private",
+  "Agent 负载后 Private",
+  "关窗后 Private",
+  "关开窗不上涨",
+  "关窗后 WebView2 全部退出",
+  "冷启动 · 后台健康（中位）",
+  "冷启动 · 窗口可见（中位）",
+] as const;
+
+/** 每一项至少要几个样本：体积与首次转换各量一次就是全部，其余按 {@link MIN_SAMPLES}。 */
+export function requiredSamples(item: string): number {
+  return item === "payload" || item === "更新 zip" || item === "首次转换（样本库）"
+    ? 1
+    : MIN_SAMPLES;
+}
+
 export type Verdict = {
   item: string;
   budget: string;
@@ -70,7 +97,14 @@ export function budgetVerdicts(input: VerdictInput, samplesPerScene = 5): Verdic
     measured: number | null,
     samples: number,
     pass: boolean,
-  ) => verdicts.push({ item, budget, measured, samples, pass });
+  ) =>
+    verdicts.push({
+      item,
+      budget,
+      measured,
+      samples,
+      pass: pass && samples >= requiredSamples(item),
+    });
 
   line(
     "payload",
@@ -139,10 +173,7 @@ export function budgetVerdicts(input: VerdictInput, samplesPerScene = 5): Verdic
     "最后一轮 ≤ 第 3 轮 + 5 MiB",
     base === undefined || last === undefined ? null : mib(last - base),
     closed.length,
-    closed.length >= 4 &&
-      base !== undefined &&
-      last !== undefined &&
-      last <= base + BUDGET.closedDrift,
+    base !== undefined && last !== undefined && last <= base + BUDGET.closedDrift,
   );
   const gone = (memory?.cycles ?? []).map((cycle) => cycle.webviewGoneMs);
   line(
@@ -170,4 +201,38 @@ export function budgetVerdicts(input: VerdictInput, samplesPerScene = 5): Verdic
     visible.median !== null && visible.median <= BUDGET.windowVisibleMs,
   );
   return verdicts;
+}
+
+export type BudgetReport = {
+  error?: string;
+  completedAt?: string;
+  summary?: {
+    allPass?: boolean;
+    verdicts?: Array<{ item?: string; pass?: boolean; samples?: number }>;
+  };
+};
+
+/**
+ * 预算报告不能用于发布的原因；空数组才放行（assemble-release 用它，publish-verified-release.mjs 照同样的规则复核）。
+ * 不只看 `allPass`：验收项一条不少、按顺序，每条都达标，样本数够（W8 关口 peer r1 P2-02）。
+ */
+export function budgetReportProblems(report: BudgetReport): string[] {
+  const problems: string[] = [];
+  if (report.error !== undefined) problems.push(`error: ${String(report.error)}`);
+  if (typeof report.completedAt !== "string") problems.push("not completed");
+  const verdicts = report.summary?.verdicts ?? [];
+  const items = verdicts.map((verdict) => verdict.item);
+  if (items.length !== BUDGET_ITEMS.length || BUDGET_ITEMS.some((item, i) => items[i] !== item))
+    problems.push(`items ${JSON.stringify(items)} are not the 08 §3 list`);
+  for (const verdict of verdicts) {
+    if (verdict.pass !== true) problems.push(`${String(verdict.item)} does not pass`);
+    const need = requiredSamples(String(verdict.item));
+    if (!(typeof verdict.samples === "number" && verdict.samples >= need))
+      problems.push(
+        `${String(verdict.item)} has ${String(verdict.samples)} samples, needs ${need}`,
+      );
+  }
+  if (report.summary?.allPass !== true || verdicts.some((verdict) => verdict.pass !== true))
+    problems.push("allPass is not true for every item");
+  return problems;
 }

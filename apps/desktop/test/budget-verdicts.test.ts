@@ -3,7 +3,10 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import {
   BUDGET,
+  BUDGET_ITEMS,
+  budgetReportProblems,
   budgetVerdicts,
+  MIN_SAMPLES,
   stats,
   type VerdictInput,
 } from "../../../scripts/budget-verdicts.js";
@@ -135,9 +138,26 @@ describe("预算判定（08 §3）", () => {
     // W8 关口第 2 次完整发布链：组件到第 3 轮才加载完，第 2 轮作基线时 +5.39 MiB 判红。
     input.memory!.cycles = closedCycles([46.04, 49.11, 54.42, 54.39, 54.5]);
     expect(failing(input)).toEqual([]);
-    // 只有三轮时看不出第 3 轮之后的趋势：不算达标。
+    // 只有三轮时看不出第 3 轮之后的趋势，三条关窗的项也都样本不足：不算达标。
     input.memory!.cycles = closedCycles([48.2, 53.9, 53.7]);
-    expect(failing(input)).toEqual(["关开窗不上涨"]);
+    expect(failing(input)).toEqual(["关窗后 Private", "关开窗不上涨", "关窗后 WebView2 全部退出"]);
+  });
+
+  // W8 关口 peer r1 P2-02：--cycles / --cold-runs 缩短的测量只能当诊断看，样本不足的项判不达标。
+  it("样本不足 5 个的项不算达标", () => {
+    expect(MIN_SAMPLES).toBe(5);
+    const rounds = passing();
+    rounds.memory!.cycles = rounds.memory!.cycles.slice(0, 4);
+    expect(failing(rounds)).toEqual(["关窗后 Private", "关开窗不上涨", "关窗后 WebView2 全部退出"]);
+    const cold = passing();
+    cold.background = cold.background.slice(0, 4);
+    cold.foreground = cold.foreground.slice(0, 1);
+    expect(failing(cold)).toEqual(["冷启动 · 后台健康（中位）", "冷启动 · 窗口可见（中位）"]);
+    expect(
+      budgetVerdicts(passing(), 3)
+        .filter((verdict) => !verdict.pass)
+        .map((verdict) => verdict.item),
+    ).toEqual(["后台空闲 Private", "Agent 负载后 Private"]);
   });
 
   it("没量到就不算达标：缺转换、缺内存、缺冷启动样本都红", () => {
@@ -207,16 +227,72 @@ describe("budget-measure 按 08 的口径量", () => {
     expect(source).toMatch(/failedVerdicts\.length > 0\) \{[\s\S]{0,200}process\.exitCode = 1;/u);
   });
 
-  it("组装与发布入口只认预算全部达标的报告", () => {
+  it("组装与发布入口只认十条全部达标、样本数够的报告", () => {
     const assemble = readFileSync(join(process.cwd(), "scripts", "assemble-release.ts"), "utf8");
     expect(assemble).toMatch(
-      /budget\.summary\?\.allPass !== true \|\|\s+!\(budget\.summary\.verdicts\?\.length \?\? 0\)\s+\)\s+throw new Error\("BUDGET_REPORT_INPUT_FAILED"\);/u,
+      /const budgetProblems = budgetReportProblems\(budget\);\s+if \(budgetProblems\.length > 0\)\s+throw new Error\(`BUDGET_REPORT_INPUT_FAILED: /u,
     );
     const publish = readFileSync(
       join(process.cwd(), ".github", "scripts", "publish-verified-release.mjs"),
       "utf8",
     );
     expect(publish).toContain("assert.equal(budget.summary?.allPass, true);");
+    // 发布入口不能 import TS，照同一份清单另写一遍：清单与这里的 BUDGET_ITEMS 一字不差。
+    const list = /const BUDGET_ITEMS = \[([\s\S]*?)\];/u.exec(publish)?.[1] ?? "";
+    expect([...list.matchAll(/"([^"]+)"/gu)].map((match) => match[1])).toEqual([...BUDGET_ITEMS]);
+    expect(publish).toContain(
+      "budget.summary.verdicts.map((verdict) => verdict.item),\n  BUDGET_ITEMS,",
+    );
+    expect(publish).toContain("assert.equal(verdict.pass, true, verdict.item);");
+    expect(publish).toContain(
+      "assert.ok(verdict.samples >= (ONE_SAMPLE.has(verdict.item) ? 1 : 5), verdict.item);",
+    );
+  });
+
+  describe("budgetReportProblems", () => {
+    const report = () => ({
+      completedAt: "2026-10-12T00:00:00.000Z",
+      summary: { allPass: true, verdicts: budgetVerdicts(passing()) },
+    });
+
+    it("全部达标的完整报告放行", () => {
+      expect(budgetReportProblems(report())).toEqual([]);
+    });
+
+    it("allPass 写成 true、某一条却没过：拒绝", () => {
+      const r = report();
+      r.summary.verdicts[6]!.pass = false;
+      expect(budgetReportProblems(r).join(" | ")).toContain("关开窗不上涨 does not pass");
+    });
+
+    it("少一条、多一条、换了顺序：拒绝", () => {
+      const fewer = report();
+      fewer.summary.verdicts.pop();
+      expect(budgetReportProblems(fewer).join(" | ")).toContain("are not the 08 §3 list");
+      const more = report();
+      more.summary.verdicts.push({ ...more.summary.verdicts[0]!, item: "多出来的" });
+      expect(budgetReportProblems(more).join(" | ")).toContain("are not the 08 §3 list");
+      const swapped = report();
+      swapped.summary.verdicts.reverse();
+      expect(budgetReportProblems(swapped).join(" | ")).toContain("are not the 08 §3 list");
+    });
+
+    it("样本数不够：拒绝（即使那一条写着 pass）", () => {
+      const r = report();
+      r.summary.verdicts[8]!.samples = 3;
+      expect(budgetReportProblems(r).join(" | ")).toContain(
+        "冷启动 · 后台健康（中位） has 3 samples, needs 5",
+      );
+    });
+
+    it("出错或没写完：拒绝", () => {
+      expect(budgetReportProblems({ ...report(), error: "boom" }).join(" | ")).toContain(
+        "error: boom",
+      );
+      const unfinished: { completedAt?: string } = report();
+      delete unfinished.completedAt;
+      expect(budgetReportProblems(unfinished)).toContain("not completed");
+    });
   });
 
   it("导出大项目之后的场景经界面 bridge 导出主项目", () => {

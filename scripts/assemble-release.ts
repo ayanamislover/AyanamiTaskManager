@@ -31,6 +31,7 @@ import {
   type BinarySet,
   type BoundReports,
 } from "./candidate-binaries.js";
+import { budgetReportProblems } from "./budget-verdicts.js";
 import { powerLossReportProblems, type PowerLossReport } from "./power-loss-report.js";
 import { isV3 } from "./version-sites.js";
 
@@ -166,13 +167,10 @@ const drill = await readJson<DrillReport>(join(output, "drill", "report.json"));
 const budget = await readJson<BudgetReport>(join(output, "budget-report.json"));
 if (drill.passed !== true || !(drill.total > 0) || drill.failed !== 0)
   throw new Error("DRILL_REPORT_INPUT_FAILED");
-if (
-  budget.error !== undefined ||
-  typeof budget.completedAt !== "string" ||
-  budget.summary?.allPass !== true ||
-  !(budget.summary.verdicts?.length ?? 0)
-)
-  throw new Error("BUDGET_REPORT_INPUT_FAILED");
+// 不只看 allPass：十条一条不少、每条达标、样本数够（budget-verdicts.ts，W8 关口 peer r1 P2-02）。
+const budgetProblems = budgetReportProblems(budget);
+if (budgetProblems.length > 0)
+  throw new Error(`BUDGET_REPORT_INPUT_FAILED: ${budgetProblems.join(" | ")}`);
 // 掉电演练（W8f）：三个场景都跑过、每项通过（power-loss-report.ts）；二进制下面与候选一起对。
 const powerLoss = await readJson<BoundReports["powerLoss"] & PowerLossReport>(
   join(output, "power-loss", "report.json"),

@@ -114,9 +114,30 @@ assert.equal(drill.failed, 0);
 const budget = await readJson(join(releaseRoot, "test-report/budget-report.json"));
 assert.equal(budget.error, undefined);
 assert.equal(typeof budget.completedAt, "string");
-// 08 §3 的验收线逐条达标（budget-verdicts.ts）。
+// 08 §3 的验收线逐条达标（与 budget-verdicts.ts 的 budgetReportProblems 同一规则）：十条一条不少、按顺序，
+// 每条 pass，样本数够（体积与首次转换 1 个，其余 5 个）。只看 allPass 的话，缩短的测量或汇总写错都能混过去。
+const BUDGET_ITEMS = [
+  "payload",
+  "更新 zip",
+  "首次转换（样本库）",
+  "后台空闲 Private",
+  "Agent 负载后 Private",
+  "关窗后 Private",
+  "关开窗不上涨",
+  "关窗后 WebView2 全部退出",
+  "冷启动 · 后台健康（中位）",
+  "冷启动 · 窗口可见（中位）",
+];
+const ONE_SAMPLE = new Set(["payload", "更新 zip", "首次转换（样本库）"]);
 assert.equal(budget.summary?.allPass, true);
-assert.ok(budget.summary.verdicts.length > 0);
+assert.deepEqual(
+  budget.summary.verdicts.map((verdict) => verdict.item),
+  BUDGET_ITEMS,
+);
+for (const verdict of budget.summary.verdicts) {
+  assert.equal(verdict.pass, true, verdict.item);
+  assert.ok(verdict.samples >= (ONE_SAMPLE.has(verdict.item) ? 1 : 5), verdict.item);
+}
 // 掉电演练（W8f）：三个场景都跑过、每项通过（power-loss-report.ts）。
 const powerLoss = await readJson(join(releaseRoot, "test-report/power-loss-report.json"));
 assert.equal(powerLoss.passed, true);
