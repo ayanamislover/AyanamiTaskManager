@@ -63,6 +63,9 @@ function boundReports(): BoundReports {
     // 演练的 setup 是 drill 构建：哈希本来就不同。
     drill: { binaries: { ...candidate.release, setup: sha("drill:setup") } },
     budget: { binaries: { production: { ...candidate.release }, smoke: { ...candidate.smoke } } },
+    powerLoss: {
+      binaries: { production: { ...candidate.release }, smoke: { ...candidate.smoke } },
+    },
   };
 }
 
@@ -141,6 +144,11 @@ describe("候选绑定（L6）", () => {
         (r) => (r.budget.binaries!.production!.host = candidate.smoke.host),
       ],
       ["budget.smoke.host", (r) => (r.budget.binaries!.smoke!.host = candidate.release.host)],
+      [
+        "power-loss.production.host",
+        (r) => (r.powerLoss.binaries!.production!.host = candidate.smoke.host),
+      ],
+      ["power-loss.smoke.cli", (r) => delete r.powerLoss.binaries!.smoke!.cli],
     ];
     for (const [expected, mutate] of cases) {
       const reports = boundReports();
@@ -155,6 +163,9 @@ describe("候选绑定（L6）", () => {
     const noBudget = boundReports();
     noBudget.budget = {};
     expect(candidateBindingMismatches(candidate, noBudget)).toHaveLength(BINARY_KEYS.length * 2);
+    const noPowerLoss = boundReports();
+    noPowerLoss.powerLoss = {};
+    expect(candidateBindingMismatches(candidate, noPowerLoss)).toHaveLength(BINARY_KEYS.length * 2);
   });
 
   it("大写的十六进制也认（PowerShell Get-FileHash 写的是大写）", () => {
@@ -176,7 +187,7 @@ describe("assemble-release 用上了候选绑定", () => {
       /zipBinaries\(\s*readFileSync\(join\(packageDir, portableName\)\),\s*`AyanamiTaskManager-\$\{packageJson\.version\}\/`,?\s*\)/u,
     );
     expect(source).toMatch(
-      /candidateBindingMismatches\(candidateBinaries, \{\s*packaged: packagedSmoke,\s*portable: portableSmoke,\s*distribution: distributionSmoke,\s*installed: installedSmoke,\s*drill,\s*budget,\s*\}\)/u,
+      /candidateBindingMismatches\(candidateBinaries, \{\s*packaged: packagedSmoke,\s*portable: portableSmoke,\s*distribution: distributionSmoke,\s*installed: installedSmoke,\s*drill,\s*budget,\s*powerLoss,\s*\}\)/u,
     );
     expect(source).toContain(
       'if (unbound.length > 0) throw new Error(`CANDIDATE_BINARY_MISMATCH: ${unbound.join(", ")}`);',
@@ -191,6 +202,7 @@ describe("assemble-release 用上了候选绑定", () => {
     expect(source).toContain('["package/candidate-binaries.json", "candidate-binaries.json"],');
     expect(source).toContain('["drill/report.json", "install-drill-report.json"],');
     expect(source).toContain('["budget-report.json", "budget-report.json"],');
+    expect(source).toContain('["power-loss/report.json", "power-loss-report.json"],');
   });
 });
 
@@ -221,6 +233,9 @@ describe("候选与报告两头都写了哈希", () => {
     expect(installed).toContain('await writeSmokeReport("installed", realN, from, binaries);');
     expect(read("budget-measure.ts")).toMatch(
       /report\.binaries = \{\s*production: binariesOf\(dirname\(production\)\),\s*smoke: binariesOf\(dirname\(smoke\)\),\s*\};/u,
+    );
+    expect(read("power-loss-drill.ts")).toMatch(
+      /binaries: \{\s*production: binariesOf\(dirname\(executable\)\),\s*smoke: binariesOf\(dirname\(smokeExecutable\(\)\)\),\s*\},/u,
     );
     const drill = read("install-drill.ts");
     expect(drill).toContain("...(existsSync(app) ? binariesOf(app) : {}),");
@@ -268,14 +283,19 @@ describe("发布入口复核演练、预算与候选", () => {
     "utf8",
   );
 
-  it("install-drill、budget 两个阶段都得绿，报告逐份复核", () => {
-    expect(publish).toMatch(/"install-drill",\s*"budget",\s*\];/u);
+  it("install-drill、budget、power-loss 三个阶段都得绿，报告逐份复核", () => {
+    expect(publish).toMatch(/"install-drill",\s*"budget",\s*"power-loss",\s*\];/u);
     expect(publish).not.toContain("benchmark-report.json");
     expect(publish).toContain(
       'readJson(join(releaseRoot, "test-report/install-drill-report.json"))',
     );
     expect(publish).toContain("assert.equal(drill.failed, 0);");
     expect(publish).toContain('assert.equal(typeof budget.completedAt, "string");');
+    expect(publish).toContain('readJson(join(releaseRoot, "test-report/power-loss-report.json"))');
+    expect(publish).toContain("assert.equal(powerLoss.failed, 0);");
+    expect(publish).toContain(
+      'assert.deepEqual(powerLoss.scenarios, ["conversion", "writes", "recover"]);',
+    );
     expect(publish).toMatch(
       /\(await readJson\(join\(releaseRoot, "test-report\/candidate-binaries\.json"\)\)\)\.version,\s*version,/u,
     );

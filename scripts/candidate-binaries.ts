@@ -92,6 +92,7 @@ export type BoundReports = {
   installed: { binaries?: Partial<BinarySet> } | null;
   drill: { binaries?: Partial<BinarySet> };
   budget: { binaries?: { production?: Partial<BinarySet>; smoke?: Partial<BinarySet> } };
+  powerLoss: { binaries?: { production?: Partial<BinarySet>; smoke?: Partial<BinarySet> } };
 };
 
 /** 演练包里的 setup 是 drill 构建（带沙箱与故障注入），只比其余四个。 */
@@ -113,6 +114,8 @@ export function candidateBindingMismatches(
     ...bindingMismatches("install-drill", release, reports.drill.binaries, DRILL_BOUND_KEYS),
     ...bindingMismatches("budget.production", release, reports.budget.binaries?.production),
     ...bindingMismatches("budget.smoke", smoke, reports.budget.binaries?.smoke),
+    ...bindingMismatches("power-loss.production", release, reports.powerLoss.binaries?.production),
+    ...bindingMismatches("power-loss.smoke", smoke, reports.powerLoss.binaries?.smoke),
   ];
 }
 

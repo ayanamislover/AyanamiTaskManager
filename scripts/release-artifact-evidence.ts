@@ -31,6 +31,7 @@ const FIXED_RESUME_EVIDENCE = [
   "output/package/candidate-binaries.json",
   "output/drill/report.json",
   "output/budget-report.json",
+  "output/power-loss/report.json",
   "output/packaged-smoke-report.json",
   "output/portable-smoke-report.json",
   "output/distribution-smoke-report.json",

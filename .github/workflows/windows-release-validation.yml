@@ -52,7 +52,7 @@ jobs:
 
       # A fresh runner is a clean machine: the installed half of distribution-smoke registers the real
       # uninstall entry, Start menu and keepalive task, so it runs only where this is declared.
-      - name: Run full E2E, package, distribution, install drill and budget validation
+      - name: Run full E2E, package, distribution, install drill, budget and power-loss validation
         env:
           ATM_DISTRIBUTION_CLEAN_MACHINE: "1"
         run: pnpm release --full
@@ -72,6 +72,7 @@ jobs:
             output/package/candidate-binaries.json
             output/drill/report.json
             output/budget-report.json
+            output/power-loss/report.json
             output/packaged-smoke-report.json
             output/portable-smoke-report.json
             output/installed-smoke-report.json

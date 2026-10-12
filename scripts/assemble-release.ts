@@ -31,6 +31,7 @@ import {
   type BinarySet,
   type BoundReports,
 } from "./candidate-binaries.js";
+import { powerLossReportProblems, type PowerLossReport } from "./power-loss-report.js";
 import { isV3 } from "./version-sites.js";
 
 type Artifact = ReleaseArtifactIdentity;
@@ -140,6 +141,7 @@ const requiredCommands = [
   "distribution-smoke",
   "install-drill",
   "budget",
+  "power-loss",
 ] as const;
 const commandNames = verification.commands.map((command) => command.name);
 if (
@@ -171,6 +173,13 @@ if (
   !(budget.summary.verdicts?.length ?? 0)
 )
   throw new Error("BUDGET_REPORT_INPUT_FAILED");
+// 掉电演练（W8f）：三个场景都跑过、每项通过（power-loss-report.ts）；二进制下面与候选一起对。
+const powerLoss = await readJson<BoundReports["powerLoss"] & PowerLossReport>(
+  join(output, "power-loss", "report.json"),
+);
+const powerLossProblems = powerLossReportProblems(powerLoss);
+if (powerLossProblems.length > 0)
+  throw new Error(`POWER_LOSS_REPORT_INPUT_FAILED: ${powerLossProblems.join(" | ")}`);
 const packagedSmoke = await readJson<SmokeReport>(join(output, "packaged-smoke-report.json"));
 const portableSmoke = await readJson<SmokeReport>(join(output, "portable-smoke-report.json"));
 const distributionSmoke = await readJson<DistributionReport>(
@@ -236,6 +245,7 @@ const unbound = candidateBindingMismatches(candidateBinaries, {
   installed: installedSmoke,
   drill,
   budget,
+  powerLoss,
 });
 if (unbound.length > 0) throw new Error(`CANDIDATE_BINARY_MISMATCH: ${unbound.join(", ")}`);
 
@@ -288,6 +298,7 @@ const reportInputs = [
   ["e2e/results.json", "e2e-results.json"],
   ["budget-report.json", "budget-report.json"],
   ["drill/report.json", "install-drill-report.json"],
+  ["power-loss/report.json", "power-loss-report.json"],
   ["package/candidate-binaries.json", "candidate-binaries.json"],
   ["packaged-smoke-report.json", "packaged-smoke-report.json"],
   ["portable-smoke-report.json", "portable-smoke-report.json"],
@@ -402,6 +413,7 @@ const summary = {
     },
     installDrill: { checks: drill.total },
     budget: { completedAt: budget.completedAt },
+    powerLoss: { checks: powerLoss.total },
   },
   screenshots: screenshots.map((name) => `screenshots/${name}`),
   stages: verification.stages ?? {},
@@ -433,6 +445,7 @@ await writeFile(
     `- distribution smoke：${distributionSmoke.checks.length} 项通过${provenance("distribution-smoke")}\n` +
     `- install-drill：${drill.total} 项通过\n` +
     `- budget：已量（${String(budget.completedAt)}）\n` +
+    `- power-loss：${String(powerLoss.total)} 项通过\n` +
     `- 已知非阻塞剩余项：${remaining.length === 0 ? "无" : `${remaining.length} 条\n${remaining.map((item) => `  - ${item}`).join("\n")}`}\n\n` +
     `原始 JSON、命令日志和 1366/1920/3440 截图均位于本目录。\n`,
   "utf8",

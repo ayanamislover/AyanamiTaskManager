@@ -56,6 +56,8 @@ const commands: Array<{ name: string; args: string[] }> = [
     name: "budget",
     args: ["exec", "tsx", "scripts/budget-measure.ts", "--json", "output/budget-report.json"],
   },
+  // 掉电演练（W8f）：转换各阶段、日常写入时强杀，坏库与 recover --offline；用 budget 留下的样本库。
+  { name: "power-loss", args: ["exec", "tsx", "scripts/power-loss-drill.ts"] },
 ];
 
 await mkdir(logDir, { recursive: true });

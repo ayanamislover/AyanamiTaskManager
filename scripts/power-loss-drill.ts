@@ -24,7 +24,8 @@
  *               offline.recover；生产宿主健康、库完整、业务内容等于备份那一刻；服务在跑时 recover 以退出码 5
  *               拒绝、什么都不改。
  *
- * 报告写 output/power-loss/report.json。
+ * 报告写 output/power-loss/report.json。发布链的 power-loss 阶段跑全部场景；assemble-release 只认三个场景都跑过、
+ * 每项通过、二进制与候选一致的报告（power-loss-report.ts、candidate-binaries.ts）。
  */
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
@@ -35,6 +36,7 @@ import { chromium, type Browser, type Page } from "@playwright/test";
 import { agentFetch } from "./agent-fetch.js";
 import { legacyBusiness, sameBusiness, v3Business, type Business } from "./business-summary.js";
 import { binariesOf } from "./candidate-binaries.js";
+import { POWER_LOSS_SCENARIOS, type PowerLossScenario } from "./power-loss-report.js";
 import { unpackPortable } from "./portable-unpack.js";
 import { rendererRequest } from "./renderer-user-request.js";
 import { copySampleLibrary, ensureSampleLibrary } from "./sample-library.js";
@@ -924,13 +926,15 @@ async function scenarioRecover(executable: string): Promise<void> {
 const only = process.argv.includes("--only")
   ? (process.argv[process.argv.indexOf("--only") + 1] ?? "").split(",").filter(Boolean)
   : [];
-const SCENARIOS: Array<[string, (executable: string) => Promise<void>]> = [
-  ["conversion", scenarioConversion],
-  ["writes", scenarioWrites],
-  ["recover", scenarioRecover],
-];
+const RUNS: Record<PowerLossScenario, (executable: string) => Promise<void>> = {
+  conversion: scenarioConversion,
+  writes: scenarioWrites,
+  recover: scenarioRecover,
+};
 for (const name of only)
-  if (!SCENARIOS.some(([known]) => known === name)) throw new Error(`没有这个场景：${name}`);
+  if (!POWER_LOSS_SCENARIOS.some((known) => known === name))
+    throw new Error(`没有这个场景：${name}`);
+const ran: PowerLossScenario[] = [];
 
 const startedAt = new Date().toISOString();
 await ensureSampleLibrary(seedDir, repoRoot);
@@ -938,8 +942,11 @@ const executable = unpackPortable(packageDir, portableRoot);
 let error: string | null = null;
 try {
   await withLoginItemsRestored(async () => {
-    for (const [name, run] of SCENARIOS)
-      if (only.length === 0 || only.includes(name)) await run(executable);
+    for (const name of POWER_LOSS_SCENARIOS)
+      if (only.length === 0 || only.includes(name)) {
+        ran.push(name);
+        await RUNS[name](executable);
+      }
   }, [executable, smokeExecutable()]);
 } catch (caught) {
   error = caught instanceof Error ? (caught.stack ?? caught.message) : String(caught);
@@ -953,8 +960,13 @@ const report = {
   total: checks.length,
   failed: failed.length,
   error,
-  // 候选绑定（L6）：杀的是这份。
-  binaries: binariesOf(dirname(executable)),
+  // 发布链只认三个场景都跑过的报告（power-loss-report.ts）。
+  scenarios: ran,
+  // 候选绑定（L6）：杀的是生产便携包；recover 场景经界面建备份、看恢复页用的是 smoke 构建。
+  binaries: {
+    production: binariesOf(dirname(executable)),
+    smoke: binariesOf(dirname(smokeExecutable())),
+  },
   checks,
 };
 mkdirSync(drillRoot, { recursive: true });

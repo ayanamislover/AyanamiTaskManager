@@ -90,6 +90,7 @@ const stages = [
   "distribution-smoke",
   "install-drill",
   "budget",
+  "power-loss",
 ];
 assert.equal(verification.commands.length, stages.length);
 for (const stage of stages)
@@ -116,6 +117,13 @@ assert.equal(typeof budget.completedAt, "string");
 // 08 §3 的验收线逐条达标（budget-verdicts.ts）。
 assert.equal(budget.summary?.allPass, true);
 assert.ok(budget.summary.verdicts.length > 0);
+// 掉电演练（W8f）：三个场景都跑过、每项通过（power-loss-report.ts）。
+const powerLoss = await readJson(join(releaseRoot, "test-report/power-loss-report.json"));
+assert.equal(powerLoss.passed, true);
+assert.equal(powerLoss.error, null);
+assert.equal(powerLoss.failed, 0);
+assert.ok(powerLoss.total > 0);
+assert.deepEqual(powerLoss.scenarios, ["conversion", "writes", "recover"]);
 // 候选绑定（L6）：打包时记下的 exe 哈希就是这次发布的版本。
 assert.equal(
   (await readJson(join(releaseRoot, "test-report/candidate-binaries.json"))).version,

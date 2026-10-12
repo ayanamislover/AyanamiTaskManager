@@ -65,7 +65,7 @@ export const STAGE_INPUTS: Record<string, StageInputs> = {
       "packages/protocol/test/",
     ],
   },
-  // 2.x 的 benchmark（Node 服务）不在 3.0 的链上；install-drill 与 budget 测的是这次的候选二进制，
+  // 2.x 的 benchmark（Node 服务）不在 3.0 的链上；install-drill、budget 与 power-loss 测的是这次的候选二进制，
   // 每次都跑，不声明可复用的输入。
 
   // distribution-smoke 验的是安装器本身：打包配置、发布脚本、原生依赖和迁移。改一行 CSS 重跑
