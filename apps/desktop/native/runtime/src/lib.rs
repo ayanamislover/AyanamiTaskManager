@@ -389,6 +389,13 @@ fn boot(o: &Options, background: Compare) -> Result<Started, BootError> {
     let report = |phase: &str, done: usize, total: usize, work: u64| {
         reporter.report(phase, done, total, work)
     };
+    // 上次写到一半被杀留下的回滚日志：已经拿到独占准入，先让 SQLite 回滚，只读的判定才读得到库（W8 关口）。
+    // 回滚不了时不在这里停：判定会照实报 Damaged。
+    match cv::roll_back_interrupted_write(&layout) {
+        Ok(true) => eprintln!("atm-runtime: rolled back a write interrupted by the last exit"),
+        Ok(false) => {}
+        Err(e) => eprintln!("atm-runtime: {e}"),
+    }
     for _ in 0..8 {
         let at = now_iso();
         // 读不了 `L` 就当它在：转换会报出具体原因，不会当成全新安装建空库。

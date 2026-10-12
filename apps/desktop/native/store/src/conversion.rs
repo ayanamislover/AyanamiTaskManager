@@ -595,22 +595,44 @@ fn published_generation(layout: &Layout) -> Option<String> {
 
 /// 同上，读不出时说明原因（[`Startup::Damaged`] 带给用户）。
 ///
-/// 读写打开（不建文件）：服务第一次打开发布物时要把它从 DELETE 切到 WAL，这一刻被杀会留下热回滚日志；
-/// 只读连接回滚不了它，报 `attempt to write a readonly database`，于是一次正常的崩溃恢复被当成了库坏了
-/// （W8 关口第 3 次完整发布链之后的掉电复现）。读写连接按 SQLite 的规则先回滚日志（或恢复 WAL），
-/// 再读 generation。这时已经拿到独占准入，`M` 可信，没有别人在用这个库。
+/// 只读：[`decide`] 也是安装探测（[`crate::probe`]）的判定，探测在旧版还在服务时运行，不许写 `N`。
+/// 上次写到一半被杀留下的回滚日志只读连接回滚不了，这里会读不出；runtime 拿到准入后先调
+/// [`roll_back_interrupted_write`]，判定时日志已经不在。
 fn read_published_generation(layout: &Layout) -> std::result::Result<String, String> {
     let db = layout.database();
     if !db.is_file() {
         return Err("the database is missing".into());
+    }
+    let c = Connection::open_with_flags(&db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("the database cannot be opened: {e}"))?;
+    c.query_row("SELECT generation FROM app_meta", [], |r| r.get(0))
+        .map_err(|e| format!("the database cannot be read: {e}"))
+}
+
+/// 上次写到一半被杀留下的回滚日志（`atm.sqlite-journal`）：读写打开一次（不建文件），让 SQLite 按它的规则回滚。
+///
+/// 服务第一次打开发布物要把它从 DELETE 切到 WAL，这一刻被杀就会留下热日志。只读的 [`decide`] 回滚不了它，
+/// 读 generation 报 `attempt to write a readonly database`，一次普通的崩溃恢复就被判成了
+/// [`Startup::Damaged`]（W8 关口第 3 次完整发布链之后的掉电复现）。
+///
+/// 只在拿到独占准入之后调（runtime 判定之前）：这时没有别人在用这个库。安装探测不调。
+/// 没有日志时什么都不做，返回 `Ok(false)`；打不开或读不出时返回原因，判定会照实报 Damaged。
+pub fn roll_back_interrupted_write(layout: &Layout) -> std::result::Result<bool, String> {
+    let db = layout.database();
+    let journal = PathBuf::from(format!("{}-journal", db.display()));
+    if !db.is_file() || !journal.exists() {
+        return Ok(false);
     }
     let c = Connection::open_with_flags(
         &db,
         OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(|e| format!("the database cannot be opened: {e}"))?;
-    c.query_row("SELECT generation FROM app_meta", [], |r| r.get(0))
-        .map_err(|e| format!("the database cannot be read: {e}"))
+    c.query_row("SELECT count(*) FROM sqlite_master", [], |r| {
+        r.get::<_, i64>(0)
+    })
+    .map_err(|e| format!("the interrupted write cannot be rolled back: {e}"))?;
+    Ok(true)
 }
 
 /// 发布物里库之外的文件：`artifacts\`、`sync\`、`dispatch\` 三个子树里 (相对路径, size, sha256) 的集合摘要。

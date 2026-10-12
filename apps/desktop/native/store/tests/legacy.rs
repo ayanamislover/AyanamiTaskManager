@@ -5261,7 +5261,7 @@ mod w3d {
     /// 判定按 S6 照常放行，日志被回滚，事务里没提交的改动不在（W8 关口掉电复现：只读打开报
     /// `attempt to write a readonly database`，被判成 Damaged）。
     #[test]
-    fn a_hot_journal_left_by_a_kill_is_recovered_not_damaged() {
+    fn a_hot_journal_left_by_a_kill_is_rolled_back_under_admission_not_damaged() {
         let (f, root) = json_fixture("w8-hot-journal");
         let n = layout(&f, "n");
         let m = run(&n, &root, G1, None).unwrap();
@@ -5288,20 +5288,30 @@ mod w3d {
         fs::copy(format!("{}-journal", side.display()), &journal).unwrap();
         drop(c);
         let _ = fs::remove_file(&side);
-        // 只读打开确实过不去：这就是被误判的那种状态。
-        let ro =
-            Connection::open_with_flags(n.database(), rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
-                .unwrap();
-        assert!(
-            ro.query_row("SELECT generation FROM app_meta", [], |r| r
-                .get::<_, String>(0))
-                .is_err()
+        // 判定是只读的（安装探测也用它，探测时旧版还在服务）：读不出，而且不动日志与库。
+        let (db_before, journal_before) =
+            (fs::read(n.database()).unwrap(), fs::read(&journal).unwrap());
+        match cv::decide(&n, true) {
+            Startup::Damaged { reason, .. } => assert!(reason.contains("readonly"), "{reason}"),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            fs::read(n.database()).unwrap(),
+            db_before,
+            "decide wrote the database"
         );
-        drop(ro);
+        assert_eq!(
+            fs::read(&journal).unwrap(),
+            journal_before,
+            "decide touched the journal"
+        );
 
-        assert_eq!(cv::decide(&n, true), Startup::Published(m));
+        // 拿到准入的 runtime 先回滚，判定照常放行，事务里没提交的改动不在。
+        assert_eq!(cv::roll_back_interrupted_write(&n), Ok(true));
         assert!(!journal.exists(), "the hot journal was rolled back");
+        assert_eq!(cv::decide(&n, true), Startup::Published(m));
         assert_eq!(generation_of(&n.database()), G1);
+        assert_eq!(cv::roll_back_interrupted_write(&n), Ok(false));
     }
 
     /// 封存被杀在任何一步，再调用都按记下的种类与目标续做；目标名撞了换名，目标里已有的东西不覆盖。

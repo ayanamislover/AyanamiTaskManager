@@ -226,6 +226,43 @@ fn a_published_store_must_carry_only_migrations_this_build_knows() {
     assert!(e.detail.contains("differs"), "{e:?}");
 }
 
+/// 上次写到一半被杀、`N` 的库旁留着热回滚日志：探测在旧版还在服务时运行，不许替它回滚（那是写 `N`），
+/// 判定照实报 DAMAGED。回滚留给新版拿到准入之后的启动（W8 关口）。
+#[test]
+fn a_published_store_with_an_unrolled_journal_is_left_as_it_is() {
+    let d = dir("hot-journal");
+    let (n, l) = (d.join("n"), d.join("l"));
+    let layout = Layout::new(&n);
+    cv::fresh_install(&layout, G, AT).unwrap();
+    let db = layout.database();
+    let side = d.join("side.sqlite");
+    fs::copy(&db, &side).unwrap();
+    let c = Connection::open(&side).unwrap();
+    c.execute_batch(
+        "PRAGMA journal_mode = DELETE; PRAGMA cache_size = 1; BEGIN IMMEDIATE;
+         CREATE TABLE hot_journal_probe(x); UPDATE app_meta SET generation = 'NOT-COMMITTED';",
+    )
+    .unwrap();
+    for _ in 0..2000 {
+        c.execute(
+            "INSERT INTO hot_journal_probe VALUES (?1)",
+            params!["y".repeat(500)],
+        )
+        .unwrap();
+    }
+    fs::copy(&side, &db).unwrap();
+    fs::copy(
+        d.join("side.sqlite-journal"),
+        format!("{}-journal", db.display()),
+    )
+    .unwrap();
+    drop(c);
+
+    let r = probe(&n, &l, None).unwrap();
+    assert_eq!(r.startup, "DAMAGED");
+    assert!(PathBuf::from(format!("{}-journal", db.display())).exists());
+}
+
 fn opens(_: &[u8]) -> bool {
     true
 }

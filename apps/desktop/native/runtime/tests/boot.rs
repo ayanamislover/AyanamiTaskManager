@@ -636,6 +636,65 @@ fn an_offline_recovery_is_settled_before_serving() {
     s.stop(&|_| {});
 }
 
+/// 服务第一次打开发布物（DELETE 切 WAL）时被杀，留下热回滚日志：下次启动拿到准入后先回滚，照常服务，
+/// 不判成 Damaged（W8 关口第 3 次完整发布链之后的掉电复现）。
+#[test]
+fn a_hot_journal_is_rolled_back_before_the_publication_is_judged() {
+    let d = dir("hot-journal");
+    let n = d.join("N");
+    let l = d.join("L-missing");
+    serving(atm_runtime::start(&options(&n, &l, &Events::default())).unwrap()).stop(&|_| {});
+    let layout = Layout::new(&n);
+    let generation = match cv::read_manifest(&layout) {
+        cv::ManifestState::Present(m) => m.generation,
+        other => panic!("{other:?}"),
+    };
+    let db = layout.database();
+    {
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode = DELETE;")
+            .unwrap();
+    }
+    // 副本上开一个不提交的写事务，脏页溢写进主文件；趁事务还开着把主文件与日志拷回，等于这一刻被杀。
+    let side = d.join("side.sqlite");
+    std::fs::copy(&db, &side).unwrap();
+    let c = rusqlite::Connection::open(&side).unwrap();
+    c.execute_batch(
+        "PRAGMA cache_size = 1; BEGIN IMMEDIATE; CREATE TABLE hot_journal_probe(x);
+         UPDATE app_meta SET generation = 'NOT-COMMITTED';",
+    )
+    .unwrap();
+    for _ in 0..2000 {
+        c.execute(
+            "INSERT INTO hot_journal_probe VALUES (?1)",
+            [&"y".repeat(500)],
+        )
+        .unwrap();
+    }
+    let journal = std::path::PathBuf::from(format!("{}-journal", db.display()));
+    std::fs::copy(&side, &db).unwrap();
+    std::fs::copy(d.join("side.sqlite-journal"), &journal).unwrap();
+    drop(c);
+
+    let s = serving(atm_runtime::start(&options(&n, &l, &Events::default())).unwrap());
+    assert!(!journal.exists(), "the hot journal was rolled back");
+    assert!(descriptor(&n).is_some());
+    s.stop(&|_| {});
+    let c = rusqlite::Connection::open(&db).unwrap();
+    let g: String = c
+        .query_row("SELECT generation FROM app_meta", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(g, generation);
+    let probe: i64 = c
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE name = 'hot_journal_probe'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(probe, 0, "the uncommitted write survived");
+}
+
 /// W8f-3 掉电演练：已发布的库读不出时不服务、不隔离、不建空库（否则 3.0 的写入悄悄消失，备份也因 generation
 /// 换了而用不上）。启动以 Damaged 结束、放掉准入，再启动还是一样；`atm recover --offline` 从这一代的备份恢复后照常服务。
 #[test]
