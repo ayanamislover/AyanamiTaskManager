@@ -470,3 +470,41 @@ fn a_writer_already_waiting_to_commit_goes_first() {
     finished.recv_timeout(Duration::from_secs(30)).unwrap();
     reader.join().unwrap();
 }
+
+/// peer r4 P1-01：暂存目录反过来包含源库（源库在 `scratch\read-<已退出的 pid>-1\` 下，看上去就像一个遗留副本），
+/// 清扫会把它连同旁边的文件一起删掉。在清扫之前就拒绝：源库、旁边的文件、暂存目录里的东西都原样。
+#[test]
+fn a_scratch_that_holds_the_source_is_refused_before_anything_is_removed() {
+    let d = dir("scratch-holds-source");
+    let scratch = d.join("scratch");
+    let root = scratch.join("read-4294967295-1");
+    fs::create_dir_all(root.join("data")).unwrap();
+    let db = root.join("data").join("atm.sqlite");
+    let c = Connection::open(&db).unwrap();
+    c.execute_batch("CREATE TABLE marker(x); INSERT INTO marker VALUES (1);")
+        .unwrap();
+    drop(c);
+    fs::write(root.join("user-file.txt"), b"must remain").unwrap();
+    let original = fs::read(&db).unwrap();
+    for scratch in [scratch.clone(), root.clone(), root.join("data")] {
+        let r = detached::read(&db, &scratch, |c| {
+            c.query_row("SELECT x FROM marker", [], |r| r.get::<_, i64>(0))
+        });
+        assert!(
+            matches!(&r, Err(Error::Open(e)) if e.contains("contains") || e.contains("inside")),
+            "{}: {r:?}",
+            scratch.display()
+        );
+        assert_eq!(fs::read(&db).unwrap(), original);
+        assert!(root.join("user-file.txt").exists());
+    }
+    // 对照：同一个源库，换一个不包含它的暂存目录，读得到；暂存目录里已退出进程的遗留副本照常清掉。
+    let elsewhere = d.join("elsewhere");
+    let left = elsewhere.join("read-4294967295-0");
+    fs::create_dir_all(&left).unwrap();
+    let v = detached::read(&db, &elsewhere, |c| {
+        c.query_row("SELECT x FROM marker", [], |r| r.get::<_, i64>(0))
+    });
+    assert_eq!(v.unwrap(), 1);
+    assert!(!left.exists());
+}

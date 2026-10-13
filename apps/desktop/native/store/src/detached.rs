@@ -31,6 +31,7 @@
 //!
 //! 源目录一个字节不动，也不多出文件。副本删不掉（被别的程序占着）或进程被杀没来得及删的，下一次在同一个暂存目录读时，
 //! 按目录名 `read-<pid>-<序号>` 里的 pid 清：确知那个进程已经不在了才删，名字对不上的、查不了的都不碰。
+//! 暂存目录与源目录不许互相包含：任一方向都在清扫与读之前拒绝（源库在暂存目录里，清扫就可能把它当副本删掉）。
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -148,6 +149,14 @@ pub fn read_patiently<T, E>(
             source_dir.display()
         )));
     }
+    // 反过来也不行：源库在暂存目录里的话，清扫会把它当成某个副本删掉（peer r4 P1-01）。在清扫与任何删除之前拒绝。
+    if contains(scratch, source_dir).map_err(Error::Open)? {
+        return Err(Error::Open(format!(
+            "the scratch directory {} contains {}",
+            scratch.display(),
+            source_dir.display()
+        )));
+    }
     sweep(scratch);
     let frozen = freeze(db, patience)?;
     if !hot_journal(db) && !wal_has_frames(db) {
@@ -188,6 +197,16 @@ fn inside(scratch: &Path, source_dir: &Path) -> Result<bool, String> {
             },
         }
     }
+}
+
+/// `source_dir` 是否落在 `scratch` 里（或就是它）。`scratch` 还不存在时里面什么都没有，源库不会在里面。
+fn contains(scratch: &Path, source_dir: &Path) -> Result<bool, String> {
+    let Ok(scratch) = fs::canonicalize(scratch) else {
+        return Ok(false);
+    };
+    let source =
+        fs::canonicalize(source_dir).map_err(|e| format!("{}: {e}", source_dir.display()))?;
+    Ok(source.starts_with(&scratch))
 }
 
 // ---------------------------------------------------------------- 冻结

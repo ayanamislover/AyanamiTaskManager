@@ -289,3 +289,46 @@ fn an_absent_service_is_reported_with_the_startup_state() {
         doctor.stderr
     );
 }
+
+/// peer r4 P1-01：`doctor --offline` 的暂存目录是 `%TEMP%\atm-doctor-read\`。数据根恰好在它下面一个像遗留副本的
+/// 目录里（`read-<已退出的 pid>-1`）时，清扫会把整个数据根删掉。诊断拒绝读、如实报告，数据根一个字节不动；
+/// 对照：同一个数据根、换一个无关的 TEMP，照常健康。
+#[test]
+fn doctor_offline_never_sweeps_the_data_root_it_is_reading() {
+    let root = bare_root("doctor-scratch/atm-doctor-read/read-4294967295-1");
+    let temp = root.parent().unwrap().parent().unwrap().to_path_buf();
+    std::fs::write(root.join("user-file.txt"), b"must remain").unwrap();
+    let before = tree(&root);
+
+    let control_temp = temp.parent().unwrap().join("doctor-scratch-control-temp");
+    std::fs::create_dir_all(&control_temp).unwrap();
+    let control_temp = control_temp.display().to_string();
+    let control = atm_with(
+        &root,
+        &["--json", "doctor", "--offline"],
+        &[("TEMP", &control_temp), ("TMP", &control_temp)],
+    );
+    assert_eq!(control.code, 0, "{}{}", control.stdout, control.stderr);
+    assert_eq!(tree(&root), before);
+
+    let temp = temp.display().to_string();
+    let run = atm_with(
+        &root,
+        &["--json", "doctor", "--offline"],
+        &[("TEMP", &temp), ("TMP", &temp)],
+    );
+    assert_eq!(
+        tree(&root),
+        before,
+        "doctor --offline removed or changed the data root"
+    );
+    assert_ne!(run.code, 0, "{}{}", run.stdout, run.stderr);
+    let v = run.json();
+    assert_eq!(v["healthy"], false, "{v}");
+    assert!(
+        v["database"]["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("contains")),
+        "{v}"
+    );
+}
