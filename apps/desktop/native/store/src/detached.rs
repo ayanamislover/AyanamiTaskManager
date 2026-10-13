@@ -33,15 +33,18 @@
 //! 按目录名 `read-<pid>-<序号>` 里的 pid 清：确知那个进程已经不在了才删，名字对不上的、查不了的都不碰。
 //! 暂存目录与源目录不许互相包含：任一方向都在清扫与读之前拒绝（源库在暂存目录里，清扫就可能把它当副本删掉）。
 //!
-//! 暂存目录可能在检查之后才被建出来、或被改指向别处（peer r5 P1-01：检查时不在，之后成了指向源库上级的 junction）。
-//! 所以凡是要删东西的地方都不只信前面那次检查：
-//! - 清扫时重新看暂存目录是否包含源库，包含就整个不清；逐项只清真正的目录（junction、符号链接不跟进也不删）；
-//! - 副本目录只用这次独占新建的（同名的已经在就换下一个序号，绝不先删），建好后记下它的身份（卷号 + 文件号），
-//!   删的时候身份对得上才删；复制前再看一次暂存目录是否包含源库；
-//! - 删副本（自己的和清扫到的）只删副本里会有的那几个文件、再删空目录，不递归删：路径哪怕已经指向别处，
-//!   也碰不到那里的整棵目录树；
-//! - 只拿掉这次新建的上级目录；调用方原有的暂存目录（哪怕是 junction）不碰（peer r5 P2-01）。
+//! 暂存目录绑在句柄上（peer r5 P1-01 / P2-01，r6 P1-01 / P2-01）：调用方给的路径只在开头按名字找一次——最近的
+//! 已存在的那一级打开、握住，缺的各级相对它新建（`NtCreateFile`，建出来的同时就握住）。之后清扫、新建副本、复制、
+//! 删除都只经握住的句柄与它的真实路径，不再按调用方的路径找：路径中途被改指向别处（junction 换目标、上级被换掉），
+//! 碰到的仍是开头握住的那些目录。握着的目录不共享删除，Windows 不许改名、删除它，也不许改名它的任何上级，所以它的
+//! 真实路径在读的这段时间里不变。删除都按句柄：先不跟进地打开那一项（junction、符号链接打开的是链接自己，不算副本），
+//! 核对类型，再对这个句柄删——删的就是核对过的那一个。此外：
+//! - 副本目录独占新建（同名的已经在就换下一个序号，不打开、不删别人的）；
+//! - 删副本（自己的和清扫到的）只删副本里会有的那几个普通文件、再删空目录，不递归删；
+//! - 源库所在的目录与库文件本身按卷号 + 文件号认出来，清扫与删副本时碰到就不删（哪怕它在读的过程中被挪进暂存目录）；
+//! - 只删这次新建的上级目录；调用方原有的暂存目录（哪怕是 junction）不碰。
 
+use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -151,15 +154,21 @@ pub fn read_patiently<T, E>(
         return Err(Error::Open(format!("{} is missing", db.display())));
     }
     let source_dir = db.parent().unwrap_or(Path::new("."));
-    if inside(scratch, source_dir).map_err(Error::Open)? {
+    let source = Source::of(db).map_err(Error::Open)?;
+    let source_real = fs::canonicalize(source_dir)
+        .map_err(|e| Error::Open(format!("{}: {e}", source_dir.display())))?;
+    let mut held = Scratch::open(scratch).map_err(Error::Open)?;
+    let real = held.real().map_err(Error::Open)?;
+    // 握住的最深一级（还缺的各级会建在它下面）在源目录里：建出来的也在里面（peer r2 P2-01）。
+    if real.starts_with(&source_real) {
         return Err(Error::Open(format!(
             "the scratch directory {} is inside {}",
             scratch.display(),
             source_dir.display()
         )));
     }
-    // 反过来也不行：源库在暂存目录里的话，清扫会把它当成某个副本删掉（peer r4 P1-01）。在清扫与任何删除之前拒绝。
-    if contains(scratch, source_dir).map_err(Error::Open)? {
+    // 反过来也不行：源库在暂存目录里的话，清扫会把它当成某个副本删掉（peer r4 P1-01）。暂存目录还不存在时里面什么都没有。
+    if held.dir().is_some() && source_real.starts_with(&real) {
         return Err(Error::Open(format!(
             "the scratch directory {} contains {}",
             scratch.display(),
@@ -170,7 +179,7 @@ pub fn read_patiently<T, E>(
     if let Some(hook) = tests::AFTER_CHECKS.with(|h| h.borrow_mut().take()) {
         hook();
     }
-    sweep(scratch, source_dir);
+    sweep(&held, &source);
     let frozen = freeze(db, patience)?;
     if !hot_journal(db) && !wal_has_frames(db) {
         let c = open_immutable(db).map_err(Error::Open)?;
@@ -179,7 +188,7 @@ pub fn read_patiently<T, E>(
         drop(frozen);
         return r;
     }
-    let copy = Copy::make(db, &frozen, scratch).map_err(Error::Open)?;
+    let copy = Copy::make(db, &frozen, &mut held, source).map_err(Error::Open)?;
     drop(frozen);
     let c = Connection::open_with_flags(
         &copy.db,
@@ -190,36 +199,8 @@ pub fn read_patiently<T, E>(
     let r = f(&c).map_err(Error::Read);
     drop(c);
     drop(copy);
+    drop(held);
     r
-}
-
-/// `scratch` 是否落在 `source_dir` 里。`scratch` 还不存在时看它最近的已存在的上级：那一级在源目录外，
-/// 往下建出来的也在外面（peer r2 P2-01）。
-fn inside(scratch: &Path, source_dir: &Path) -> Result<bool, String> {
-    let source =
-        fs::canonicalize(source_dir).map_err(|e| format!("{}: {e}", source_dir.display()))?;
-    let scratch =
-        std::path::absolute(scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
-    let mut existing = scratch.as_path();
-    loop {
-        match fs::canonicalize(existing) {
-            Ok(real) => return Ok(real.starts_with(&source)),
-            Err(_) => match existing.parent() {
-                Some(parent) => existing = parent,
-                None => return Err(format!("{} has no existing parent", scratch.display())),
-            },
-        }
-    }
-}
-
-/// `source_dir` 是否落在 `scratch` 里（或就是它）。`scratch` 还不存在时里面什么都没有，源库不会在里面。
-fn contains(scratch: &Path, source_dir: &Path) -> Result<bool, String> {
-    let Ok(scratch) = fs::canonicalize(scratch) else {
-        return Ok(false);
-    };
-    let source =
-        fs::canonicalize(source_dir).map_err(|e| format!("{}: {e}", source_dir.display()))?;
-    Ok(source.starts_with(&scratch))
 }
 
 // ---------------------------------------------------------------- 冻结
@@ -308,54 +289,150 @@ fn wal_mode(db: &Path, file: &File) -> bool {
     os::read_at(file, 0, &mut head).is_ok_and(|n| n == head.len()) && head[18] == 2 && head[19] == 2
 }
 
+// ---------------------------------------------------------------- 暂存目录
+
+/// 源库的身份：它所在的目录与库文件本身。清扫与删副本时碰到这两个就不删。认不出来就不读。
+#[derive(Clone, Copy)]
+struct Source {
+    dir: os::Id,
+    db: os::Id,
+}
+
+impl Source {
+    fn of(db: &Path) -> Result<Source, String> {
+        let id = |p: &Path| os::identify(p).map_err(|e| format!("{}: {e}", p.display()));
+        Ok(Source {
+            dir: id(db.parent().unwrap_or(Path::new(".")))?,
+            db: id(db)?,
+        })
+    }
+
+    fn is(&self, id: os::Id) -> bool {
+        id == self.dir || id == self.db
+    }
+}
+
+/// 调用方给的暂存目录，绑在句柄上（见模块说明）：丢掉时按相反的次序删掉这次新建的各级（空了才删得掉），
+/// 原来就有的只放手。
+struct Scratch {
+    /// 由浅到深握住的各级：先是最近的已存在的那一级，然后是这次新建或打开的；`true` 是这次新建的。
+    held: Vec<(os::Handle, bool)>,
+    /// 还缺的各级，由浅到深。
+    missing: Vec<OsString>,
+}
+
+impl Scratch {
+    /// 按名字找最近的已存在的那一级，打开并握住；之后不再按 `scratch` 这个路径找。
+    fn open(scratch: &Path) -> Result<Scratch, String> {
+        let full =
+            std::path::absolute(scratch).map_err(|e| format!("{}: {e}", scratch.display()))?;
+        let mut missing = Vec::new();
+        let mut at = full.as_path();
+        let base = loop {
+            match os::hold_dir(at) {
+                Ok(h) => break h,
+                Err(e) if absent(&e) => match (at.parent(), at.file_name()) {
+                    (Some(parent), Some(name)) => {
+                        missing.push(name.to_os_string());
+                        at = parent;
+                    }
+                    _ => return Err(format!("{} has no existing parent", scratch.display())),
+                },
+                Err(e) => return Err(format!("{}: {e}", at.display())),
+            }
+        };
+        missing.reverse();
+        Ok(Scratch {
+            held: vec![(base, false)],
+            missing,
+        })
+    }
+
+    fn deepest(&self) -> &os::Handle {
+        &self.held[self.held.len() - 1].0
+    }
+
+    /// 握住的最深一级的真实路径。
+    fn real(&self) -> Result<PathBuf, String> {
+        os::real_path(self.deepest()).map_err(|e| format!("the scratch directory: {e}"))
+    }
+
+    /// 暂存目录本身：已经存在、或这次已经建出来了。
+    fn dir(&self) -> Option<&os::Handle> {
+        self.missing.is_empty().then(|| self.deepest())
+    }
+
+    /// 建出还缺的各级，每一级相对握住的上一级新建；已经有了（别的读刚建的）就打开它，但不能是链接。
+    /// 中途失败就报错，这次新建的在丢掉时拿掉（peer r3 P2-02）。
+    fn create(&mut self) -> Result<&os::Handle, String> {
+        while !self.missing.is_empty() {
+            let name = self.missing.remove(0);
+            let at = self.real()?.join(&name);
+            let (h, made) = os::create_dir_in(self.deepest(), &name, false)
+                .map_err(|e| format!("{}: {e}", at.display()))?;
+            self.held.push((h, made));
+        }
+        Ok(self.deepest())
+    }
+}
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        while let Some((h, made)) = self.held.pop() {
+            if made {
+                let _ = os::delete(&h);
+            }
+            drop(h);
+        }
+    }
+}
+
+/// 打开时「这一级不在」：找它的上一级。
+fn absent(e: &io::Error) -> bool {
+    const ERROR_INVALID_NAME: i32 = 123;
+    e.kind() == io::ErrorKind::NotFound || e.raw_os_error() == Some(ERROR_INVALID_NAME)
+}
+
 // ---------------------------------------------------------------- 副本
 
-/// `scratch` 下的一份副本，丢掉时删除（连同 SQLite 在副本旁建的文件）。
+/// 暂存目录下的一份副本，丢掉时删除（连同 SQLite 在副本旁建的文件）。目录是这次独占新建的，一直握着。
 struct Copy {
-    dir: PathBuf,
+    dir: os::Handle,
     db: PathBuf,
-    /// 副本目录建好时的身份；删之前核对，对不上（路径已经不是它了）就不删。
-    id: Option<os::DirId>,
-    /// 为放副本新建的上级目录，由深到浅；删完副本后空了就拿掉。
-    created: Vec<PathBuf>,
+    source: Source,
 }
 
 impl Copy {
     /// 在冻结中复制：库文件、有帧的 `-wal`、热日志。
-    fn make(db: &Path, frozen: &Frozen, scratch: &Path) -> Result<Copy, String> {
+    fn make(
+        db: &Path,
+        frozen: &Frozen,
+        scratch: &mut Scratch,
+        source: Source,
+    ) -> Result<Copy, String> {
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        let source_dir = db.parent().unwrap_or(Path::new("."));
-        let mut copy = Copy {
-            dir: PathBuf::new(),
-            db: PathBuf::new(),
-            id: None,
-            created: create_dirs(scratch)?,
-        };
-        if contains(scratch, source_dir)? {
-            return Err(format!(
-                "the scratch directory {} contains {}",
-                scratch.display(),
-                source_dir.display()
-            ));
-        }
+        let parent = scratch.create()?;
         let mut attempts = 0;
         let dir = loop {
-            let dir = scratch.join(format!(
+            let name = format!(
                 "read-{}-{}",
                 std::process::id(),
                 SEQ.fetch_add(1, Ordering::Relaxed)
-            ));
-            match fs::create_dir(&dir) {
-                Ok(()) => break dir,
+            );
+            match os::create_dir_in(parent, OsStr::new(&name), true) {
+                Ok((h, _)) => break h,
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists && attempts < 1000 => {
                     attempts += 1;
                 }
-                Err(e) => return Err(format!("{}: {e}", dir.display())),
+                Err(e) => return Err(format!("{name}: {e}")),
             }
         };
-        copy.id = os::dir_id(&dir).ok();
-        copy.db = dir.join(COPY_FILES[0]);
-        copy.dir = dir;
+        let real = os::real_path(&dir).map_err(|e| format!("the copy directory: {e}"))?;
+        let copy = Copy {
+            db: real.join(COPY_FILES[0]),
+            dir,
+            source,
+        };
         copy_database(&frozen.db, &copy.db).map_err(|e| format!("copy {}: {e}", db.display()))?;
         #[cfg(test)]
         if let Some(hook) = tests::AFTER_DATABASE_COPY.with(|h| h.borrow_mut().take()) {
@@ -364,7 +441,7 @@ impl Copy {
         for (part, wanted) in [("-wal", wal_has_frames(db)), ("-journal", hot_journal(db))] {
             if wanted {
                 let from = sidecar(db, part);
-                fs::copy(&from, sidecar(&copy.db, part))
+                copy_file(&from, &sidecar(&copy.db, part))
                     .map_err(|e| format!("copy {}: {e}", from.display()))?;
             }
         }
@@ -374,64 +451,36 @@ impl Copy {
 
 impl Drop for Copy {
     fn drop(&mut self) {
-        if self.id.is_some() && os::dir_id(&self.dir).ok() == self.id {
-            remove_copy(&self.dir);
-        }
-        // 为它新建的上级，空了就拿掉（不是空的说明别的读还在用，留着）。调用方原有的暂存目录不碰。
-        for dir in &self.created {
-            let _ = fs::remove_dir(dir);
-        }
+        remove_copy(&self.dir, &self.source);
     }
 }
 
-/// 建出 `dir` 及缺的上级，返回新建的那些（由深到浅）。中途失败就把这次新建的拿掉再报错（peer r3 P2-02）。
-fn create_dirs(dir: &Path) -> Result<Vec<PathBuf>, String> {
-    let mut missing = Vec::new();
-    let mut at = Some(dir);
-    while let Some(d) = at
-        && !d.exists()
-    {
-        missing.push(d.to_path_buf());
-        at = d.parent();
-    }
-    let mut created = Vec::new();
-    for d in missing.iter().rev() {
-        match fs::create_dir(d) {
-            Ok(()) => created.push(d.clone()),
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => {
-                for made in created.iter().rev() {
-                    let _ = fs::remove_dir(made);
-                }
-                return Err(format!("{}: {e}", d.display()));
-            }
-        }
-    }
-    created.reverse();
-    Ok(created)
-}
-
-/// 清掉已经不在的进程留下的副本目录。只认 [`Copy::make`] 起的名字 `read-<pid>-<序号>`（两段都是数字），且必须是目录；
-/// 确知那个进程已经不在了才删。查不了（没有权限等）、pid 被别的进程重用了，都留着（peer r3 P2-01）。在冻结之前做。
-/// 不信前面的检查（见模块说明）：暂存目录这时包含源库就整个不清；junction、符号链接不跟进也不删。
-fn sweep(scratch: &Path, source_dir: &Path) {
-    if !matches!(contains(scratch, source_dir), Ok(false)) {
+/// 清掉已经不在的进程留下的副本目录。只认 [`Copy::make`] 起的名字 `read-<pid>-<序号>`（两段都是数字），且必须是真目录
+/// （junction、符号链接不跟进）；确知那个进程已经不在了才删。查不了（没有权限等）、pid 被别的进程重用了，都留着
+/// （peer r3 P2-01）。在冻结之前做。每一项不跟进地打开、握住、核对之后，按句柄删（见模块说明）；源库所在的目录不碰。
+fn sweep(scratch: &Scratch, source: &Source) {
+    let Some(dir) = scratch.dir() else {
         return;
-    }
-    let Ok(entries) = fs::read_dir(scratch) else {
+    };
+    let Ok(real) = os::real_path(dir) else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(&real) else {
         return;
     };
     for entry in entries.flatten() {
         let Some(pid) = entry.file_name().to_str().and_then(copy_pid) else {
             continue;
         };
-        let path = entry.path();
-        // 不跟进：junction、符号链接在这里不是目录。
-        if !fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+        let Ok(copy) = os::open_entry(&real.join(entry.file_name()), true) else {
             continue;
+        };
+        match os::id(&copy) {
+            Ok(id) if !source.is(id) => {}
+            _ => continue,
         }
         if os::gone(pid) {
-            remove_copy(&path);
+            remove_copy(&copy, source);
         }
     }
 }
@@ -444,15 +493,24 @@ const COPY_FILES: [&str; 4] = [
     "db.sqlite-shm",
 ];
 
-/// 只删副本的那几个文件（是普通文件才删），再删目录（空了才删得掉）。别的东西一律留着。
-fn remove_copy(dir: &Path) {
+/// 只删副本的那几个文件（是普通文件、不是源库才删），再删目录（空了才删得掉）。别的东西一律留着。
+/// 都按句柄：`dir` 是握着的那个目录，每个文件不跟进地打开、核对之后对它的句柄删。
+fn remove_copy(dir: &os::Handle, source: &Source) {
+    let Ok(real) = os::real_path(dir) else {
+        return;
+    };
+    #[cfg(test)]
+    if let Some(hook) = tests::BEFORE_REMOVE.with(|h| h.borrow_mut().take()) {
+        hook(&real);
+    }
     for name in COPY_FILES {
-        let file = dir.join(name);
-        if fs::symlink_metadata(&file).is_ok_and(|m| m.is_file()) {
-            let _ = fs::remove_file(&file);
+        if let Ok(file) = os::open_entry(&real.join(name), false)
+            && os::id(&file).is_ok_and(|id| !source.is(id))
+        {
+            let _ = os::delete(&file);
         }
     }
-    let _ = fs::remove_dir(dir);
+    let _ = os::delete(dir);
 }
 
 /// 打开那个进程的结果 → 它确知已经不在了吗。`open_error`：打不开时系统给的错误码；`exit`：打开了、查到的退出码
@@ -477,11 +535,24 @@ fn copy_pid(name: &str) -> Option<u32> {
     }
 }
 
+/// 把 `from` 复制成新建的 `to`（已经有同名的就失败，不覆盖）。
+fn copy_file(from: &Path, to: &Path) -> io::Result<()> {
+    let mut out = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(to)?;
+    io::copy(&mut File::open(from)?, &mut out)?;
+    Ok(())
+}
+
 /// 经冻结时的句柄复制库文件。PENDING 字节所在那一页 SQLite 从来不用，别的进程可能在上面握着锁、读不了：
 /// 锁字节那 512 个字节写零。副本读完就删，不刷盘（少占冻结的时间）。
 fn copy_database(from: &File, to: &Path) -> io::Result<()> {
     let len = from.metadata()?.len();
-    let mut out = File::create(to)?;
+    let mut out = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(to)?;
     let mut buf = vec![0u8; 1 << 20];
     let mut at = 0u64;
     while at < len {
@@ -570,29 +641,239 @@ mod os {
         }
     }
 
-    /// 目录的身份：卷序列号与文件号。不跟进 junction / 符号链接（量到的是链接自己）。
-    pub type DirId = (u32, u32, u32);
+    /// 握着的目录或文件。
+    pub type Handle = File;
+    /// 身份：卷序列号与文件号。
+    pub type Id = (u32, u32, u32);
 
-    pub fn dir_id(path: &std::path::Path) -> std::io::Result<DirId> {
-        use std::os::windows::fs::OpenOptionsExt;
-        use windows_sys::Win32::Storage::FileSystem::{
-            BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
-            GetFileInformationByHandle,
-        };
-        let f = std::fs::OpenOptions::new()
-            .access_mode(0)
-            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
-            .open(path)?;
+    use std::io;
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::FromRawHandle;
+    use std::path::{Path, PathBuf};
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL, FILE_ATTRIBUTE_REPARSE_POINT,
+        FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT, FILE_LIST_DIRECTORY,
+        FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
+        SYNCHRONIZE,
+    };
+
+    /// 握着目录时要的权限：列、穿过、在里面建、读属性。
+    const HOLD: u32 = FILE_LIST_DIRECTORY
+        | FILE_TRAVERSE
+        | FILE_ADD_FILE
+        | FILE_ADD_SUBDIRECTORY
+        | FILE_READ_ATTRIBUTES
+        | SYNCHRONIZE;
+    /// 握着目录时不共享删除：它不能被改名、删除，它的上级也不能被改名。
+    const NO_DELETE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE;
+
+    fn info(f: &File) -> io::Result<BY_HANDLE_FILE_INFORMATION> {
+        use windows_sys::Win32::Storage::FileSystem::GetFileInformationByHandle;
         // SAFETY: 全零是合法的初值；句柄在 `f` 活着时有效。
         let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
         if unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) } == 0 {
-            return Err(std::io::Error::last_os_error());
+            return Err(io::Error::last_os_error());
         }
-        Ok((
-            info.dwVolumeSerialNumber,
-            info.nFileIndexHigh,
-            info.nFileIndexLow,
-        ))
+        Ok(info)
+    }
+
+    pub fn id(f: &File) -> io::Result<Id> {
+        let i = info(f)?;
+        Ok((i.dwVolumeSerialNumber, i.nFileIndexHigh, i.nFileIndexLow))
+    }
+
+    /// 按路径认出 `path` 指的那个东西（跟进链接）。
+    pub fn identify(path: &Path) -> io::Result<Id> {
+        let f = std::fs::OpenOptions::new()
+            .access_mode(FILE_READ_ATTRIBUTES)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)?;
+        id(&f)
+    }
+
+    fn not(what: &str) -> io::Error {
+        io::Error::new(io::ErrorKind::InvalidInput, what.to_string())
+    }
+
+    /// 按路径打开目录并握住（跟进链接：握住的是真正的那个目录）。
+    pub fn hold_dir(path: &Path) -> io::Result<File> {
+        let f = std::fs::OpenOptions::new()
+            .access_mode(HOLD)
+            .share_mode(NO_DELETE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(path)?;
+        if info(&f)?.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY == 0 {
+            return Err(not("not a directory"));
+        }
+        Ok(f)
+    }
+
+    /// 不跟进地打开 `path` 这一项本身（junction、符号链接打开的是链接自己），以便按句柄删除。`dir` 时要求是真目录并握住，
+    /// 否则要求是普通文件；是链接、类型不对都报错。
+    pub fn open_entry(path: &Path, dir: bool) -> io::Result<File> {
+        let (access, share) = if dir {
+            (HOLD | DELETE, NO_DELETE)
+        } else {
+            (
+                DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+                FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            )
+        };
+        let f = std::fs::OpenOptions::new()
+            .access_mode(access)
+            .share_mode(share)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        let a = info(&f)?.dwFileAttributes;
+        if a & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(not("a link"));
+        }
+        if (a & FILE_ATTRIBUTE_DIRECTORY != 0) != dir {
+            return Err(not(if dir {
+                "not a directory"
+            } else {
+                "a directory"
+            }));
+        }
+        Ok(f)
+    }
+
+    /// 在握着的 `parent` 里建名为 `name` 的目录并握住（`NtCreateFile` 相对 `parent`：建出来的同时就握住，中间没有
+    /// 可被换掉的空档）。`exclusive` 时已有同名的就报 AlreadyExists；否则打开已有的那个，但它不能是链接。
+    /// 返回的 `bool` 是不是这次新建的。
+    pub fn create_dir_in(
+        parent: &File,
+        name: &std::ffi::OsStr,
+        exclusive: bool,
+    ) -> io::Result<(File, bool)> {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
+        use windows_sys::Wdk::Storage::FileSystem::{
+            FILE_CREATE, FILE_DIRECTORY_FILE, FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT,
+            FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
+        };
+        use windows_sys::Win32::Foundation::{
+            HANDLE, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError, UNICODE_STRING,
+        };
+        use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
+        const FILE_CREATED: usize = 2;
+        let wide: Vec<u16> = name.encode_wide().collect();
+        let bytes = u16::try_from(wide.len() * 2).map_err(|_| not("a name that is too long"))?;
+        let us = UNICODE_STRING {
+            Length: bytes,
+            MaximumLength: bytes,
+            Buffer: wide.as_ptr() as *mut u16,
+        };
+        let oa = OBJECT_ATTRIBUTES {
+            Length: std::mem::size_of::<OBJECT_ATTRIBUTES>() as u32,
+            RootDirectory: parent.as_raw_handle(),
+            ObjectName: &us,
+            Attributes: OBJ_CASE_INSENSITIVE,
+            SecurityDescriptor: std::ptr::null(),
+            SecurityQualityOfService: std::ptr::null(),
+        };
+        let mut h: HANDLE = std::ptr::null_mut();
+        // SAFETY: 全零是合法的初值。
+        let mut iosb: IO_STATUS_BLOCK = unsafe { std::mem::zeroed() };
+        // SAFETY: 名字、属性块在调用期间有效；`parent` 是打开着的目录句柄；成功时 `h` 归我们所有。
+        let status = unsafe {
+            NtCreateFile(
+                &mut h,
+                HOLD | DELETE,
+                &oa,
+                &mut iosb,
+                std::ptr::null(),
+                FILE_ATTRIBUTE_NORMAL,
+                NO_DELETE,
+                if exclusive { FILE_CREATE } else { FILE_OPEN_IF },
+                FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
+                std::ptr::null(),
+                0,
+            )
+        };
+        if status < 0 {
+            // SAFETY: 只换算错误码。
+            let code = unsafe { RtlNtStatusToDosError(status) };
+            return Err(io::Error::from_raw_os_error(code as i32));
+        }
+        // SAFETY: 成功时 `h` 是新打开的句柄，交给 `File` 关闭。
+        let f = unsafe { File::from_raw_handle(h) };
+        let made = iosb.Information == FILE_CREATED;
+        if !made && info(&f)?.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(not("a link"));
+        }
+        Ok((f, made))
+    }
+
+    /// 握着的东西的真实路径（`\\?\` 形式，链接都已解开）。
+    pub fn real_path(f: &File) -> io::Result<PathBuf> {
+        use std::os::windows::ffi::OsStringExt;
+        use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
+        let mut buf = vec![0u16; 512];
+        loop {
+            // SAFETY: 缓冲区长度如实给出；句柄在 `f` 活着时有效。
+            let n = unsafe {
+                GetFinalPathNameByHandleW(f.as_raw_handle(), buf.as_mut_ptr(), buf.len() as u32, 0)
+            } as usize;
+            if n == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            if n < buf.len() {
+                return Ok(PathBuf::from(std::ffi::OsString::from_wide(&buf[..n])));
+            }
+            buf.resize(n + 1, 0);
+        }
+    }
+
+    /// 按句柄删除：删的就是这个句柄打开的那一个。目录不空时失败。按 POSIX 语义删（名字立即消失，别的程序还开着它也不留
+    /// 「待删除」的名字挡住上级目录的删除）；文件系统不支持就退回普通的删除标记。
+    pub fn delete(f: &File) -> io::Result<()> {
+        use windows_sys::Win32::Storage::FileSystem::{
+            FILE_DISPOSITION_FLAG_DELETE, FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+            FILE_DISPOSITION_INFO, FILE_DISPOSITION_INFO_EX, FileDispositionInfo,
+            FileDispositionInfoEx, SetFileInformationByHandle,
+        };
+        let ex = FILE_DISPOSITION_INFO_EX {
+            Flags: FILE_DISPOSITION_FLAG_DELETE | FILE_DISPOSITION_FLAG_POSIX_SEMANTICS,
+        };
+        // SAFETY: 结构体与长度如实给出；句柄在 `f` 活着时有效。
+        if unsafe {
+            SetFileInformationByHandle(
+                f.as_raw_handle(),
+                FileDispositionInfoEx,
+                (&ex as *const FILE_DISPOSITION_INFO_EX).cast(),
+                std::mem::size_of::<FILE_DISPOSITION_INFO_EX>() as u32,
+            )
+        } != 0
+        {
+            return Ok(());
+        }
+        let err = io::Error::last_os_error();
+        const ERROR_INVALID_FUNCTION: i32 = 1;
+        const ERROR_NOT_SUPPORTED: i32 = 50;
+        const ERROR_INVALID_PARAMETER: i32 = 87;
+        if !matches!(
+            err.raw_os_error(),
+            Some(ERROR_INVALID_FUNCTION | ERROR_NOT_SUPPORTED | ERROR_INVALID_PARAMETER)
+        ) {
+            return Err(err);
+        }
+        let plain = FILE_DISPOSITION_INFO { DeleteFile: true };
+        // SAFETY: 同上。
+        if unsafe {
+            SetFileInformationByHandle(
+                f.as_raw_handle(),
+                FileDispositionInfo,
+                (&plain as *const FILE_DISPOSITION_INFO).cast(),
+                std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+            )
+        } != 0
+        {
+            return Ok(());
+        }
+        Err(io::Error::last_os_error())
     }
 
     /// 打开一个不存在的 pid 时系统给的错误码。
@@ -621,12 +902,67 @@ mod os {
 
     pub const ERROR_NO_SUCH_PROCESS: u32 = 87;
 
-    pub type DirId = (u64, u64, u32);
+    // 按路径做的近似实现：只为能编译、跑与句柄无关的用例。
+    use std::io;
+    use std::os::unix::fs::MetadataExt;
+    use std::path::{Path, PathBuf};
 
-    pub fn dir_id(path: &std::path::Path) -> std::io::Result<DirId> {
-        use std::os::unix::fs::MetadataExt;
-        let m = std::fs::symlink_metadata(path)?;
-        Ok((m.dev(), m.ino(), 0))
+    pub struct Handle(PathBuf);
+    pub type Id = (u64, u64);
+
+    pub fn id(h: &Handle) -> io::Result<Id> {
+        let m = std::fs::symlink_metadata(&h.0)?;
+        Ok((m.dev(), m.ino()))
+    }
+
+    pub fn identify(path: &Path) -> io::Result<Id> {
+        let m = std::fs::metadata(path)?;
+        Ok((m.dev(), m.ino()))
+    }
+
+    pub fn hold_dir(path: &Path) -> io::Result<Handle> {
+        if !std::fs::metadata(path)?.is_dir() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "not a directory",
+            ));
+        }
+        Ok(Handle(std::fs::canonicalize(path)?))
+    }
+
+    pub fn open_entry(path: &Path, dir: bool) -> io::Result<Handle> {
+        let t = std::fs::symlink_metadata(path)?.file_type();
+        if t.is_symlink() || t.is_dir() != dir {
+            return Err(io::Error::new(io::ErrorKind::InvalidInput, "not a copy"));
+        }
+        Ok(Handle(path.to_path_buf()))
+    }
+
+    pub fn create_dir_in(
+        parent: &Handle,
+        name: &std::ffi::OsStr,
+        exclusive: bool,
+    ) -> io::Result<(Handle, bool)> {
+        let path = parent.0.join(name);
+        match std::fs::create_dir(&path) {
+            Ok(()) => Ok((Handle(path), true)),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists && !exclusive => {
+                open_entry(&path, true).map(|h| (h, false))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    pub fn real_path(h: &Handle) -> io::Result<PathBuf> {
+        Ok(h.0.clone())
+    }
+
+    pub fn delete(h: &Handle) -> io::Result<()> {
+        if std::fs::symlink_metadata(&h.0)?.is_dir() {
+            std::fs::remove_dir(&h.0)
+        } else {
+            std::fs::remove_file(&h.0)
+        }
     }
 }
 
@@ -636,10 +972,14 @@ mod tests {
     use std::cell::RefCell;
     use std::sync::mpsc;
 
+    pub(super) type RemoveHook = Box<dyn FnOnce(&Path)>;
+
     thread_local! {
         /// 核对完暂存目录、清扫之前调一次（只在单元测试里有）。
         pub(super) static AFTER_CHECKS: RefCell<Option<Box<dyn FnOnce()>>> =
             const { RefCell::new(None) };
+        /// 删副本之前调一次，给出副本目录的真实路径（只在单元测试里有）。
+        pub(super) static BEFORE_REMOVE: RefCell<Option<RemoveHook>> = const { RefCell::new(None) };
         /// 复制完库文件、还没复制 `-wal` 时调一次（只在单元测试里有）。
         pub(super) static AFTER_DATABASE_COPY: RefCell<Option<Box<dyn FnOnce()>>> =
             const { RefCell::new(None) };
@@ -816,5 +1156,136 @@ mod tests {
             fs::read(root.join("user-file.txt")).unwrap(),
             b"must remain"
         );
+    }
+
+    /// peer r6 P1-01：检查之后，源库所在的目录被整个挪进暂存目录，名字像一个遗留副本（`read-<已退出的 pid>-1`，
+    /// 库就叫 `db.sqlite`，旁边留着有帧的 `-wal`）；或者只把库文件挪进一个遗留副本里。清扫按卷号 + 文件号认出源库所在的
+    /// 目录与库文件，不删（`-wal` 只靠认出目录）。挪走之后原路径没了，读报错；挪过去的源库、`-wal` 与旁边的文件都原样。
+    #[test]
+    fn a_source_moved_into_the_scratch_after_the_checks_is_not_swept() {
+        for whole_directory in [true, false] {
+            let d = dir(if whole_directory {
+                "moved-source-dir"
+            } else {
+                "moved-source-db"
+            });
+            let src = d.join("src");
+            fs::create_dir_all(&src).unwrap();
+            let db = src.join("db.sqlite");
+            let c = Connection::open(&db).unwrap();
+            if whole_directory {
+                // 关闭时不删 `-wal`、不 checkpoint：源目录里留着有帧的 `db.sqlite-wal`。
+                let mut persist = 1i32;
+                // SAFETY: 连接开着；参数是 `int*`。
+                let rc = unsafe {
+                    rusqlite::ffi::sqlite3_file_control(
+                        c.handle(),
+                        c"main".as_ptr(),
+                        rusqlite::ffi::SQLITE_FCNTL_PERSIST_WAL,
+                        (&mut persist as *mut i32).cast(),
+                    )
+                };
+                assert_eq!(rc, 0);
+                c.execute_batch(
+                    "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+                     CREATE TABLE marker(x); INSERT INTO marker VALUES (1);",
+                )
+                .unwrap();
+            } else {
+                c.execute_batch("CREATE TABLE marker(x); INSERT INTO marker VALUES (1);")
+                    .unwrap();
+            }
+            drop(c);
+            assert_eq!(wal_has_frames(&db), whole_directory);
+            fs::write(src.join("user-file.txt"), b"must remain").unwrap();
+            let original = fs::read(&db).unwrap();
+            let wal = fs::read(sidecar(&db, "-wal")).ok();
+            let scratch = d.join("scratch");
+            let left = scratch.join("read-4294967295-1");
+            let moved = if whole_directory {
+                fs::create_dir_all(&scratch).unwrap();
+                left.join("db.sqlite")
+            } else {
+                fs::create_dir_all(&left).unwrap();
+                left.join("db.sqlite")
+            };
+            let (from_dir, from_db, to) = (src.clone(), db.clone(), left.clone());
+            AFTER_CHECKS.with(|h| {
+                *h.borrow_mut() = Some(Box::new(move || {
+                    if whole_directory {
+                        fs::rename(&from_dir, &to).unwrap();
+                    } else {
+                        fs::rename(&from_db, to.join("db.sqlite")).unwrap();
+                    }
+                }))
+            });
+            let v = read(&db, &scratch, |c| {
+                c.query_row("SELECT x FROM marker", [], |r| r.get::<_, i64>(0))
+            });
+            assert!(v.is_err(), "{v:?}");
+            assert_eq!(
+                fs::read(&moved).unwrap(),
+                original,
+                "whole directory: {whole_directory}"
+            );
+            if whole_directory {
+                assert_eq!(
+                    fs::read(left.join("user-file.txt")).unwrap(),
+                    b"must remain"
+                );
+                assert_eq!(
+                    fs::read(left.join("db.sqlite-wal")).ok(),
+                    wal,
+                    "the source's -wal"
+                );
+            }
+        }
+    }
+
+    /// peer r6 P1-01：删副本时（读完、SQLite 已经关掉，副本目录里没有别的打开的文件），副本目录与它的上级都不能被改名：
+    /// 握着它、不共享删除。它的真实路径不变，按它打开、删掉的就是副本里的文件。
+    #[test]
+    fn a_copy_cannot_be_moved_while_it_is_removed() {
+        let d = dir("held-while-removed");
+        fs::create_dir_all(d.join("src")).unwrap();
+        let db = d.join("src").join("source.sqlite");
+        let live = Connection::open(&db).unwrap();
+        live.execute_batch(
+            "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+             CREATE TABLE marker(x); INSERT INTO marker VALUES (1);",
+        )
+        .unwrap();
+        assert!(wal_has_frames(&db));
+        let scratch = d.join("scratch");
+        fs::create_dir_all(&scratch).unwrap();
+        let tried = std::rc::Rc::new(RefCell::new(Vec::new()));
+        let seen = tried.clone();
+        BEFORE_REMOVE.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move |real: &Path| {
+                for from in [real.to_path_buf(), real.parent().unwrap().to_path_buf()] {
+                    let to = PathBuf::from(format!("{}-moved", from.display()));
+                    seen.borrow_mut()
+                        .push((from.clone(), fs::rename(&from, &to).is_ok()));
+                }
+            }))
+        });
+        let v = read(&db, &scratch, |c| {
+            c.query_row("SELECT x FROM marker", [], |r| r.get::<_, i64>(0))
+        });
+        assert_eq!(v.unwrap(), 1);
+        assert_eq!(tried.borrow().len(), 2, "the hook did not run");
+        for (from, moved) in tried.borrow().iter() {
+            assert!(
+                !moved,
+                "{} was moved while the copy was removed",
+                from.display()
+            );
+        }
+        assert_eq!(
+            fs::read_dir(&scratch).unwrap().count(),
+            0,
+            "the copy is left"
+        );
+        drop(live);
     }
 }
