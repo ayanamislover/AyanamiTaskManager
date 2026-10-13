@@ -140,9 +140,13 @@ fn with_suffix(db: &Path, suffix: &str) -> PathBuf {
 /// 把 `db` 切成 WAL、跑 `sql`（不 checkpoint），趁连接开着把主文件与 `-wal`（`keep_shm` 时连 `-shm`）拷出来，
 /// 关掉连接后再拷回去：等于服务在这一刻被杀。
 fn kill_with_frames(db: &Path, sql: &str, keep_shm: bool) {
-    let side = db.parent().unwrap().join("killed-side");
-    let _ = fs::remove_dir_all(&side);
-    fs::create_dir_all(&side).unwrap();
+    // 拷出来的文件放在两个根之外：放在库旁边的话，库旁别的程序的临时文件（见 `files`）会让收尾删不掉这个目录
+    // （peer r3 P2-03 那次还原后复跑失败就在这里）。
+    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let side = dir(&format!(
+        "killed-side-{}",
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ));
     let c = Connection::open(db).unwrap();
     c.execute_batch("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;")
         .unwrap();
@@ -161,7 +165,7 @@ fn kill_with_frames(db: &Path, sql: &str, keep_shm: bool) {
     for part in &parts {
         fs::rename(side.join(format!("db{part}")), with_suffix(db, part)).unwrap();
     }
-    fs::remove_dir(&side).unwrap();
+    let _ = fs::remove_dir_all(&side);
     assert!(fs::metadata(with_suffix(db, "-wal")).unwrap().len() > 0);
 }
 

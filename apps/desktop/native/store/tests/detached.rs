@@ -40,12 +40,25 @@ fn suffix(p: &Path, s: &str) -> PathBuf {
 /// 给写者的那段时间：写者没被挡住的话，这段时间足够它做完。
 const WINDOW: Duration = Duration::from_millis(400);
 
+/// 写者用的连接：新开一个，或者一个早就开着、握着 SHARED 的（挪到另一条线程上用，peer r3）。
+enum By {
+    New,
+    Open(Connection),
+}
+
 /// 在另一条线程上跑 `write`，返回「它做完了」的信号。
-fn writer(db: &Path, write: impl FnOnce(&Connection) + Send + 'static) -> mpsc::Receiver<()> {
+fn writer(
+    db: &Path,
+    by: By,
+    write: impl FnOnce(&Connection) + Send + 'static,
+) -> mpsc::Receiver<()> {
     let (done, finished) = mpsc::channel();
     let db = db.to_path_buf();
     thread::spawn(move || {
-        let c = Connection::open(&db).unwrap();
+        let c = match by {
+            By::New => Connection::open(&db).unwrap(),
+            By::Open(c) => c,
+        };
         c.busy_timeout(Duration::from_secs(30)).unwrap();
         write(&c);
         done.send(()).unwrap();
@@ -117,7 +130,7 @@ fn a_rollback_journal_writer_waits_until_the_read_is_done() {
     drop(c);
     let finished = RefCell::new(None);
     let value = detached::read(&db, &d.join("scratch"), |reader| {
-        *finished.borrow_mut() = Some(writer(&db, |w| {
+        *finished.borrow_mut() = Some(writer(&db, By::New, |w| {
             w.execute_batch("PRAGMA cache_size = 1; BEGIN IMMEDIATE; UPDATE marker SET x = 2;")
                 .unwrap();
             for _ in 0..2000 {
@@ -142,21 +155,27 @@ fn a_rollback_journal_writer_waits_until_the_read_is_done() {
     assert_eq!(after, 2);
 }
 
-/// 同一条查询读两张表：中间另一个连接把两张表一起改掉并 checkpoint。读到的必须是同一次提交的两个值。
-fn two_tables_in_one_query(db: &Path, scratch: &Path) -> (i64, i64) {
+/// 一个事务里把两张表都改成 1，再 checkpoint 截掉 `-wal`。
+const BOTH_TO_ONE: &str =
+    "BEGIN; UPDATE left_value SET x = 1; UPDATE right_value SET x = 1; COMMIT;
+                           PRAGMA wal_checkpoint(TRUNCATE);";
+
+/// 同一条查询读两张表：中间另一个连接（`by`）跑 `write`、把两张表一起改掉。读到的必须是同一次提交的两个值。
+fn two_tables_in_one_query(
+    db: &Path,
+    scratch: &Path,
+    by: By,
+    write: impl FnOnce(&Connection) + Send + 'static,
+) -> (i64, i64) {
     let finished = RefCell::new(None);
+    let job = RefCell::new(Some((by, write)));
     let pair = detached::read(db, scratch, |reader| {
         let mut stmt =
             reader.prepare("SELECT x FROM left_value UNION ALL SELECT x FROM right_value")?;
         let mut rows = stmt.query([])?;
         let left = rows.next()?.unwrap().get::<_, i64>(0)?;
-        *finished.borrow_mut() = Some(writer(db, |w| {
-            w.execute_batch(
-                "BEGIN; UPDATE left_value SET x = 1; UPDATE right_value SET x = 1; COMMIT;
-                 PRAGMA wal_checkpoint(TRUNCATE);",
-            )
-            .unwrap();
-        }));
+        let (by, write) = job.borrow_mut().take().unwrap();
+        *finished.borrow_mut() = Some(writer(db, by, write));
         blocked_for_the_window(finished.borrow().as_ref().unwrap());
         let right = rows.next()?.unwrap().get::<_, i64>(0)?;
         Ok::<_, rusqlite::Error>((left, right))
@@ -187,28 +206,87 @@ fn a_new_wal_connection_waits_until_the_query_is_done() {
     let db = source(&d, "source.sqlite");
     drop(two_tables(&db));
     assert!(!suffix(&db, "-shm").exists() && !detached::wal_has_frames(&db));
-    assert_eq!(two_tables_in_one_query(&db, &d.join("scratch")), (0, 0));
+    assert_eq!(
+        two_tables_in_one_query(&db, &d.join("scratch"), By::New, |w| w
+            .execute_batch(BOTH_TO_ONE)
+            .unwrap()),
+        (0, 0)
+    );
 }
 
-/// 同上，但 WAL 库正被另一个连接开着（握着 SHARED、`-shm` 在，`-wal` 刚 checkpoint 成空的）：它不必再拿 PENDING，
-/// 挡住它的是 `-shm` 上的写锁与 checkpoint 锁。
-#[test]
-fn a_live_wal_connection_waits_until_the_query_is_done() {
-    let d = dir("wal-live-connection");
-    let db = source(&d, "source.sqlite");
-    let live = two_tables(&db);
-    live.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
-        .unwrap();
-    assert!(suffix(&db, "-shm").exists() && !detached::wal_has_frames(&db));
-    assert_eq!(two_tables_in_one_query(&db, &d.join("scratch")), (0, 0));
-    let after: (i64, i64) = live
+/// 两张表现在的值（新开一个连接读）。
+fn both(db: &Path) -> (i64, i64) {
+    Connection::open(db)
+        .unwrap()
         .query_row(
             "SELECT (SELECT x FROM left_value), (SELECT x FROM right_value)",
             [],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
+        .unwrap()
+}
+
+/// 一个早就开着的 WAL 连接（握着 SHARED、`-shm` 在，`-wal` 刚 checkpoint 成空的）自己来写：它不必再拿 PENDING，
+/// 挡住它的是 `-shm` 上的写锁与 checkpoint 锁（peer r3 指出原来的用例写者是新开的连接，量不到这一道）。
+#[test]
+fn a_wal_connection_already_open_waits_until_the_query_is_done() {
+    let d = dir("wal-open-connection");
+    let db = source(&d, "source.sqlite");
+    let live = two_tables(&db);
+    live.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
         .unwrap();
-    assert_eq!(after, (1, 1));
+    assert!(suffix(&db, "-shm").exists() && !detached::wal_has_frames(&db));
+    let pair = two_tables_in_one_query(&db, &d.join("scratch"), By::Open(live), |w| {
+        w.execute_batch(BOTH_TO_ONE).unwrap()
+    });
+    assert_eq!(pair, (0, 0));
+    assert_eq!(both(&db), (1, 1));
+}
+
+/// peer r3 P1-01：开着的连接切到 `locking_mode=EXCLUSIVE` 再写。它从 SHARED 直接要 EXCLUSIVE，不经过 PENDING，
+/// 也不再用 `-shm` 的锁；挡住它的是冻结握着的 SHARED 区。
+#[test]
+fn a_wal_connection_switching_to_exclusive_locking_waits_until_the_query_is_done() {
+    let d = dir("wal-exclusive-locking");
+    let db = source(&d, "source.sqlite");
+    let live = two_tables(&db);
+    live.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+    let pair = two_tables_in_one_query(&db, &d.join("scratch"), By::Open(live), |w| {
+        w.execute_batch(&format!("PRAGMA locking_mode = EXCLUSIVE; {BOTH_TO_ONE}"))
+            .unwrap()
+    });
+    assert_eq!(pair, (0, 0));
+    assert_eq!(both(&db), (1, 1));
+}
+
+/// 同上一类：开着的连接把库从 WAL 切回回滚日志模式再写（切换要 EXCLUSIVE）。冻结时切不过去（SQLite 对这一步
+/// 不调 busy handler，直接报 busy），写者自己重试；读完才切得过去。
+#[test]
+fn a_connection_leaving_wal_mode_waits_until_the_query_is_done() {
+    let d = dir("wal-to-delete");
+    let db = source(&d, "source.sqlite");
+    let live = two_tables(&db);
+    live.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")
+        .unwrap();
+    let pair = two_tables_in_one_query(&db, &d.join("scratch"), By::Open(live), |w| {
+        let deadline = std::time::Instant::now() + Duration::from_secs(30);
+        loop {
+            let mode: Result<String, _> =
+                w.query_row("PRAGMA journal_mode = DELETE", [], |r| r.get(0));
+            if mode.as_deref() == Ok("delete") {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "{mode:?}");
+            thread::sleep(Duration::from_millis(20));
+        }
+        w.execute_batch(
+            "BEGIN; UPDATE left_value SET x = 1; UPDATE right_value SET x = 1; COMMIT;",
+        )
+        .unwrap();
+    });
+    assert_eq!(pair, (0, 0));
+    assert_eq!(both(&db), (1, 1));
 }
 
 /// 开着的写事务一直不提交（WAL 的写锁一直被占着）：冻结不了，期限到了报 Busy，不读不确定的内容。
@@ -307,15 +385,42 @@ fn copies_left_by_a_dead_process_are_swept_on_the_next_read() {
     child.wait().unwrap();
     let left = scratch.join(format!("read-{dead}-0"));
     let alive = scratch.join(format!("read-{}-999", std::process::id()));
-    for dir in [&left, &alive] {
+    // 名字不是 `read-<pid>-<序号>` 的、不是目录的，都不是这里起的，不碰（peer r3 P2-01）。
+    let unmatched = scratch.join(format!("read-{dead}-not-a-sequence"));
+    let not_a_copy = scratch.join(format!("read-{dead}"));
+    for dir in [&left, &alive, &unmatched, &not_a_copy] {
         fs::create_dir_all(dir).unwrap();
         fs::write(dir.join("db.sqlite"), b"left over").unwrap();
     }
+    let plain_file = scratch.join(format!("read-{dead}-1"));
+    fs::write(&plain_file, b"a file").unwrap();
     let v = detached::read(&db, &scratch, |c| {
         c.query_row("SELECT x FROM marker", [], |r| r.get::<_, i64>(0))
     });
     assert_eq!(v.unwrap(), 1);
     assert!(!left.exists());
     assert!(alive.exists());
+    assert!(unmatched.join("db.sqlite").exists() && not_a_copy.join("db.sqlite").exists());
+    assert!(plain_file.is_file());
+    drop(c);
+}
+
+/// peer r3 P2-02：暂存目录建到一半失败（第二层是 Windows 不认的名字），这次新建的上级也拿掉，再报错。
+#[test]
+fn a_scratch_that_cannot_be_made_leaves_no_parents_behind() {
+    let d = dir("scratch-error");
+    let db = source(&d, "source.sqlite");
+    let c = Connection::open(&db).unwrap();
+    c.execute_batch("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; CREATE TABLE marker(x); INSERT INTO marker VALUES (1);")
+        .unwrap();
+    let scratch = d
+        .join("created-parent")
+        .join("invalid<name")
+        .join("scratch");
+    let r = detached::read(&db, &scratch, |c| {
+        c.query_row("SELECT x FROM marker", [], |r| r.get::<_, i64>(0))
+    });
+    assert!(matches!(r, Err(Error::Open(_))), "{r:?}");
+    assert!(!d.join("created-parent").exists());
     drop(c);
 }

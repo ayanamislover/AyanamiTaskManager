@@ -1,4 +1,5 @@
-//! 不写源目录地读一个 SQLite 库：启动判定、安装探测、离线诊断（W8 关口 peer r1 P1-01 / P1-02，r2 P1-01～P1-03）。
+//! 不写源目录地读一个 SQLite 库：启动判定、安装探测、离线诊断（W8 关口 peer r1 P1-01 / P1-02，r2 P1-01～P1-03，
+//! r3 P1-01）。
 //!
 //! 只读连接（`SQLITE_OPEN_READ_ONLY`）对 WAL 库并不只读：没有 `-shm` 就建一个，有就改它的读标记，没有 `-wal`
 //! 还会建一个空的（rusqlite 0.39 自带的 SQLite 实测）。读写连接更不行：最后一个连接关闭时会 checkpoint、删 `-wal`，
@@ -7,12 +8,20 @@
 //!
 //! 所以先让源库在读的这段时间里不会变（冻结），再读：
 //! - 按 SQLite 在 Windows 上的锁协议（`os_win.c`），在库文件上独占 PENDING 字节。新连接拿 SHARED 要先拿它，
-//!   写者从 RESERVED 升 EXCLUSIVE 也要先拿它：握着它，就没有人能开始读写，也没有人能改库文件、回滚日志。
-//! - 还有别的连接握着 SHARED、库又是 WAL 模式：这些连接不必再拿 PENDING 就能往 `-wal` 追加、checkpoint 进库文件。
+//!   写者从 RESERVED 升 EXCLUSIVE 也要先拿它：握着它，就没有新的连接能开始读写，也没有写者能提交。
+//! - 再握住 SHARED 区（510 字节）：没有别的连接时独占，有就和它们一起共享。任何 EXCLUSIVE 都要独占这一区，
+//!   而有几条路是从 SHARED 直接升 EXCLUSIVE、不经过 PENDING 的（peer r3 P1-01）：最后一个 WAL 连接关闭时的
+//!   checkpoint 与删除 `-wal`、`locking_mode=EXCLUSIVE`、热日志回滚、`journal_mode` 切换。握着它，这些都拿不到。
+//!   代价是那个最后关闭的连接这次不 checkpoint、不删 `-wal` 与 `-shm`，留给下一个打开的连接（SQLite 本来就这样处理
+//!   「关闭时还有别的连接」）。
+//! - 还有别的连接、库又是 WAL 模式：这些连接拿着 SHARED，不必再拿 PENDING 就能往 `-wal` 追加、checkpoint 进库文件。
 //!   再在 `-shm` 上独占写锁与 checkpoint 锁两个字节（`WIN_SHM_BASE` = 120 起）：追加、checkpoint、重置 `-wal`
 //!   都要其中之一。`-shm` 只打开、加锁，不写。
-//! - 拿不到（有人正在提交、checkpoint、回滚）就放掉已拿的、等一会儿重来，到期限还拿不到报 [`Error::Busy`]。
-//!   被挡住的连接按各自的 busy_timeout 等，冻结只持续一次读或一次复制。
+//! - 拿不到（有人正在提交、checkpoint、回滚，或握着 EXCLUSIVE）就放掉已拿的、等一会儿重来，到期限还拿不到报
+//!   [`Error::Busy`]。
+//!
+//! 被挡住的写者按各自的 busy_timeout 等（2.x 是 5 s），等不到就报 busy：冻结只持续一次 `immutable` 读、或一次复制
+//! （本机 256 MiB 的库约 0.16 s），清扫旧副本、核对暂存目录都在冻结之前做。
 //!
 //! 冻结之后：
 //! - 没有热回滚日志、`-wal` 不在或为空：按 `immutable` 读源文件本身，读完才解冻；
@@ -20,7 +29,7 @@
 //!   恢复 WAL），读完删掉副本。不再拿文件的大小、修改时间猜复制是不是一致的（peer r2 P1-03）。
 //!
 //! 源目录一个字节不动，也不多出文件。副本删不掉（被别的程序占着）或进程被杀没来得及删的，下一次在同一个暂存目录读时，
-//! 按目录名里的 pid 清：那个进程已经不在了就删。
+//! 按目录名 `read-<pid>-<序号>` 里的 pid 清：确知那个进程已经不在了才删，名字对不上的、查不了的都不碰。
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -138,6 +147,7 @@ pub fn read_patiently<T, E>(
             source_dir.display()
         )));
     }
+    sweep(scratch);
     let frozen = freeze(db, patience)?;
     if !hot_journal(db) && !wal_has_frames(db) {
         let c = open_immutable(db).map_err(Error::Open)?;
@@ -184,6 +194,8 @@ fn inside(scratch: &Path, source_dir: &Path) -> Result<bool, String> {
 /// 冻结中的源库：丢掉时按相反的次序解锁。
 struct Frozen {
     db: File,
+    /// 握着 SHARED 区（独占或共享）。
+    shared: bool,
     shm: Option<File>,
 }
 
@@ -191,6 +203,9 @@ impl Drop for Frozen {
     fn drop(&mut self) {
         if let Some(shm) = &self.shm {
             os::unlock(shm, SHM_WRITE_AND_CHECKPOINT, 2);
+        }
+        if self.shared {
+            os::unlock(&self.db, SHARED_FIRST, SHARED_SIZE);
         }
         os::unlock(&self.db, PENDING_BYTE, 1);
     }
@@ -220,26 +235,30 @@ fn freeze<E>(db: &Path, patience: Duration) -> Result<Frozen, Error<E>> {
 /// 一次尝试：`Ok(Err(为什么没拿到))` 是该等一会儿再试。
 fn try_freeze(db: &Path) -> Result<Result<Frozen, &'static str>, String> {
     let file = File::open(db).map_err(|e| format!("{}: {e}", db.display()))?;
-    if !os::try_lock(&file, PENDING_BYTE, 1) {
+    if !os::try_lock(&file, PENDING_BYTE, 1, true) {
         return Ok(Err("a connection is starting or committing"));
     }
     let mut frozen = Frozen {
         db: file,
+        shared: false,
         shm: None,
     };
-    // 别的连接还握着 SHARED：回滚日志模式的读者正在读，或者 WAL 模式的连接开着（它们一直握着）。
-    let others = if os::try_lock(&frozen.db, SHARED_FIRST, SHARED_SIZE) {
-        os::unlock(&frozen.db, SHARED_FIRST, SHARED_SIZE);
+    // 独占得到 SHARED 区：没有别的连接（新连接又被 PENDING 挡着）。独占不到就和别的连接一起共享：回滚日志模式的读者
+    // 正在读，或者 WAL 模式的连接开着（它们一直握着 SHARED）。共享也拿不到，是有人握着 EXCLUSIVE。
+    let others = if os::try_lock(&frozen.db, SHARED_FIRST, SHARED_SIZE, true) {
         false
-    } else {
+    } else if os::try_lock(&frozen.db, SHARED_FIRST, SHARED_SIZE, false) {
         true
+    } else {
+        return Ok(Err("a connection holds the database exclusively"));
     };
+    frozen.shared = true;
     if others && wal_mode(db, &frozen.db) {
         // 刚拿到 SHARED 的连接还没来得及建 `-shm`：等它建好。
         let Ok(shm) = File::open(sidecar(db, "-shm")) else {
             return Ok(Err("a connection is opening the write-ahead log"));
         };
-        if !os::try_lock(&shm, SHM_WRITE_AND_CHECKPOINT, 2) {
+        if !os::try_lock(&shm, SHM_WRITE_AND_CHECKPOINT, 2, true) {
             return Ok(Err("a connection is writing or checkpointing"));
         }
         frozen.shm = Some(shm);
@@ -270,7 +289,6 @@ impl Copy {
     /// 在冻结中复制：库文件、有帧的 `-wal`、热日志。
     fn make(db: &Path, frozen: &Frozen, scratch: &Path) -> Result<Copy, String> {
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        sweep(scratch);
         let created = create_dirs(scratch)?;
         let dir = scratch.join(format!(
             "read-{}-{}",
@@ -313,7 +331,7 @@ impl Drop for Copy {
     }
 }
 
-/// 建出 `dir` 及缺的上级，返回新建的那些（由深到浅）。
+/// 建出 `dir` 及缺的上级，返回新建的那些（由深到浅）。中途失败就把这次新建的拿掉再报错（peer r3 P2-02）。
 fn create_dirs(dir: &Path) -> Result<Vec<PathBuf>, String> {
     let mut missing = Vec::new();
     let mut at = Some(dir);
@@ -328,36 +346,59 @@ fn create_dirs(dir: &Path) -> Result<Vec<PathBuf>, String> {
         match fs::create_dir(d) {
             Ok(()) => created.push(d.clone()),
             Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(format!("{}: {e}", d.display())),
+            Err(e) => {
+                for made in created.iter().rev() {
+                    let _ = fs::remove_dir(made);
+                }
+                return Err(format!("{}: {e}", d.display()));
+            }
         }
     }
     created.reverse();
     Ok(created)
 }
 
-/// 清掉已经不在的进程留下的副本目录（`read-<pid>-<序号>`）。pid 被别的进程重用了就留着，下次再看。
+/// 清掉已经不在的进程留下的副本目录。只认 [`Copy::make`] 起的名字 `read-<pid>-<序号>`（两段都是数字），且必须是目录；
+/// 确知那个进程已经不在了才删。查不了（没有权限等）、pid 被别的进程重用了，都留着（peer r3 P2-01）。在冻结之前做。
 fn sweep(scratch: &Path) {
     let Ok(entries) = fs::read_dir(scratch) else {
         return;
     };
     for entry in entries.flatten() {
-        let name = entry.file_name();
-        let Some(pid) = name
-            .to_str()
-            .and_then(|n| n.strip_prefix("read-"))
-            .and_then(|n| n.split('-').next())
-            .and_then(|p| p.parse::<u32>().ok())
-        else {
+        let Some(pid) = entry.file_name().to_str().and_then(copy_pid) else {
             continue;
         };
-        if pid != std::process::id() && !os::running(pid) {
+        if pid != std::process::id() && entry.file_type().is_ok_and(|t| t.is_dir()) && os::gone(pid)
+        {
             let _ = fs::remove_dir_all(entry.path());
         }
     }
 }
 
+/// 打开那个进程的结果 → 它确知已经不在了吗。`open_error`：打不开时系统给的错误码；`exit`：打开了、查到的退出码
+/// （查不到是 `None`）。只有「没有这个进程」（`ERROR_INVALID_PARAMETER`）和「查到了、不是 `STILL_ACTIVE`」算不在；
+/// 没有权限之类打不开、查不到退出码，都当它还在（peer r3 P2-01）。退出码恰好是 259 的进程也当它还在，宁可留着。
+fn gone_by(open_error: Option<u32>, exit: Option<u32>) -> bool {
+    const STILL_ACTIVE: u32 = 259;
+    match open_error {
+        Some(code) => code == os::ERROR_NO_SUCH_PROCESS,
+        None => exit.is_some_and(|code| code != STILL_ACTIVE),
+    }
+}
+
+/// `read-<pid>-<序号>` 里的 pid；名字不是这个样子就是 `None`。
+fn copy_pid(name: &str) -> Option<u32> {
+    let (pid, seq) = name.strip_prefix("read-")?.split_once('-')?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if digits(pid) && digits(seq) {
+        pid.parse().ok()
+    } else {
+        None
+    }
+}
+
 /// 经冻结时的句柄复制库文件。PENDING 字节所在那一页 SQLite 从来不用，别的进程可能在上面握着锁、读不了：
-/// 锁字节那 512 个字节写零。
+/// 锁字节那 512 个字节写零。副本读完就删，不刷盘（少占冻结的时间）。
 fn copy_database(from: &File, to: &Path) -> io::Result<()> {
     let len = from.metadata()?.len();
     let mut out = File::create(to)?;
@@ -382,7 +423,7 @@ fn copy_database(from: &File, to: &Path) -> io::Result<()> {
         out.write_all(&buf[..n])?;
         at += n as u64;
     }
-    out.sync_all()
+    Ok(())
 }
 
 #[cfg(windows)]
@@ -404,20 +445,17 @@ mod os {
         o
     }
 
-    /// 独占锁住 `[offset, offset + len)`，拿不到立即返回 false。
-    pub fn try_lock(file: &File, offset: u64, len: u32) -> bool {
+    /// 锁住 `[offset, offset + len)`（`exclusive` 时独占，否则共享），拿不到立即返回 false。
+    pub fn try_lock(file: &File, offset: u64, len: u32, exclusive: bool) -> bool {
         let mut o = at(offset);
+        let flags = LOCKFILE_FAIL_IMMEDIATELY
+            | if exclusive {
+                LOCKFILE_EXCLUSIVE_LOCK
+            } else {
+                0
+            };
         // SAFETY: 句柄在 `file` 活着时有效；同步句柄上 LOCKFILE_FAIL_IMMEDIATELY 立即返回。
-        unsafe {
-            LockFileEx(
-                file.as_raw_handle(),
-                LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
-                0,
-                len,
-                0,
-                &mut o,
-            ) != 0
-        }
+        unsafe { LockFileEx(file.as_raw_handle(), flags, 0, len, 0, &mut o) != 0 }
     }
 
     pub fn unlock(file: &File, offset: u64, len: u32) {
@@ -432,9 +470,28 @@ mod os {
         file.seek_read(buf, offset)
     }
 
-    pub fn running(pid: u32) -> bool {
-        atm_install_state::procs::find(pid).is_some()
+    /// 确知这个进程已经不在了：系统说没有这个 pid（`ERROR_INVALID_PARAMETER`），或打开了、它已经退出。
+    /// 打不开的别的原因（没有权限等）不算。
+    pub fn gone(pid: u32) -> bool {
+        use windows_sys::Win32::Foundation::{CloseHandle, GetLastError};
+        use windows_sys::Win32::System::Threading::{
+            GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        // SAFETY: 只查询；打开的句柄在返回前关掉。
+        unsafe {
+            let h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if h.is_null() {
+                return super::gone_by(Some(GetLastError()), None);
+            }
+            let mut code = 0u32;
+            let exit = (GetExitCodeProcess(h, &mut code) != 0).then_some(code);
+            CloseHandle(h);
+            super::gone_by(None, exit)
+        }
     }
+
+    /// 打开一个不存在的 pid 时系统给的错误码。
+    pub const ERROR_NO_SUCH_PROCESS: u32 = windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER;
 }
 
 /// 只在 Windows 上发行；别的平台上（只为能编译、跑与锁无关的用例）不加锁。
@@ -443,7 +500,7 @@ mod os {
     use std::fs::File;
     use std::os::unix::fs::FileExt;
 
-    pub fn try_lock(_file: &File, _offset: u64, _len: u32) -> bool {
+    pub fn try_lock(_file: &File, _offset: u64, _len: u32, _exclusive: bool) -> bool {
         true
     }
 
@@ -453,9 +510,11 @@ mod os {
         file.read_at(buf, offset)
     }
 
-    pub fn running(_pid: u32) -> bool {
-        true
+    pub fn gone(_pid: u32) -> bool {
+        false
     }
+
+    pub const ERROR_NO_SUCH_PROCESS: u32 = 87;
 }
 
 #[cfg(test)]
@@ -547,5 +606,55 @@ mod tests {
             std::thread::sleep(Duration::from_millis(50));
         }
         drop(live);
+    }
+
+    /// peer r3 P2-01：只有确知进程不在了才清它的副本；查不了的当它还在。
+    #[test]
+    fn a_process_is_gone_only_when_windows_says_so() {
+        const ACCESS_DENIED: u32 = 5;
+        assert!(gone_by(Some(os::ERROR_NO_SUCH_PROCESS), None));
+        assert!(!gone_by(Some(ACCESS_DENIED), None));
+        assert!(gone_by(None, Some(0)));
+        assert!(!gone_by(None, Some(259)));
+        assert!(!gone_by(None, None));
+        assert!(!os::gone(std::process::id()));
+        assert_eq!(copy_pid("read-12-3"), Some(12));
+        for name in [
+            "read-12",
+            "read-12-",
+            "read--3",
+            "read-12-3x",
+            "read-x-3",
+            "copy-12-3",
+        ] {
+            assert_eq!(copy_pid(name), None, "{name}");
+        }
+    }
+
+    /// peer r3 P1-01：复制完库文件、还没复制 `-wal` 时，最后一个开着的连接关掉。它关闭时从 SHARED 直接要 EXCLUSIVE
+    /// 去 checkpoint 并删 `-wal`，不经过 PENDING。冻结握着 SHARED 区，它拿不到，`-wal` 留着：副本里有那次已提交的写。
+    #[test]
+    fn the_last_wal_connection_closing_during_the_copy_does_not_take_the_wal_away() {
+        let d = dir("last-close");
+        fs::create_dir_all(d.join("src")).unwrap();
+        let db = d.join("src").join("source.sqlite");
+        let live = Connection::open(&db).unwrap();
+        live.execute_batch(
+            "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+             CREATE TABLE l(x); CREATE TABLE r(x); INSERT INTO l VALUES (0); INSERT INTO r VALUES (0);
+             PRAGMA wal_checkpoint(TRUNCATE); UPDATE l SET x = 1;",
+        )
+        .unwrap();
+        assert!(wal_has_frames(&db));
+        AFTER_DATABASE_COPY.with(|h| *h.borrow_mut() = Some(Box::new(move || drop(live))));
+        let q = |c: &Connection| {
+            c.query_row("SELECT (SELECT x FROM l), (SELECT x FROM r)", [], |r| {
+                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?))
+            })
+        };
+        assert_eq!(read(&db, &d.join("scratch"), q).unwrap(), (1, 0));
+        // 那个连接关闭时没能 checkpoint：`-wal` 还在，下一次读照样读到它。
+        assert!(wal_has_frames(&db));
+        assert_eq!(read(&db, &d.join("scratch"), q).unwrap(), (1, 0));
     }
 }
