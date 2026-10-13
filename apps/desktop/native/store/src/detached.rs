@@ -425,9 +425,6 @@ fn sweep(scratch: &Path, source_dir: &Path) {
         let Some(pid) = entry.file_name().to_str().and_then(copy_pid) else {
             continue;
         };
-        if pid == std::process::id() {
-            continue;
-        }
         let path = entry.path();
         // 不跟进：junction、符号链接在这里不是目录。
         if !fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
@@ -777,15 +774,16 @@ mod tests {
         assert_eq!(read(&db, &d.join("scratch"), q).unwrap(), (1, 0));
     }
 
-    /// peer r5 P1-01：检查时暂存目录还不存在，检查完、清扫前它被建成指向源库上上级的 junction。清扫要重新看一次：
-    /// 这时暂存目录包含源库，整个不清；源库（在 `read-<已退出的 pid>-1\data\` 下，名字像一个遗留副本）与旁边的文件都原样。
+    /// peer r5 P1-01：检查时暂存目录还不存在，检查完、清扫前它被建成指向源库上级的 junction。清扫要重新看一次：
+    /// 这时暂存目录包含源库，整个不清。源库就叫 `db.sqlite`、在 `read-<已退出的 pid>-1\` 里，和一个遗留副本分不出来——
+    /// 只删副本文件也会删到它，所以这里靠的是重查；源库与旁边的文件都原样。
     #[test]
     fn a_scratch_that_turns_into_a_link_after_the_checks_is_not_swept() {
         let d = dir("late-link");
         let actual = d.join("actual");
         let root = actual.join("read-4294967295-1");
-        fs::create_dir_all(root.join("data")).unwrap();
-        let db = root.join("data").join("atm.sqlite");
+        fs::create_dir_all(&root).unwrap();
+        let db = root.join("db.sqlite");
         let c = Connection::open(&db).unwrap();
         c.execute_batch("CREATE TABLE marker(x); INSERT INTO marker VALUES (1);")
             .unwrap();
