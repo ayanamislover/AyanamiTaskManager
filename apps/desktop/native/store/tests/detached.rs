@@ -424,3 +424,49 @@ fn a_scratch_that_cannot_be_made_leaves_no_parents_behind() {
     assert!(!d.join("created-parent").exists());
     drop(c);
 }
+
+/// 冻结也守 PENDING：一个写者已经拿着 PENDING、在等别的读者读完好提交，冻结让它先提交，而不是和读者一起把它
+/// 再挡一会儿（多挡的那段可能就让它等过自己的 busy_timeout）。SHARED 区只管挡 EXCLUSIVE；守 PENDING 是为了不插队。
+#[test]
+fn a_writer_already_waiting_to_commit_goes_first() {
+    let d = dir("pending-writer-first");
+    let db = source(&d, "source.sqlite");
+    let c = Connection::open(&db).unwrap();
+    c.execute_batch(
+        "PRAGMA journal_mode = DELETE; CREATE TABLE marker(x); INSERT INTO marker VALUES (1);",
+    )
+    .unwrap();
+    drop(c);
+    // 读者：开着读事务（握着 SHARED）800 ms。
+    let reader_db = db.clone();
+    let reader = thread::spawn(move || {
+        let r = Connection::open(&reader_db).unwrap();
+        r.execute_batch("BEGIN;").unwrap();
+        let _: i64 = r
+            .query_row("SELECT x FROM marker", [], |row| row.get(0))
+            .unwrap();
+        thread::sleep(Duration::from_millis(800));
+        r.execute_batch("COMMIT;").unwrap();
+    });
+    thread::sleep(Duration::from_millis(100));
+    // 写者：提交时拿到 PENDING，等读者放手。
+    let finished = writer(&db, By::New, |w| {
+        w.execute_batch("BEGIN IMMEDIATE; UPDATE marker SET x = 2; COMMIT;")
+            .unwrap()
+    });
+    thread::sleep(Duration::from_millis(300));
+    assert!(
+        finished.try_recv().is_err(),
+        "the writer should still be waiting for the reader"
+    );
+    let value = detached::read(&db, &d.join("scratch"), |c| {
+        c.query_row("SELECT x FROM marker", [], |r| r.get::<_, i64>(0))
+    })
+    .unwrap();
+    assert_eq!(
+        value, 2,
+        "the read went ahead of a writer that was waiting to commit"
+    );
+    finished.recv_timeout(Duration::from_secs(30)).unwrap();
+    reader.join().unwrap();
+}

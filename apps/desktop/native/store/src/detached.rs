@@ -9,6 +9,7 @@
 //! 所以先让源库在读的这段时间里不会变（冻结），再读：
 //! - 按 SQLite 在 Windows 上的锁协议（`os_win.c`），在库文件上独占 PENDING 字节。新连接拿 SHARED 要先拿它，
 //!   写者从 RESERVED 升 EXCLUSIVE 也要先拿它：握着它，就没有新的连接能开始读写，也没有写者能提交。
+//!   有写者已经拿着它、在等读者读完好提交时，冻结拿不到、让它先提交，不插它的队。
 //! - 再握住 SHARED 区（510 字节）：没有别的连接时独占，有就和它们一起共享。任何 EXCLUSIVE 都要独占这一区，
 //!   而有几条路是从 SHARED 直接升 EXCLUSIVE、不经过 PENDING 的（peer r3 P1-01）：最后一个 WAL 连接关闭时的
 //!   checkpoint 与删除 `-wal`、`locking_mode=EXCLUSIVE`、热日志回滚、`journal_mode` 切换。握着它，这些都拿不到。
