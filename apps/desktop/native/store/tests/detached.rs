@@ -64,6 +64,25 @@ fn marker(c: &Connection) -> rusqlite::Result<i64> {
     c.query_row("SELECT x FROM marker", [], |r| r.get(0))
 }
 
+/// 有别人握着库文件的 PENDING 字节（试着独占一下，拿到了就马上放掉）。
+fn pending_is_held(db: &Path) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx, UnlockFileEx,
+    };
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+    let f = fs::File::open(db).unwrap();
+    // SAFETY: 全零的 OVERLAPPED 是合法的；句柄在 `f` 活着时有效。
+    let mut o: OVERLAPPED = unsafe { std::mem::zeroed() };
+    o.Anonymous.Anonymous.Offset = 0x4000_0000;
+    let flags = LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY;
+    if unsafe { LockFileEx(f.as_raw_handle(), flags, 0, 1, 0, &mut o) } == 0 {
+        return true;
+    }
+    unsafe { UnlockFileEx(f.as_raw_handle(), 0, 1, 0, &mut o) };
+    false
+}
+
 fn suffix(p: &Path, s: &str) -> PathBuf {
     PathBuf::from(format!("{}{s}", p.display()))
 }
@@ -526,7 +545,15 @@ fn a_writer_already_waiting_to_commit_goes_first() {
         w.execute_batch("BEGIN IMMEDIATE; UPDATE marker SET x = 2; COMMIT;")
             .unwrap()
     });
-    thread::sleep(Duration::from_millis(300));
+    // 等到写者真的握着 PENDING（负载重时它的线程可能还没开始提交）。
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !pending_is_held(&db) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the writer never took PENDING"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
     assert!(
         finished.try_recv().is_err(),
         "the writer should still be waiting for the reader"

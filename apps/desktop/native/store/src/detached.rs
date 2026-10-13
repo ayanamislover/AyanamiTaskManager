@@ -380,9 +380,24 @@ impl Drop for Scratch {
     fn drop(&mut self) {
         while let Some((h, made)) = self.held.pop() {
             if made {
-                let _ = os::delete(&h);
+                delete_dir_patiently(&h);
             }
             drop(h);
+        }
+    }
+}
+
+/// 删握着的目录；不空就等一会儿再试（最多约 1 s）。副本旁边会冒出别的程序的临时文件（实测有 `DB.SQLITE-SHM.tmp`，
+/// 随建随删，见 `conversion.rs` 的 `publication_digest`），它还在时目录删不掉。那个文件不是我们的，不删它，等它自己消失；
+/// 等不到就留着目录，下次清扫。
+fn delete_dir_patiently(dir: &os::Handle) {
+    const ERROR_DIR_NOT_EMPTY: i32 = 145;
+    for _ in 0..40 {
+        match os::delete(dir) {
+            Err(e) if e.raw_os_error() == Some(ERROR_DIR_NOT_EMPTY) => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            _ => return,
         }
     }
 }
@@ -451,7 +466,7 @@ impl Copy {
 
 impl Drop for Copy {
     fn drop(&mut self) {
-        remove_copy(&self.dir, &self.source);
+        remove_copy(&self.dir, &self.source, true);
     }
 }
 
@@ -480,7 +495,7 @@ fn sweep(scratch: &Scratch, source: &Source) {
             _ => continue,
         }
         if os::gone(pid) {
-            remove_copy(&copy, source);
+            remove_copy(&copy, source, false);
         }
     }
 }
@@ -494,8 +509,9 @@ const COPY_FILES: [&str; 4] = [
 ];
 
 /// 只删副本的那几个文件（是普通文件、不是源库才删），再删目录（空了才删得掉）。别的东西一律留着。
-/// 都按句柄：`dir` 是握着的那个目录，每个文件不跟进地打开、核对之后对它的句柄删。
-fn remove_copy(dir: &os::Handle, source: &Source) {
+/// 都按句柄：`dir` 是握着的那个目录，每个文件不跟进地打开、核对之后对它的句柄删。`patient`：自己的副本，
+/// 目录一时不空就等一会儿（[`delete_dir_patiently`]）；清扫到的遗留副本不等，留到下次。
+fn remove_copy(dir: &os::Handle, source: &Source, patient: bool) {
     let Ok(real) = os::real_path(dir) else {
         return;
     };
@@ -510,7 +526,11 @@ fn remove_copy(dir: &os::Handle, source: &Source) {
             let _ = os::delete(&file);
         }
     }
-    let _ = os::delete(dir);
+    if patient {
+        delete_dir_patiently(dir);
+    } else {
+        let _ = os::delete(dir);
+    }
 }
 
 /// 打开那个进程的结果 → 它确知已经不在了吗。`open_error`：打不开时系统给的错误码；`exit`：打开了、查到的退出码
@@ -1281,6 +1301,44 @@ mod tests {
                 from.display()
             );
         }
+        assert_eq!(
+            fs::read_dir(&scratch).unwrap().count(),
+            0,
+            "the copy is left"
+        );
+        drop(live);
+    }
+
+    /// 检查时暂存目录还不在，之后别人（例如同时在读的另一个进程）把它建了出来：这次相对上一级打开的是那个现成的，
+    /// 不是这次建的，读完不删它；这次自己的副本照样删掉。
+    #[test]
+    fn a_scratch_someone_else_made_meanwhile_is_kept() {
+        let d = dir("made-meanwhile");
+        fs::create_dir_all(d.join("src")).unwrap();
+        let db = d.join("src").join("source.sqlite");
+        let live = Connection::open(&db).unwrap();
+        live.execute_batch(
+            "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+             CREATE TABLE marker(x); INSERT INTO marker VALUES (1);",
+        )
+        .unwrap();
+        assert!(wal_has_frames(&db));
+        let scratch = d.join("scratch");
+        let other = scratch.clone();
+        AFTER_CHECKS.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                assert!(!other.exists());
+                fs::create_dir(&other).unwrap();
+            }))
+        });
+        let v = read(&db, &scratch, |c| {
+            c.query_row("SELECT x FROM marker", [], |r| r.get::<_, i64>(0))
+        });
+        assert_eq!(v.unwrap(), 1);
+        assert!(
+            scratch.is_dir(),
+            "a scratch this read did not make was removed"
+        );
         assert_eq!(
             fs::read_dir(&scratch).unwrap().count(),
             0,
