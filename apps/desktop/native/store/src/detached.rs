@@ -32,6 +32,15 @@
 //! 源目录一个字节不动，也不多出文件。副本删不掉（被别的程序占着）或进程被杀没来得及删的，下一次在同一个暂存目录读时，
 //! 按目录名 `read-<pid>-<序号>` 里的 pid 清：确知那个进程已经不在了才删，名字对不上的、查不了的都不碰。
 //! 暂存目录与源目录不许互相包含：任一方向都在清扫与读之前拒绝（源库在暂存目录里，清扫就可能把它当副本删掉）。
+//!
+//! 暂存目录可能在检查之后才被建出来、或被改指向别处（peer r5 P1-01：检查时不在，之后成了指向源库上级的 junction）。
+//! 所以凡是要删东西的地方都不只信前面那次检查：
+//! - 清扫时重新看暂存目录是否包含源库，包含就整个不清；逐项只清真正的目录（junction、符号链接不跟进也不删）；
+//! - 副本目录只用这次独占新建的（同名的已经在就换下一个序号，绝不先删），建好后记下它的身份（卷号 + 文件号），
+//!   删的时候身份对得上才删；复制前再看一次暂存目录是否包含源库；
+//! - 删副本（自己的和清扫到的）只删副本里会有的那几个文件、再删空目录，不递归删：路径哪怕已经指向别处，
+//!   也碰不到那里的整棵目录树；
+//! - 只拿掉这次新建的上级目录；调用方原有的暂存目录（哪怕是 junction）不碰（peer r5 P2-01）。
 
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -157,7 +166,11 @@ pub fn read_patiently<T, E>(
             source_dir.display()
         )));
     }
-    sweep(scratch);
+    #[cfg(test)]
+    if let Some(hook) = tests::AFTER_CHECKS.with(|h| h.borrow_mut().take()) {
+        hook();
+    }
+    sweep(scratch, source_dir);
     let frozen = freeze(db, patience)?;
     if !hot_journal(db) && !wal_has_frames(db) {
         let c = open_immutable(db).map_err(Error::Open)?;
@@ -301,6 +314,8 @@ fn wal_mode(db: &Path, file: &File) -> bool {
 struct Copy {
     dir: PathBuf,
     db: PathBuf,
+    /// 副本目录建好时的身份；删之前核对，对不上（路径已经不是它了）就不删。
+    id: Option<os::DirId>,
     /// 为放副本新建的上级目录，由深到浅；删完副本后空了就拿掉。
     created: Vec<PathBuf>,
 }
@@ -309,19 +324,38 @@ impl Copy {
     /// 在冻结中复制：库文件、有帧的 `-wal`、热日志。
     fn make(db: &Path, frozen: &Frozen, scratch: &Path) -> Result<Copy, String> {
         static SEQ: AtomicU64 = AtomicU64::new(0);
-        let created = create_dirs(scratch)?;
-        let dir = scratch.join(format!(
-            "read-{}-{}",
-            std::process::id(),
-            SEQ.fetch_add(1, Ordering::Relaxed)
-        ));
-        let _ = fs::remove_dir_all(&dir);
-        let copy = Copy {
-            db: dir.join("db.sqlite"),
-            dir,
-            created,
+        let source_dir = db.parent().unwrap_or(Path::new("."));
+        let mut copy = Copy {
+            dir: PathBuf::new(),
+            db: PathBuf::new(),
+            id: None,
+            created: create_dirs(scratch)?,
         };
-        fs::create_dir(&copy.dir).map_err(|e| format!("{}: {e}", copy.dir.display()))?;
+        if contains(scratch, source_dir)? {
+            return Err(format!(
+                "the scratch directory {} contains {}",
+                scratch.display(),
+                source_dir.display()
+            ));
+        }
+        let mut attempts = 0;
+        let dir = loop {
+            let dir = scratch.join(format!(
+                "read-{}-{}",
+                std::process::id(),
+                SEQ.fetch_add(1, Ordering::Relaxed)
+            ));
+            match fs::create_dir(&dir) {
+                Ok(()) => break dir,
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists && attempts < 1000 => {
+                    attempts += 1;
+                }
+                Err(e) => return Err(format!("{}: {e}", dir.display())),
+            }
+        };
+        copy.id = os::dir_id(&dir).ok();
+        copy.db = dir.join(COPY_FILES[0]);
+        copy.dir = dir;
         copy_database(&frozen.db, &copy.db).map_err(|e| format!("copy {}: {e}", db.display()))?;
         #[cfg(test)]
         if let Some(hook) = tests::AFTER_DATABASE_COPY.with(|h| h.borrow_mut().take()) {
@@ -340,11 +374,10 @@ impl Copy {
 
 impl Drop for Copy {
     fn drop(&mut self) {
-        let _ = fs::remove_dir_all(&self.dir);
-        // 暂存目录本身与为它新建的上级，空了就一并拿掉（不是空的说明别的读还在用，留着）。
-        if let Some(parent) = self.dir.parent() {
-            let _ = fs::remove_dir(parent);
+        if self.id.is_some() && os::dir_id(&self.dir).ok() == self.id {
+            remove_copy(&self.dir);
         }
+        // 为它新建的上级，空了就拿掉（不是空的说明别的读还在用，留着）。调用方原有的暂存目录不碰。
         for dir in &self.created {
             let _ = fs::remove_dir(dir);
         }
@@ -380,7 +413,11 @@ fn create_dirs(dir: &Path) -> Result<Vec<PathBuf>, String> {
 
 /// 清掉已经不在的进程留下的副本目录。只认 [`Copy::make`] 起的名字 `read-<pid>-<序号>`（两段都是数字），且必须是目录；
 /// 确知那个进程已经不在了才删。查不了（没有权限等）、pid 被别的进程重用了，都留着（peer r3 P2-01）。在冻结之前做。
-fn sweep(scratch: &Path) {
+/// 不信前面的检查（见模块说明）：暂存目录这时包含源库就整个不清；junction、符号链接不跟进也不删。
+fn sweep(scratch: &Path, source_dir: &Path) {
+    if !matches!(contains(scratch, source_dir), Ok(false)) {
+        return;
+    }
     let Ok(entries) = fs::read_dir(scratch) else {
         return;
     };
@@ -388,11 +425,37 @@ fn sweep(scratch: &Path) {
         let Some(pid) = entry.file_name().to_str().and_then(copy_pid) else {
             continue;
         };
-        if pid != std::process::id() && entry.file_type().is_ok_and(|t| t.is_dir()) && os::gone(pid)
-        {
-            let _ = fs::remove_dir_all(entry.path());
+        if pid == std::process::id() {
+            continue;
+        }
+        let path = entry.path();
+        // 不跟进：junction、符号链接在这里不是目录。
+        if !fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+            continue;
+        }
+        if os::gone(pid) {
+            remove_copy(&path);
         }
     }
+}
+
+/// 副本目录里只会有这几个文件：库、复制过来的 `-wal` / 热日志，和打开副本时 SQLite 建的 `-shm`。
+const COPY_FILES: [&str; 4] = [
+    "db.sqlite",
+    "db.sqlite-wal",
+    "db.sqlite-journal",
+    "db.sqlite-shm",
+];
+
+/// 只删副本的那几个文件（是普通文件才删），再删目录（空了才删得掉）。别的东西一律留着。
+fn remove_copy(dir: &Path) {
+    for name in COPY_FILES {
+        let file = dir.join(name);
+        if fs::symlink_metadata(&file).is_ok_and(|m| m.is_file()) {
+            let _ = fs::remove_file(&file);
+        }
+    }
+    let _ = fs::remove_dir(dir);
 }
 
 /// 打开那个进程的结果 → 它确知已经不在了吗。`open_error`：打不开时系统给的错误码；`exit`：打开了、查到的退出码
@@ -510,6 +573,31 @@ mod os {
         }
     }
 
+    /// 目录的身份：卷序列号与文件号。不跟进 junction / 符号链接（量到的是链接自己）。
+    pub type DirId = (u32, u32, u32);
+
+    pub fn dir_id(path: &std::path::Path) -> std::io::Result<DirId> {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{
+            BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OPEN_REPARSE_POINT,
+            GetFileInformationByHandle,
+        };
+        let f = std::fs::OpenOptions::new()
+            .access_mode(0)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(path)?;
+        // SAFETY: 全零是合法的初值；句柄在 `f` 活着时有效。
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut info) } == 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok((
+            info.dwVolumeSerialNumber,
+            info.nFileIndexHigh,
+            info.nFileIndexLow,
+        ))
+    }
+
     /// 打开一个不存在的 pid 时系统给的错误码。
     pub const ERROR_NO_SUCH_PROCESS: u32 = windows_sys::Win32::Foundation::ERROR_INVALID_PARAMETER;
 }
@@ -535,6 +623,14 @@ mod os {
     }
 
     pub const ERROR_NO_SUCH_PROCESS: u32 = 87;
+
+    pub type DirId = (u64, u64, u32);
+
+    pub fn dir_id(path: &std::path::Path) -> std::io::Result<DirId> {
+        use std::os::unix::fs::MetadataExt;
+        let m = std::fs::symlink_metadata(path)?;
+        Ok((m.dev(), m.ino(), 0))
+    }
 }
 
 #[cfg(test)]
@@ -544,6 +640,9 @@ mod tests {
     use std::sync::mpsc;
 
     thread_local! {
+        /// 核对完暂存目录、清扫之前调一次（只在单元测试里有）。
+        pub(super) static AFTER_CHECKS: RefCell<Option<Box<dyn FnOnce()>>> =
+            const { RefCell::new(None) };
         /// 复制完库文件、还没复制 `-wal` 时调一次（只在单元测试里有）。
         pub(super) static AFTER_DATABASE_COPY: RefCell<Option<Box<dyn FnOnce()>>> =
             const { RefCell::new(None) };
@@ -676,5 +775,48 @@ mod tests {
         // 那个连接关闭时没能 checkpoint：`-wal` 还在，下一次读照样读到它。
         assert!(wal_has_frames(&db));
         assert_eq!(read(&db, &d.join("scratch"), q).unwrap(), (1, 0));
+    }
+
+    /// peer r5 P1-01：检查时暂存目录还不存在，检查完、清扫前它被建成指向源库上上级的 junction。清扫要重新看一次：
+    /// 这时暂存目录包含源库，整个不清；源库（在 `read-<已退出的 pid>-1\data\` 下，名字像一个遗留副本）与旁边的文件都原样。
+    #[test]
+    fn a_scratch_that_turns_into_a_link_after_the_checks_is_not_swept() {
+        let d = dir("late-link");
+        let actual = d.join("actual");
+        let root = actual.join("read-4294967295-1");
+        fs::create_dir_all(root.join("data")).unwrap();
+        let db = root.join("data").join("atm.sqlite");
+        let c = Connection::open(&db).unwrap();
+        c.execute_batch("CREATE TABLE marker(x); INSERT INTO marker VALUES (1);")
+            .unwrap();
+        drop(c);
+        fs::write(root.join("user-file.txt"), b"must remain").unwrap();
+        let original = fs::read(&db).unwrap();
+        let scratch = d.join("late-scratch");
+        let link = scratch.clone();
+        AFTER_CHECKS.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                assert!(!link.exists());
+                let r = std::process::Command::new("cmd")
+                    .arg("/c")
+                    .arg("mklink")
+                    .arg("/J")
+                    .arg(&link)
+                    .arg(&actual)
+                    .output()
+                    .unwrap();
+                assert!(r.status.success(), "{r:?}");
+            }))
+        });
+        let v = read(&db, &scratch, |c| {
+            c.query_row("SELECT x FROM marker", [], |r| r.get::<_, i64>(0))
+        });
+        assert!(scratch.exists(), "the hook did not run");
+        assert_eq!(v.unwrap(), 1);
+        assert_eq!(fs::read(&db).unwrap(), original);
+        assert_eq!(
+            fs::read(root.join("user-file.txt")).unwrap(),
+            b"must remain"
+        );
     }
 }

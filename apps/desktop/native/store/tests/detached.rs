@@ -33,6 +33,37 @@ fn source(d: &Path, name: &str) -> PathBuf {
     src.join(name)
 }
 
+/// 建一个目录联接（junction，不要特权）。
+fn junction(link: &Path, target: &Path) {
+    let r = std::process::Command::new("cmd")
+        .arg("/c")
+        .arg("mklink")
+        .arg("/J")
+        .arg(link)
+        .arg(target)
+        .output()
+        .unwrap();
+    assert!(r.status.success(), "{r:?}");
+}
+
+/// 是 junction / 符号链接（不跟进地看）。
+fn is_link(p: &Path) -> bool {
+    fs::symlink_metadata(p).is_ok_and(|m| m.file_type().is_symlink())
+}
+
+/// 一个有未 checkpoint 帧的 WAL 库（读它要复制）；返回的连接开着，帧就一直在。
+fn wal_source(db: &Path) -> Connection {
+    let c = Connection::open(db).unwrap();
+    c.execute_batch("PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0; CREATE TABLE marker(x); INSERT INTO marker VALUES (1);")
+        .unwrap();
+    assert!(detached::wal_has_frames(db));
+    c
+}
+
+fn marker(c: &Connection) -> rusqlite::Result<i64> {
+    c.query_row("SELECT x FROM marker", [], |r| r.get(0))
+}
+
 fn suffix(p: &Path, s: &str) -> PathBuf {
     PathBuf::from(format!("{}{s}", p.display()))
 }
@@ -383,25 +414,56 @@ fn copies_left_by_a_dead_process_are_swept_on_the_next_read() {
         .unwrap();
     let dead = child.id();
     child.wait().unwrap();
+    // 一个还在跑的进程的 pid（读完就结束它）。
+    let mut running = std::process::Command::new("ping")
+        .args(["-n", "60", "127.0.0.1"])
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
     let left = scratch.join(format!("read-{dead}-0"));
     let alive = scratch.join(format!("read-{}-999", std::process::id()));
+    let other = scratch.join(format!("read-{}-0", running.id()));
     // 名字不是 `read-<pid>-<序号>` 的、不是目录的，都不是这里起的，不碰（peer r3 P2-01）。
     let unmatched = scratch.join(format!("read-{dead}-not-a-sequence"));
     let not_a_copy = scratch.join(format!("read-{dead}"));
-    for dir in [&left, &alive, &unmatched, &not_a_copy] {
+    for dir in [&left, &alive, &other, &unmatched, &not_a_copy] {
         fs::create_dir_all(dir).unwrap();
         fs::write(dir.join("db.sqlite"), b"left over").unwrap();
     }
     let plain_file = scratch.join(format!("read-{dead}-1"));
     fs::write(&plain_file, b"a file").unwrap();
+    // 名字对得上的 junction 不跟进，也不删（peer r5）。
+    let linked_target = d.join("linked-target");
+    fs::create_dir_all(&linked_target).unwrap();
+    fs::write(linked_target.join("db.sqlite"), b"not a copy").unwrap();
+    let linked = scratch.join(format!("read-{dead}-2"));
+    junction(&linked, &linked_target);
+    // 遗留副本里多了别的东西：只删副本的文件，别的留着，目录也就留着。
+    let more = scratch.join(format!("read-{dead}-3"));
+    fs::create_dir_all(&more).unwrap();
+    fs::write(more.join("db.sqlite"), b"left over").unwrap();
+    fs::write(more.join("user-file.txt"), b"must remain").unwrap();
     let v = detached::read(&db, &scratch, |c| {
         c.query_row("SELECT x FROM marker", [], |r| r.get::<_, i64>(0))
     });
     assert_eq!(v.unwrap(), 1);
     assert!(!left.exists());
     assert!(alive.exists());
+    assert!(other.join("db.sqlite").exists());
+    running.kill().unwrap();
+    running.wait().unwrap();
     assert!(unmatched.join("db.sqlite").exists() && not_a_copy.join("db.sqlite").exists());
     assert!(plain_file.is_file());
+    assert!(is_link(&linked));
+    assert!(!more.join("db.sqlite").exists());
+    assert_eq!(
+        fs::read(more.join("user-file.txt")).unwrap(),
+        b"must remain"
+    );
+    assert_eq!(
+        fs::read(linked_target.join("db.sqlite")).unwrap(),
+        b"not a copy"
+    );
     drop(c);
 }
 
@@ -507,4 +569,149 @@ fn a_scratch_that_holds_the_source_is_refused_before_anything_is_removed() {
     });
     assert_eq!(v.unwrap(), 1);
     assert!(!left.exists());
+}
+
+/// peer r5 P2-01：调用方原有的暂存目录读完还在——普通目录如此，指向别处的 junction 也如此，它指向的东西不动。
+#[test]
+fn a_scratch_that_was_already_there_is_kept_and_so_is_a_link() {
+    let d = dir("scratch-kept");
+    let db = source(&d, "source.sqlite");
+    let c = wal_source(&db);
+    let plain = d.join("plain");
+    fs::create_dir_all(&plain).unwrap();
+    assert_eq!(detached::read(&db, &plain, marker).unwrap(), 1);
+    assert!(plain.is_dir());
+    assert_eq!(fs::read_dir(&plain).unwrap().count(), 0, "the copy is left");
+    let target = d.join("target");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("user-file.txt"), b"must remain").unwrap();
+    let linked = d.join("linked");
+    junction(&linked, &target);
+    assert_eq!(detached::read(&db, &linked, marker).unwrap(), 1);
+    assert!(is_link(&linked), "the scratch junction was removed");
+    let names: Vec<_> = fs::read_dir(&target)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["user-file.txt"]);
+    assert_eq!(
+        fs::read(target.join("user-file.txt")).unwrap(),
+        b"must remain"
+    );
+    // 对照：暂存目录原来不在，就按需建出来、读完拿掉。
+    let fresh = d.join("fresh").join("scratch");
+    assert_eq!(detached::read(&db, &fresh, marker).unwrap(), 1);
+    assert!(!d.join("fresh").exists());
+    drop(c);
+}
+
+/// peer r5 P1-01：副本目录只用这次新建的。同名的已经在（这里是本进程 pid 加各个序号，都放着用户文件），就换下一个序号，
+/// 不先删它。
+#[test]
+fn a_copy_never_takes_over_a_directory_that_is_already_there() {
+    let d = dir("copy-exclusive");
+    let db = source(&d, "source.sqlite");
+    let c = wal_source(&db);
+    let scratch = d.join("scratch");
+    let taken: Vec<PathBuf> = (0..300)
+        .map(|n| scratch.join(format!("read-{}-{n}", std::process::id())))
+        .collect();
+    for dir in &taken {
+        fs::create_dir_all(dir).unwrap();
+        fs::write(dir.join("user-file.txt"), b"must remain").unwrap();
+    }
+    assert_eq!(detached::read(&db, &scratch, marker).unwrap(), 1);
+    for dir in &taken {
+        assert_eq!(fs::read(dir.join("user-file.txt")).unwrap(), b"must remain");
+    }
+    assert_eq!(fs::read_dir(&scratch).unwrap().count(), taken.len());
+    drop(c);
+}
+
+/// peer r5 P1-01：读的时候暂存目录（一个 junction）被改指向别处，那里正好有个同名目录。删副本前核对身份：
+/// 已经不是这次建的那个目录了，就不删——那里的文件原样。
+#[test]
+fn a_copy_whose_path_now_leads_elsewhere_is_not_removed() {
+    let d = dir("copy-moved");
+    let db = source(&d, "source.sqlite");
+    let c = wal_source(&db);
+    let first = d.join("first");
+    let second = d.join("second");
+    fs::create_dir_all(&first).unwrap();
+    fs::create_dir_all(&second).unwrap();
+    let scratch = d.join("scratch");
+    junction(&scratch, &first);
+    let moved = RefCell::new(None);
+    // 先读，再改指向：读完到删副本之间，路径换成了别处。
+    let v = detached::read(&db, &scratch, |c| {
+        let v = marker(c);
+        if moved.borrow().is_none() {
+            let name = fs::read_dir(&first)
+                .unwrap()
+                .map(|e| e.unwrap().file_name())
+                .find(|n| n.to_string_lossy().starts_with("read-"))
+                .unwrap();
+            fs::create_dir_all(second.join(&name)).unwrap();
+            fs::write(second.join(&name).join("db.sqlite"), b"not a copy").unwrap();
+            fs::remove_dir(&scratch).unwrap();
+            junction(&scratch, &second);
+            *moved.borrow_mut() = Some(name);
+        }
+        v
+    });
+    assert_eq!(v.unwrap(), 1);
+    let name = moved.take().unwrap();
+    assert_eq!(
+        fs::read(second.join(&name).join("db.sqlite")).unwrap(),
+        b"not a copy"
+    );
+    drop(c);
+}
+
+/// peer r5 P1-01（经公开接口）：读在等冻结时（有人握着 PENDING），原来不存在的暂存目录被建成指向源库上级的 junction。
+/// 复制前重查：这时暂存目录包含源库，拒绝，源库与旁边的文件都原样。
+#[test]
+fn a_scratch_that_turns_into_a_link_while_the_read_waits_is_refused() {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        LOCKFILE_EXCLUSIVE_LOCK, LOCKFILE_FAIL_IMMEDIATELY, LockFileEx, UnlockFileEx,
+    };
+    use windows_sys::Win32::System::IO::OVERLAPPED;
+    let d = dir("late-link-waiting");
+    let actual = d.join("actual");
+    let src = actual.join(format!("read-{}-0", std::process::id()));
+    fs::create_dir_all(&src).unwrap();
+    let db = src.join("atm.sqlite");
+    let c = wal_source(&db);
+    fs::write(src.join("user-file.txt"), b"must remain").unwrap();
+    let original = fs::read(&db).unwrap();
+    let lock = fs::File::open(&db).unwrap();
+    // SAFETY: 全零的 OVERLAPPED 是合法的；句柄在 `lock` 活着时有效。
+    let mut o: OVERLAPPED = unsafe { std::mem::zeroed() };
+    o.Anonymous.Anonymous.Offset = 0x4000_0000;
+    let flags = LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY;
+    assert_ne!(
+        unsafe { LockFileEx(lock.as_raw_handle(), flags, 0, 1, 0, &mut o) },
+        0
+    );
+    let scratch = d.join("late-scratch");
+    let (path, at) = (db.clone(), scratch.clone());
+    let reader = thread::spawn(move || detached::read(&path, &at, marker));
+    thread::sleep(Duration::from_millis(300));
+    assert!(!reader.is_finished(), "the read did not wait for PENDING");
+    junction(&scratch, &actual);
+    assert_ne!(
+        unsafe { UnlockFileEx(lock.as_raw_handle(), 0, 1, 0, &mut o) },
+        0
+    );
+    drop(lock);
+    let r = reader.join().unwrap();
+    assert!(
+        matches!(&r, Err(Error::Open(e)) if e.contains("contains")),
+        "{r:?}"
+    );
+    assert_eq!(fs::read(&db).unwrap(), original);
+    assert_eq!(fs::read(src.join("user-file.txt")).unwrap(), b"must remain");
+    assert!(is_link(&scratch));
+    drop(c);
 }
