@@ -273,6 +273,59 @@ mod tests {
         assert!(snapshot().iter().any(|proc| proc.pid == std::process::id()));
     }
 
+    /// Visible top-level windows owned by `pids`.
+    fn visible_windows_of(pids: &[u32]) -> usize {
+        use windows_sys::Win32::Foundation::{HWND, LPARAM};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
+        };
+        struct Ctx<'a> {
+            pids: &'a [u32],
+            hits: usize,
+        }
+        unsafe extern "system" fn each(hwnd: HWND, lparam: LPARAM) -> i32 {
+            let ctx = unsafe { &mut *(lparam as *mut Ctx) };
+            let mut pid = 0u32;
+            unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+            if ctx.pids.contains(&pid) && unsafe { IsWindowVisible(hwnd) } != 0 {
+                ctx.hits += 1;
+            }
+            1
+        }
+        let mut ctx = Ctx { pids, hits: 0 };
+        unsafe { EnumWindows(Some(each), &mut ctx as *mut Ctx as LPARAM) };
+        ctx.hits
+    }
+
+    /// A console program started by [`spawn`], and the console program it starts in turn, never
+    /// open a visible window (W8k: with DETACHED_PROCESS the first has no console and the second
+    /// opens one of its own).
+    #[test]
+    fn a_spawned_console_program_and_its_children_open_no_window() {
+        let cmd = std::env::var_os("ComSpec")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+        let (mut child, identity) = spawn(&cmd, &["/d", "/c", "ping -n 4 127.0.0.1 >nul"]).unwrap();
+        let start = Instant::now();
+        let mut ping = None;
+        while ping.is_none() && start.elapsed() < Duration::from_secs(5) {
+            ping = snapshot().into_iter().find(|p| p.parent == identity.pid);
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let ping = ping.expect("cmd never started ping");
+        let pids = [identity.pid, ping.pid];
+        // The console window is made when the child starts; look a little longer in case it is late.
+        let mut seen = 0;
+        for _ in 0..25 {
+            seen = seen.max(visible_windows_of(&pids));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        terminate(&ping.identity());
+        let _ = child.kill();
+        let _ = child.wait();
+        assert_eq!(seen, 0, "a visible console window appeared for {pids:?}");
+    }
+
     fn os(code: i32) -> std::io::Error {
         std::io::Error::from_raw_os_error(code)
     }

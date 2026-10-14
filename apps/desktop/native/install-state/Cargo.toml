@@ -29,4 +29,6 @@ windows-sys = { workspace = true, features = [
   "Win32_System_Pipes",
   "Win32_System_RemoteDesktop",
   "Win32_System_Threading",
+  # procs 的用例：起来的控制台程序有没有可见窗口。
+  "Win32_UI_WindowsAndMessaging",
 ] }

@@ -47,6 +47,12 @@ describe("测试与产品不弹窗（W8k）", () => {
     expect(offenders).toEqual([]);
   });
 
+  it("导入 test-windows 之后，本进程拉起的宿主都带着后台窗口开关", async () => {
+    const { BACKGROUND_WINDOW } = await import("../../../scripts/test-windows.js");
+    expect(BACKGROUND_WINDOW).toBe("ATM_BACKGROUND_WINDOW");
+    expect(process.env.ATM_BACKGROUND_WINDOW).toBe("1");
+  });
+
   it("阳性对照：两条规则都认得出违例，也不把注释当成违例", () => {
     expect(detachedUses("let f = DETACHED_PROCESS | X;")).toEqual([1]);
     expect(detachedUses("// 不用 DETACHED_PROCESS\nconst A: u32 = 0x8;")).toEqual([]);
