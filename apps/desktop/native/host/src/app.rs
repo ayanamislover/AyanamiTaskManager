@@ -1787,6 +1787,8 @@ impl App {
             LIGHT_BACKGROUND
         };
         let builder = WebViewBuilder::new_with_web_context(&mut self.web_context)
+            // wry 默认建好就 MoveFocus：宿主窗口成了它线程的活动窗口，前台锁一放开（用户几分钟没动键鼠）就到了前台。
+            .with_focused(!background_window())
             .with_https_scheme(true)
             .with_background_color(background)
             .with_devtools(cfg!(feature = "smoke"))

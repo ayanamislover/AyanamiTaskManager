@@ -104,9 +104,27 @@ public static class AtmWindows {
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
-  public static int Foreground(uint target) {
+  [StructLayout(LayoutKind.Sequential)] public struct Rect { public int L, T, R, B; }
+  [StructLayout(LayoutKind.Sequential)] public struct GuiThreadInfo {
+    public uint cbSize, flags;
+    public IntPtr hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret;
+    public Rect rcCaret;
+  }
+  [DllImport("user32.dll")] public static extern bool GetGUIThreadInfo(uint tid, ref GuiThreadInfo info);
+  // 1：target 的窗口是前台窗口，或者是它线程里的活动窗口。后者不受前台锁影响：没有前台权限时，
+  // 程序激活自己的窗口只是闪任务栏，但它仍是那个线程的活动窗口；有权限（例如用户几分钟没动键鼠）时就到了前台。
+  public static int Activated(uint target) {
     uint pid; GetWindowThreadProcessId(GetForegroundWindow(), out pid);
-    return pid == target ? 1 : 0;
+    if (pid == target) return 1;
+    int hit = 0;
+    EnumWindows((h, l) => {
+      uint owner; uint tid = GetWindowThreadProcessId(h, out owner);
+      if (owner != target || !IsWindowVisible(h)) return true;
+      var info = new GuiThreadInfo(); info.cbSize = (uint)Marshal.SizeOf(typeof(GuiThreadInfo));
+      if (GetGUIThreadInfo(tid, ref info) && info.hwndActive == h) hit = 1;
+      return true;
+    }, IntPtr.Zero);
+    return hit;
   }
   public static int Count(uint target) {
     int count = 0;
@@ -122,32 +140,28 @@ public static class AtmWindows {
 "@
 `;
 
-function appWindowVisible(pid: number): boolean {
+/** 跑 `[AtmWindows]::<call>`，返回它打印的数。 */
+function windowProbe(call: string): number {
   const result = withPowerShellScratch((env) =>
     spawnSync(
       "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-Command", `${WINDOW_PROBE}[AtmWindows]::Count(${pid})`],
+      ["-NoProfile", "-NonInteractive", "-Command", `${WINDOW_PROBE}[AtmWindows]::${call}`],
       { encoding: "utf8", windowsHide: true, env },
     ),
   );
-  return Number(result.stdout.trim()) > 0;
+  return Number(result.stdout.trim());
 }
 
-/** 前台窗口（正在接收输入的那个）是不是 `pid` 的。 */
-function inForeground(pid: number): boolean {
-  const result = withPowerShellScratch((env) =>
-    spawnSync(
-      "powershell.exe",
-      [
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        `${WINDOW_PROBE}[AtmWindows]::Foreground(${pid})`,
-      ],
-      { encoding: "utf8", windowsHide: true, env },
-    ),
-  );
-  return result.stdout.trim() === "1";
+function appWindowVisible(pid: number): boolean {
+  return windowProbe(`Count(${pid})`) > 0;
+}
+
+/**
+ * `pid` 的窗口被激活了没有：是前台窗口，或者是它线程里的活动窗口。只看前台会时过时不过——
+ * 用户正在用电脑时前台锁挡住了激活，几分钟没动键鼠时同一次激活就真的到了前台。
+ */
+function activated(pid: number): boolean {
+  return windowProbe(`Activated(${pid})`) === 1;
 }
 
 /** 宿主这次运行用的根。`l` 为 null：用产品默认的根（只在干净机器上的安装那一半）。 */
@@ -215,8 +229,8 @@ export async function productionChecks(
   check(`${label}：SHOW 后宿主窗口可见`, shown, String(hostRecord.pid));
   // 测试拉起的宿主带 ATM_BACKGROUND_WINDOW=1（scripts/test-windows.ts）：窗口在，但不抢正在用电脑的人的焦点。
   check(
-    `${label}：测试里 SHOW 不把窗口带到前台`,
-    !inForeground(hostRecord.pid),
+    `${label}：测试里 SHOW 不激活窗口、不把它带到前台`,
+    !activated(hostRecord.pid),
     String(hostRecord.pid),
   );
   const webviewProfile = join(roots.n, "webview", "EBWebView");
