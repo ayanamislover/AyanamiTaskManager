@@ -6,7 +6,7 @@
 //! 重复，字符串里不许有落单的代理项，嵌套不超过 [`MAX_DEPTH`] 层。
 //!
 //! 文件的形状是固定的：`state` 是 `DATABASE_DAMAGED`，`since`、`generation`、`reason` 是字符串，
-//! 可选的 `writer` 是 `{pid, startedAtMs}`（非负整数，不超过 2^53，pid 不超过 u32）。别的键、别的类型，
+//! 可选的 `writer` 是 `{pid, startedAtMs}`（非负整数，小于 2^53，即至多 2^53−1；pid 不超过 u32）。别的键、别的类型，
 //! 都让 [`DamagedState::parse`] 返回 `None`：读的一方把它当作坏文件（库照样算读不出，原因写明，
 //! 但不当作「还在跑的宿主写的」）。
 
@@ -15,7 +15,8 @@ use std::collections::BTreeMap;
 /// 嵌套上限。正常文件只有两层。
 pub const MAX_DEPTH: usize = 32;
 
-/// 2^53：JSON 数在 JS 里能精确表示的整数上限，宿主写的 pid 与毫秒都远小于它。
+/// 2^53，不含：小于它的整数在 JS 里都能精确表示（至多 2^53−1，W8 关口 peer r11）。
+/// 宿主写的 pid 与毫秒都远小于它。
 const MAX_WHOLE: f64 = 9_007_199_254_740_992.0;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
