@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { hostEnvironment } from "../../../scripts/distribution-common.js";
+import { hostEnvironment, probeValue } from "../../../scripts/distribution-common.js";
 import { KEEPALIVE_TASK } from "../../../scripts/distribution-installed.js";
 
 // ATM-R-475：distribution-smoke 的安装那一半写真实的卸载项、开始菜单与任务计划程序。
@@ -77,6 +77,22 @@ describe("distribution-smoke 的两半", () => {
     );
     // 保活任务只读查询，不登记、不删除。
     expect(source).not.toMatch(/schtasks\.exe", \["\/(?:create|delete|change|run)/iu);
+  });
+
+  it("窗口探测失败一律抛出，不当作「没有窗口 / 没有激活」（W8 r8 P2-03）", () => {
+    const ok = { status: 0, stdout: "0\r\n", stderr: "" };
+    expect(probeValue("Activated(1)", ok)).toBe(0);
+    expect(probeValue("Count(1)", { ...ok, stdout: "2\n" })).toBe(2);
+    for (const failed of [
+      { ...ok, stdout: "" },
+      { ...ok, stdout: "-1" },
+      { ...ok, stdout: "NaN" },
+      { ...ok, stdout: "0\nAdd-Type : 编译错误" },
+      { ...ok, status: 1 },
+      { ...ok, status: null, error: new Error("spawn powershell.exe ENOENT") },
+    ]) {
+      expect(() => probeValue("Activated(1)", failed)).toThrow(/窗口探测 Activated\(1\) 失败/u);
+    }
   });
 
   it("保活任务名与 install-state 的 TASK_NAME 一致", () => {

@@ -113,34 +113,57 @@ public static class AtmWindows {
   [DllImport("user32.dll")] public static extern bool GetGUIThreadInfo(uint tid, ref GuiThreadInfo info);
   // 1：target 的窗口是前台窗口，或者是它线程里的活动窗口。后者不受前台锁影响：没有前台权限时，
   // 程序激活自己的窗口只是闪任务栏，但它仍是那个线程的活动窗口；有权限（例如用户几分钟没动键鼠）时就到了前台。
+  // -1：看不出来（枚举失败、target 没有可见窗口、读不到线程状态），调用方当作失败，不当作「没激活」。
   public static int Activated(uint target) {
     uint pid; GetWindowThreadProcessId(GetForegroundWindow(), out pid);
     if (pid == target) return 1;
-    int hit = 0;
-    EnumWindows((h, l) => {
+    int hit = 0, seen = 0, unreadable = 0;
+    bool listed = EnumWindows((h, l) => {
       uint owner; uint tid = GetWindowThreadProcessId(h, out owner);
       if (owner != target || !IsWindowVisible(h)) return true;
+      seen++;
       var info = new GuiThreadInfo(); info.cbSize = (uint)Marshal.SizeOf(typeof(GuiThreadInfo));
-      if (GetGUIThreadInfo(tid, ref info) && info.hwndActive == h) hit = 1;
+      if (!GetGUIThreadInfo(tid, ref info)) unreadable++;
+      else if (info.hwndActive == h) hit = 1;
       return true;
     }, IntPtr.Zero);
-    return hit;
+    if (hit == 1) return 1;
+    return listed && seen > 0 && unreadable == 0 ? 0 : -1;
   }
   public static int Count(uint target) {
     int count = 0;
-    EnumWindows((h, l) => {
+    bool listed = EnumWindows((h, l) => {
       uint pid; GetWindowThreadProcessId(h, out pid);
       var title = new StringBuilder(64); GetWindowText(h, title, 64);
       if (pid == target && IsWindowVisible(h) && title.ToString() == "AyanamiTaskManager") count++;
       return true;
     }, IntPtr.Zero);
-    return count;
+    return listed ? count : -1;
   }
 }
 "@
 `;
 
-/** 跑 `[AtmWindows]::<call>`，返回它打印的数。 */
+/**
+ * 窗口探测打印的数。探测本身失败（拉不起 PowerShell、退出码不是 0、输出不是一个非负整数、C# 返回 -1）
+ * 一律抛出：负向的检查（「没有激活」）不能因为探测没跑成而算通过（W8 r8 P2-03）。
+ */
+export function probeValue(
+  call: string,
+  result: { error?: Error | undefined; status: number | null; stdout: string; stderr: string },
+): number {
+  const out = (result.stdout ?? "").trim();
+  if (result.error || result.status !== 0 || !/^\d+$/u.test(out)) {
+    throw new Error(
+      `窗口探测 ${call} 失败：status=${String(result.status)} stdout=${JSON.stringify(out.slice(0, 200))} ` +
+        `stderr=${JSON.stringify((result.stderr ?? "").trim().slice(0, 300))}` +
+        (result.error ? ` error=${result.error.message}` : ""),
+    );
+  }
+  return Number(out);
+}
+
+/** 跑 `[AtmWindows]::<call>`，返回它打印的数（见 {@link probeValue}）。 */
 function windowProbe(call: string): number {
   const result = withPowerShellScratch((env) =>
     spawnSync(
@@ -149,7 +172,7 @@ function windowProbe(call: string): number {
       { encoding: "utf8", windowsHide: true, env },
     ),
   );
-  return Number(result.stdout.trim());
+  return probeValue(call, result);
 }
 
 function appWindowVisible(pid: number): boolean {
