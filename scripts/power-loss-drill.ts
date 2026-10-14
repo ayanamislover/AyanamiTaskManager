@@ -853,7 +853,10 @@ async function scenarioRecover(executable: string): Promise<void> {
       return existsSync(damagedState);
     })();
     check("坏库上的生产宿主写下 runtime\\damaged.json", recorded);
+    // 宿主还在跑、损坏状态里记着它自己（W8 r9 P2-01b）：CLI 不等，几秒内就报。
+    const asked = Date.now();
     const status = runCli(executable, ["--json", "status"]);
+    const askedMs = Date.now() - asked;
     const statusCode = (() => {
       try {
         return (JSON.parse(status.stdout) as { error?: { code?: string } }).error?.code ?? null;
@@ -862,10 +865,11 @@ async function scenarioRecover(executable: string): Promise<void> {
       }
     })();
     check(
-      "CLI 立刻报 ATM_DATABASE_DAMAGED（退出码 4）",
-      status.code === 4 && statusCode === "ATM_DATABASE_DAMAGED",
+      "CLI 立刻报 ATM_DATABASE_DAMAGED（退出码 4，15 s 内）",
+      status.code === 4 && statusCode === "ATM_DATABASE_DAMAGED" && askedMs < 15_000,
       {
         code: status.code,
+        ms: askedMs,
         stdout: status.stdout.slice(0, 300),
       },
     );
