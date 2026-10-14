@@ -170,6 +170,7 @@ pub fn wait_all_gone(identities: &[ProcessIdentity], timeout: Duration) -> bool 
 /// ends everything with it — an Agent's terminal, or an update started by a host the Agent
 /// woke — and the ATM it starts must outlive that. A job that forbids breakaway makes
 /// CreateProcess fail with access denied; then the process starts inside it, as before.
+/// A refusal either way is waited out for a while ([`start_retrying`]).
 pub fn spawn(exe: &Path, args: &[&str]) -> std::io::Result<(std::process::Child, ProcessIdentity)> {
     use std::os::windows::process::CommandExt;
     const DETACHED_PROCESS: u32 = 0x0000_0008;
@@ -185,10 +186,17 @@ pub fn spawn(exe: &Path, args: &[&str]) -> std::io::Result<(std::process::Child,
             .spawn()
     };
     let flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
-    let child = match start(flags | CREATE_BREAKAWAY_FROM_JOB) {
-        Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => start(flags)?,
-        other => other?,
-    };
+    let child = start_retrying(
+        exe,
+        &mut |breakaway| {
+            start(if breakaway {
+                flags | CREATE_BREAKAWAY_FROM_JOB
+            } else {
+                flags
+            })
+        },
+        &mut std::thread::sleep,
+    )?;
     let pid = child.id();
     let started_at_ms = find(pid).map(|proc| proc.started_at_ms()).unwrap_or(0);
     Ok((
@@ -199,6 +207,42 @@ pub fn spawn(exe: &Path, args: &[&str]) -> std::io::Result<(std::process::Child,
             image: exe.to_string_lossy().into_owned(),
         },
     ))
+}
+
+/// One start of `exe` through `start(breakaway)`, retrying refusals. A refusal with breakaway is
+/// tried again at once without it (a job that forbids breakaway refuses with access denied).
+/// When both are refused (5, 32, 33), the start is retried with backoff for up to
+/// [`crate::durable::RETRY_BUDGET`]: an exe the installer has just written is often still held by
+/// an antivirus scan, and CreateProcess refuses it the same way (W8 gate, release chain 12: the
+/// health probe of a freshly staged `app-2.0.0` failed with os error 5 two milliseconds after
+/// STAGE). Any other error, or a refusal that outlasts the budget, names the exe.
+pub fn start_retrying<T>(
+    exe: &Path,
+    start: &mut dyn FnMut(bool) -> std::io::Result<T>,
+    sleep: &mut dyn FnMut(Duration),
+) -> std::io::Result<T> {
+    let refused = |e: &std::io::Error| matches!(e.raw_os_error(), Some(5 | 32 | 33));
+    let mut delay = Duration::from_millis(10);
+    let mut waited = Duration::ZERO;
+    loop {
+        let error = match start(true) {
+            Ok(started) => return Ok(started),
+            Err(e) if refused(&e) => match start(false) {
+                Ok(started) => return Ok(started),
+                Err(e) => e,
+            },
+            Err(e) => e,
+        };
+        if !refused(&error) || waited >= crate::durable::RETRY_BUDGET {
+            return Err(std::io::Error::new(
+                error.kind(),
+                format!("start {}: {error}", exe.display()),
+            ));
+        }
+        sleep(delay);
+        waited += delay;
+        delay = (delay * 2).min(Duration::from_millis(500));
+    }
 }
 
 pub fn parent_of(pid: u32) -> Option<u32> {
@@ -223,5 +267,95 @@ mod tests {
         };
         assert!(!alive(&recycled));
         assert!(snapshot().iter().any(|proc| proc.pid == std::process::id()));
+    }
+
+    fn os(code: i32) -> std::io::Error {
+        std::io::Error::from_raw_os_error(code)
+    }
+
+    /// An exe still held by an antivirus scan: both starts are refused a few times, then it
+    /// starts. Each round tries breakaway first, then without; the waits back off.
+    #[test]
+    fn a_start_refused_for_a_while_is_retried_until_it_starts() {
+        let mut tries = Vec::new();
+        let mut slept = Vec::new();
+        let mut left = 4;
+        let got = start_retrying(
+            Path::new(r"C:\i\app-2.0.0\AyanamiTaskManager.exe"),
+            &mut |breakaway| {
+                tries.push(breakaway);
+                if left == 0 {
+                    return Ok(breakaway);
+                }
+                left -= 1;
+                Err(os(if left % 2 == 0 { 5 } else { 32 }))
+            },
+            &mut |d| slept.push(d),
+        );
+        assert!(got.unwrap(), "the last start was with breakaway");
+        assert_eq!(tries, [true, false, true, false, true]);
+        assert_eq!(
+            slept,
+            [Duration::from_millis(10), Duration::from_millis(20)]
+        );
+    }
+
+    /// A job that forbids breakaway: the start without it goes through at once, no wait.
+    #[test]
+    fn a_job_that_forbids_breakaway_starts_inside_it_at_once() {
+        let mut tries = Vec::new();
+        let mut slept = Vec::new();
+        let got = start_retrying(
+            Path::new("x.exe"),
+            &mut |breakaway| {
+                tries.push(breakaway);
+                if breakaway { Err(os(5)) } else { Ok(()) }
+            },
+            &mut |d| slept.push(d),
+        );
+        assert!(got.is_ok());
+        assert_eq!(tries, [true, false]);
+        assert!(slept.is_empty());
+    }
+
+    /// Anything but a refusal fails at once; a refusal that outlasts the budget fails after it.
+    /// Both errors name the exe.
+    #[test]
+    fn other_errors_fail_at_once_and_a_lasting_refusal_after_the_budget() {
+        let exe = Path::new(r"C:\i\app-2.0.0\AyanamiTaskManager.exe");
+        let mut slept = Vec::new();
+        let missing =
+            start_retrying::<()>(exe, &mut |_| Err(os(2)), &mut |d| slept.push(d)).unwrap_err();
+        assert!(slept.is_empty());
+        assert_eq!(missing.kind(), std::io::ErrorKind::NotFound);
+        assert!(
+            missing
+                .to_string()
+                .starts_with(r"start C:\i\app-2.0.0\AyanamiTaskManager.exe: "),
+            "{missing}"
+        );
+
+        let mut tries = 0;
+        let denied = start_retrying::<()>(
+            exe,
+            &mut |_| {
+                tries += 1;
+                Err(os(5))
+            },
+            &mut |d| slept.push(d),
+        )
+        .unwrap_err();
+        let waited: Duration = slept.iter().sum();
+        assert!(waited >= crate::durable::RETRY_BUDGET, "{waited:?}");
+        assert!(
+            waited < crate::durable::RETRY_BUDGET + Duration::from_secs(1),
+            "{waited:?}"
+        );
+        assert_eq!(tries, 2 * (slept.len() + 1));
+        assert_eq!(denied.kind(), std::io::ErrorKind::PermissionDenied);
+        assert!(
+            denied.to_string().contains("AyanamiTaskManager.exe: "),
+            "{denied}"
+        );
     }
 }

@@ -2232,7 +2232,12 @@ async function install20(sandbox: Sandbox): Promise<boolean> {
     "--code",
     "DRL",
   ]);
-  check("2.0 CLI creates project DRL", created.status === 0, created.stderr.slice(0, 300));
+  // 2.0 没装上时 atm-core.exe 不在，spawnSync 只有 error、没有输出：照样记成失败的检查项，不让整个演练中断。
+  check(
+    "2.0 CLI creates project DRL",
+    created.status === 0,
+    String(created.stderr ?? created.error ?? "").slice(0, 300),
+  );
   check(
     "2.0 CLI writes DRL-D-001",
     record((args) => cli20(sandbox, args), "升级前写入", "2.0 写的"),
