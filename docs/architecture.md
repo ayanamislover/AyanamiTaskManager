@@ -7,7 +7,7 @@
 - **宿主**（Rust，`apps/desktop/native/host`）：单实例、窗口（系统 WebView2）、托盘、登录自启动、更新与安装状态准入；
   本地服务也运行在这个进程里——数据库生命周期、Agent HTTP、Agent 接入与诊断，以及默认关闭的手机同步与 Claude 派单（[mobile-sync.md](./mobile-sync.md)）。
 - **Renderer**（WebView2）：不接收原始 endpoint/token；只通过宿主注入的 `window.ayanamiDesktop` 窄 capability 发消息，由宿主进程内的 ui-bridge 以 User 身份分发有界 `/api/v1/*` 请求和系统操作。只接受入口文档的消息，跨源导航和新窗口被拒绝。
-- **`atm.exe`**（CLI，`AyanamiTaskManager.exe --cli` 转发给它）与 **`atm-mcp.exe`**（Agent 的 stdio 桥）是按需启动的短进程，经 `runtime\daemon.json` 找到服务，只带 Agent 凭证。
+- **`atm.exe`**（CLI，`AyanamiTaskManager.exe --cli` 转发给它）与 **`atm-mcp.exe`**（Agent 的 stdio 桥）是按需启动的进程（`atm.exe` 每条命令一个，`atm-mcp.exe` 跟着 Agent 会话），不常驻服务，经 `runtime\daemon.json` 找到服务，只带 Agent 凭证。
 
 安装、更新、修复和卸载由事务式安装器 `atm-setup.exe` 负责；安装根的启动器在事务未完成时挡住启动。`apps/daemon` 是 2.x 的 TS 实现，只用于测试与开发。完整威胁边界见 [security-model.md](./security-model.md)。
 

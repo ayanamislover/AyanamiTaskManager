@@ -39,6 +39,17 @@ describe("测试与产品不弹窗（W8k）", () => {
     expect(offenders).toEqual([]);
   });
 
+  it("文档不再说唤醒用的是 DETACHED_PROCESS（W8 r8 P2-02）", () => {
+    const docs = join(repo, "docs");
+    const offenders = [
+      join(repo, "README.md"),
+      ...readdirSync(docs)
+        .filter((name) => name.endsWith(".md"))
+        .map((name) => join(docs, name)),
+    ].filter((file) => readFileSync(file, "utf8").includes("DETACHED_PROCESS"));
+    expect(offenders.map((file) => relative(repo, file).replaceAll("\\", "/"))).toEqual([]);
+  });
+
   it("拉起宿主的测试脚本都先导入 test-windows：宿主窗口不抢焦点、压在最底层", () => {
     const scripts = join(repo, "scripts");
     const offenders = readdirSync(scripts)

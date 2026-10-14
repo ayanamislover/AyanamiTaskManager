@@ -48,7 +48,7 @@ AyanamiTaskManager（ATM）把计划、任务、进度、阻塞、长期记录�
 - **首次启动自动转换 2.x 数据。** 3.0 第一次启动时把 `%LOCALAPPDATA%\AyanamiTaskManager` 里的 2.x 数据转换到新目录；旧目录保持不动。
 - **1.x 要先升级到 2.x。** 3.0 只从 2.x 的数据转换，仍在用 1.x 时先升级到 2.x，再升级到 3.0。
 - **可以经安装器回退到 2.x。** 2.x 数据原样可用，但 3.0 期间的写入不会带回 2.x；回退后再升级的处理见[用户指南](./docs/user-guide.md#从-2x-升级与回退)。
-- **数据库读不出时有恢复页。** ATM 不服务、不改动任何文件，窗口列出整库备份并给出恢复命令；步骤见[排障指南](./docs/troubleshooting.md#数据库读不出)。
+- **数据库读不出时有恢复页。** ATM 不服务，也不改写数据库和备份（只记下这一状态、照常写日志），窗口列出整库备份并给出恢复命令；步骤见[排障指南](./docs/troubleshooting.md#数据库读不出)。
 
 正式发布状态和制品证据以 [GitHub Release](https://github.com/ayanamislover/AyanamiTaskManager/releases) 为准。
 
