@@ -146,7 +146,9 @@ fn doctor_offline_reads_the_wal_of_a_killed_service_without_touching_it() {
     let root = bare_root("cli-doctor-killed-wal");
     let data = root.join("data");
     let db = data.join("atm.sqlite");
-    let side = root.join("killed-side");
+    // 中转目录放在根外：比较的是根里的树，用完不必在比较前删掉它（刚移走文件的目录偶尔一时删不掉）。
+    let side = test_dir("cli-doctor-killed-wal-side");
+    let _ = std::fs::remove_dir_all(&side);
     std::fs::create_dir_all(&side).unwrap();
     let c = rusqlite::Connection::open(&db).unwrap();
     c.execute_batch(
@@ -162,7 +164,7 @@ fn doctor_offline_reads_the_wal_of_a_killed_service_without_touching_it() {
     }
     std::fs::rename(side.join("db"), &db).unwrap();
     std::fs::rename(side.join("wal"), data.join("atm.sqlite-wal")).unwrap();
-    std::fs::remove_dir(&side).unwrap();
+    let _ = std::fs::remove_dir(&side);
     let before = tree(&root);
 
     let run = atm_in(&root, &["--json", "doctor", "--offline"]);
