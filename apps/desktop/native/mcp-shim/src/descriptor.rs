@@ -103,30 +103,12 @@ pub fn damaged_by_the_running_host(root: &std::path::Path) -> Option<String> {
         .then_some(reason)
 }
 
-/// `runtime/damaged.json` read the way the store reads it (`DamagedState::parse`): `state` is
-/// `DATABASE_DAMAGED` and `since`, `generation`, `reason` are strings, else `None` (a broken
-/// file). Returns the reason and, from that same body, the writer if it names one: whole
-/// non-negative numbers up to 2^53, as the store's JSON numbers allow.
+/// `runtime/damaged.json` read by the same code the store uses (`atm_damaged_state`, W8 r11
+/// P2-01d), so atm.exe and this bridge judge every file alike. `None` is a broken file; else the
+/// reason and, from that same body, the writer if it names one.
 fn damaged_state(bytes: &[u8]) -> Option<(String, Option<(u32, u64)>)> {
-    let v: Value = serde_json::from_slice(bytes).ok()?;
-    if v.get("state")?.as_str()? != "DATABASE_DAMAGED" {
-        return None;
-    }
-    for key in ["since", "generation"] {
-        v.get(key)?.as_str()?;
-    }
-    let reason = v.get("reason")?.as_str()?.to_owned();
-    let whole = |w: &Value, key: &str| {
-        let n = w.get(key)?.as_f64()?;
-        (n.fract() == 0.0 && (0.0..=9_007_199_254_740_991.0).contains(&n)).then_some(n as u64)
-    };
-    let writer = v.get("writer").and_then(|w| {
-        Some((
-            u32::try_from(whole(w, "pid")?).ok()?,
-            whole(w, "startedAtMs")?,
-        ))
-    });
-    Some((reason, writer))
+    let state = atm_damaged_state::DamagedState::parse(bytes)?;
+    Some((state.reason, state.writer.map(|w| (w.pid, w.started_at_ms))))
 }
 
 /// `N/runtime/damaged.json` says the published database cannot be read (W8h): the host serves
@@ -459,6 +441,24 @@ mod tests {
                 damaged_report_in(&root, Wake::Impossible, false).as_deref(),
                 Some("the damaged state is corrupt"),
                 "{body}"
+            );
+        }
+        // W8 r11 P2-01d: the bytes the store's test also reads (atm_damaged_state::corpus) read
+        // the same here, straight and through the file.
+        for (bytes, expect) in atm_damaged_state::corpus::cases(me, started) {
+            let shown = String::from_utf8_lossy(&bytes).into_owned();
+            assert_eq!(damaged_state(&bytes), expect, "{shown}");
+            std::fs::write(root.join("runtime").join("damaged.json"), &bytes).unwrap();
+            let current = matches!(&expect, Some((_, Some(_))));
+            assert_eq!(
+                damaged_report_in(&root, Wake::Started, false),
+                expect.as_ref().filter(|_| current).map(|(r, _)| r.clone()),
+                "{shown}"
+            );
+            assert_eq!(
+                damaged_report_in(&root, Wake::Impossible, false),
+                Some(expect.map_or("the damaged state is corrupt".to_owned(), |(r, _)| r)),
+                "{shown}"
             );
         }
         // The host deleted it: nothing to report even when time is up.

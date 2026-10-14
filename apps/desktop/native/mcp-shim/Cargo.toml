@@ -20,6 +20,9 @@ path = "src/main.rs"
 serde_json = { version = "1", default-features = false, features = ["std", "arbitrary_precision"] }
 # An unconnected socket, so SIO_TCP_INITIAL_RTO can be set before connecting (see http.rs).
 socket2 = "0.6"
+# `runtime/damaged.json` 与 atm.exe（存储层）共用同一份读法（W8 关口 peer r11 P2-01d）：这里的
+# serde_json 开着 arbitrary_precision、嵌套上限也不同，不能拿它读这个文件。
+atm-damaged-state = { path = "../damaged-state" }
 
 [build-dependencies]
 serde_json = "1"

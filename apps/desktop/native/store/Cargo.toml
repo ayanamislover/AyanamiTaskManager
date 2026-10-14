@@ -16,6 +16,8 @@ serde_json = { workspace = true }
 zip = { version = "4.6", default-features = false, features = ["deflate"] }
 # 与 setup 共用的持久化契约（durable）与启动交接格式（07 §1、§8）。
 atm-install-state = { path = "../install-state" }
+# `runtime\damaged.json` 的格式，与 atm-mcp 共用同一份读法（W8 关口 peer r11 P2-01d）。
+atm-damaged-state = { path = "../damaged-state" }
 
 # 冻结源库：按 SQLite 的锁协议在库文件与 `-shm` 上加字节锁；暂存目录绑在句柄上（`NtCreateFile` 相对新建、按句柄删除）（`detached`）。
 [target.'cfg(windows)'.dependencies]

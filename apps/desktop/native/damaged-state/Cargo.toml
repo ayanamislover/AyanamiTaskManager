@@ -1,0 +1,13 @@
+[package]
+name = "atm-damaged-state"
+version = "0.0.0"
+description = "AyanamiTaskManager 3: the runtime\\damaged.json format, read the same way by the store, atm.exe and atm-mcp"
+edition = "2024"
+rust-version = "1.95"
+license = "AGPL-3.0-only"
+authors = ["ayanami"]
+publish = false
+
+# 没有依赖：mcp-shim 是另一个工作区（serde_json 开着 arbitrary_precision），共用这一份代码，
+# 两边对同一个文件的判定才逐字节一致（W8 关口 peer r11 P2-01d）。
+[dependencies]

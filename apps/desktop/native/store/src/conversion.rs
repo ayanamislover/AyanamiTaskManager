@@ -1791,72 +1791,9 @@ fn clear_startup_state(layout: &Layout) -> std::io::Result<()> {
 /// `atm recover --offline`）时写，不含凭据。`atm-mcp.exe` 桥和 CLI 连不上服务时读它，向 Agent 报
 /// `DATABASE_DAMAGED`（要用户处理，等多久都不会好）。与 `startup-state.json` 分开：那个文件里不认识的状态
 /// 一律当作数据源冲突。下一次启动这一代能服务（或进入冲突）、或 recover 恢复完，都会删掉它。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct DamagedState {
-    pub since: String,
-    pub generation: String,
-    pub reason: String,
-    /// 写下它的宿主。桥与 CLI 据此判断它是不是还在跑的宿主判定的（W8 r9 P2-01b：不拿文件时间推断）；
-    /// 没有这一项（W8 r9 之前写的、坏文件）就当作上一次运行留下的。
-    pub writer: Option<Writer>,
-}
-
-/// 一个进程的身份：pid 与启动时间（Unix 毫秒，与 `runtime\host.json` 同一个口径）。pid 会被复用，两者合起来才认得出。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Writer {
-    pub pid: u32,
-    pub started_at_ms: u64,
-}
+pub use atm_damaged_state::{DamagedState, Writer};
 
 pub const DAMAGED_STATE: &str = "damaged.json";
-
-impl DamagedState {
-    pub fn to_json(&self) -> String {
-        let mut fields = vec![
-            ("state".into(), s("DATABASE_DAMAGED")),
-            ("since".into(), s(&self.since)),
-            ("generation".into(), s(&self.generation)),
-            ("reason".into(), s(&self.reason)),
-        ];
-        if let Some(w) = self.writer {
-            fields.push((
-                "writer".into(),
-                Value::Object(vec![
-                    ("pid".into(), Value::Number(f64::from(w.pid))),
-                    ("startedAtMs".into(), Value::Number(w.started_at_ms as f64)),
-                ]),
-            ));
-        }
-        jsjson::jcs(&Value::Object(fields))
-    }
-
-    pub fn parse(text_: &str) -> Option<DamagedState> {
-        let v = jsjson::parse_value(text_).ok().flatten()?;
-        if text(&v, "state")? != "DATABASE_DAMAGED" {
-            return None;
-        }
-        let whole = |key: &str, w: &Value| match field(w, key) {
-            Some(Value::Number(n))
-                if n.fract() == 0.0 && *n >= 0.0 && *n <= 9_007_199_254_740_991.0 =>
-            {
-                Some(*n as u64)
-            }
-            _ => None,
-        };
-        let writer = field(&v, "writer").and_then(|w| {
-            Some(Writer {
-                pid: u32::try_from(whole("pid", w)?).ok()?,
-                started_at_ms: whole("startedAtMs", w)?,
-            })
-        });
-        Some(DamagedState {
-            since: text(&v, "since")?,
-            generation: text(&v, "generation")?,
-            reason: text(&v, "reason")?,
-            writer,
-        })
-    }
-}
 
 fn damaged_state_path(layout: &Layout) -> PathBuf {
     layout.runtime().join(DAMAGED_STATE)
@@ -1874,9 +1811,7 @@ pub fn read_damaged(layout: &Layout) -> Option<DamagedState> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => Some(broken(format!("the damaged state cannot be read: {e}"))),
         Ok(bytes) => Some(
-            std::str::from_utf8(&bytes)
-                .ok()
-                .and_then(DamagedState::parse)
+            DamagedState::parse(&bytes)
                 .unwrap_or_else(|| broken("the damaged state is corrupt".into())),
         ),
     }

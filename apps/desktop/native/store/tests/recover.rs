@@ -443,3 +443,23 @@ fn the_damaged_state_round_trips_and_a_broken_file_still_counts() {
     cv::enter_damaged(&layout, GEN, "x", T0, None).unwrap();
     assert_eq!(cv::read_startup_state(&layout), None);
 }
+
+/// W8 关口 peer r11 P2-01d：atm-mcp 的用例读同一批字节（`atm_damaged_state::corpus`），
+/// 这里经读文件的路径读，两边的判定必须一致。
+#[test]
+fn the_damaged_state_reads_the_bytes_the_bridge_reads() {
+    let layout = Layout::new(dir("damaged-differential"));
+    cv::enter_damaged(&layout, GEN, "x", T0, None).unwrap();
+    let path = layout.runtime().join(cv::DAMAGED_STATE);
+    for (bytes, expect) in atm_damaged_state::corpus::cases(4242, 1_760_000_000_123) {
+        std::fs::write(&path, &bytes).unwrap();
+        let got = cv::read_damaged(&layout).expect("a file is there");
+        let want = expect.map_or(("the damaged state is corrupt".to_owned(), None), |e| e);
+        assert_eq!(
+            (got.reason, got.writer.map(|w| (w.pid, w.started_at_ms))),
+            want,
+            "{}",
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+}
