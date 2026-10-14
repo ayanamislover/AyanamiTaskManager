@@ -609,6 +609,28 @@ mod tests {
             Duration::from_millis(300),
         );
         assert!(started.elapsed() >= Duration::from_millis(300));
+
+        // W8 r10 P2-01c：主体坏了、writer 却有效：是坏文件，同样等，等满报「损坏状态本身坏了」（与桥一致）。
+        let writer = serde_json::json!({ "pid": me.pid, "startedAtMs": me.started_at_ms });
+        for body in [
+            serde_json::json!({ "writer": writer }),
+            serde_json::json!({ "state": "OTHER", "since": "s", "generation": "G", "reason": "r", "writer": writer }),
+            serde_json::json!({ "state": "DATABASE_DAMAGED", "since": "s", "generation": "G", "reason": 7, "writer": writer }),
+        ] {
+            std::fs::write(root.join("runtime").join("damaged.json"), body.to_string()).unwrap();
+            let started = Instant::now();
+            let got = connect(
+                &root,
+                Some(&desktop),
+                &mut |_| true,
+                Duration::from_millis(300),
+            );
+            assert!(started.elapsed() >= Duration::from_millis(300), "{body}");
+            assert!(
+                matches!(&got, Err(Unavailable::Damaged(s)) if s.reason == "the damaged state is corrupt"),
+                "{body}: {got:?}"
+            );
+        }
         std::fs::remove_dir_all(&root).unwrap();
     }
 

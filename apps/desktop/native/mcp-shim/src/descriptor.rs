@@ -92,15 +92,41 @@ fn damaged_report_in(
 /// (pid and start time, W8 r9 P2-01b) is the live process with that pid. The host rewrites
 /// the file every time it finds the database unreadable. File times are not used: the clock
 /// may have moved, and a copied file carries its old time.
+///
+/// The writer is taken only from a body the store would accept (W8 r10 P2-01c): a broken body
+/// with a valid writer is a broken file, waited out like one, as atm.exe does.
 pub fn damaged_by_the_running_host(root: &std::path::Path) -> Option<String> {
-    let reason = damaged_in(root)?;
     let bytes = std::fs::read(root.join("runtime").join("damaged.json")).ok()?;
-    let state: Value = serde_json::from_slice(&bytes).ok()?;
-    let writer = state.get("writer")?;
-    let pid = u32::try_from(writer.get("pid")?.as_u64()?).ok()?;
-    let started = writer.get("startedAtMs")?.as_u64()?;
+    let (reason, writer) = damaged_state(&bytes)?;
+    let (pid, started) = writer?;
     (crate::process::pid_alive(pid) && crate::identity::started_at_ms(pid)? == started)
         .then_some(reason)
+}
+
+/// `runtime/damaged.json` read the way the store reads it (`DamagedState::parse`): `state` is
+/// `DATABASE_DAMAGED` and `since`, `generation`, `reason` are strings, else `None` (a broken
+/// file). Returns the reason and, from that same body, the writer if it names one: whole
+/// non-negative numbers up to 2^53, as the store's JSON numbers allow.
+fn damaged_state(bytes: &[u8]) -> Option<(String, Option<(u32, u64)>)> {
+    let v: Value = serde_json::from_slice(bytes).ok()?;
+    if v.get("state")?.as_str()? != "DATABASE_DAMAGED" {
+        return None;
+    }
+    for key in ["since", "generation"] {
+        v.get(key)?.as_str()?;
+    }
+    let reason = v.get("reason")?.as_str()?.to_owned();
+    let whole = |w: &Value, key: &str| {
+        let n = w.get(key)?.as_f64()?;
+        (n.fract() == 0.0 && (0.0..=9_007_199_254_740_991.0).contains(&n)).then_some(n as u64)
+    };
+    let writer = v.get("writer").and_then(|w| {
+        Some((
+            u32::try_from(whole(w, "pid")?).ok()?,
+            whole(w, "startedAtMs")?,
+        ))
+    });
+    Some((reason, writer))
 }
 
 /// `N/runtime/damaged.json` says the published database cannot be read (W8h): the host serves
@@ -114,13 +140,11 @@ fn damaged_in(root: &std::path::Path) -> Option<String> {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
         Err(_) => return Some("the damaged state cannot be read".to_owned()),
     };
-    let value: Option<Value> = serde_json::from_slice(&bytes).ok();
-    let reason = value
-        .as_ref()
-        .filter(|v| v.get("state").and_then(Value::as_str) == Some("DATABASE_DAMAGED"))
-        .and_then(|v| v.get("reason"))
-        .and_then(Value::as_str);
-    Some(reason.unwrap_or("the damaged state is corrupt").to_owned())
+    Some(
+        damaged_state(&bytes)
+            .map(|(reason, _)| reason)
+            .unwrap_or_else(|| "the damaged state is corrupt".to_owned()),
+    )
 }
 
 pub fn load() -> Result<Runtime, RuntimeError> {
@@ -415,6 +439,28 @@ mod tests {
         // The same pid with another start time is a reused pid.
         leave_damaged(&root, "fresh", Some((me, started - 1)));
         assert_eq!(damaged_report_in(&root, Wake::Started, false), None);
+        // W8 r10 P2-01c: a broken body with a valid writer is a broken file, waited out like
+        // one (atm.exe reads it the same way), and reported as corrupt when there is nothing
+        // to wait for.
+        let writer = json!({ "pid": me, "startedAtMs": started });
+        for body in [
+            json!({ "writer": writer }),
+            json!({ "state": "OTHER", "since": "s", "generation": "G", "reason": "r", "writer": writer }),
+            json!({ "state": "DATABASE_DAMAGED", "generation": "G", "reason": "r", "writer": writer }),
+            json!({ "state": "DATABASE_DAMAGED", "since": "s", "generation": "G", "reason": 7, "writer": writer }),
+        ] {
+            std::fs::write(root.join("runtime").join("damaged.json"), body.to_string()).unwrap();
+            assert_eq!(
+                damaged_report_in(&root, Wake::Started, false),
+                None,
+                "{body}"
+            );
+            assert_eq!(
+                damaged_report_in(&root, Wake::Impossible, false).as_deref(),
+                Some("the damaged state is corrupt"),
+                "{body}"
+            );
+        }
         // The host deleted it: nothing to report even when time is up.
         std::fs::remove_file(root.join("runtime").join("damaged.json")).unwrap();
         assert_eq!(damaged_report_in(&root, Wake::Started, true), None);
