@@ -252,7 +252,7 @@ fn a_corrupt_store_is_recovered_and_the_ledgers_are_marked_lost() {
     bytes[..100].fill(0x5a);
     std::fs::write(&db, &bytes).unwrap();
     // 宿主判定读不出时记下的损坏状态（W8h）：恢复完就不再成立。
-    cv::enter_damaged(&w.layout, GEN, "file is not a database", T1).unwrap();
+    cv::enter_damaged(&w.layout, GEN, "file is not a database", T1, None).unwrap();
     let r = recover::recover(&w.layout, &w.backup, options()).unwrap();
     assert_eq!(
         cv::read_damaged(&w.layout),
@@ -417,14 +417,14 @@ fn the_damaged_state_round_trips_and_a_broken_file_still_counts() {
     let layout = Layout::new(dir("damaged-state"));
     assert_eq!(cv::read_damaged(&layout), None);
     cv::clear_damaged(&layout).unwrap();
-    let first = cv::enter_damaged(&layout, GEN, "file is not a database", T0).unwrap();
+    let first = cv::enter_damaged(&layout, GEN, "file is not a database", T0, None).unwrap();
     assert_eq!(cv::read_damaged(&layout), Some(first.clone()));
-    let again = cv::enter_damaged(&layout, GEN, "still unreadable", T1).unwrap();
+    let again = cv::enter_damaged(&layout, GEN, "still unreadable", T1, None).unwrap();
     assert_eq!(
         (again.since.as_str(), again.reason.as_str()),
         (T0, "still unreadable")
     );
-    let other = cv::enter_damaged(&layout, "01J000000000000000000OTHER", "x", T2).unwrap();
+    let other = cv::enter_damaged(&layout, "01J000000000000000000OTHER", "x", T2, None).unwrap();
     assert_eq!(other.since, T2);
     let path = layout.runtime().join(cv::DAMAGED_STATE);
     for broken in [
@@ -440,6 +440,6 @@ fn the_damaged_state_round_trips_and_a_broken_file_still_counts() {
     cv::clear_damaged(&layout).unwrap();
     assert_eq!(cv::read_damaged(&layout), None);
     // 损坏状态不进启动状态：store 与 CLI 把那里不认识的状态都当作数据源冲突。
-    cv::enter_damaged(&layout, GEN, "x", T0).unwrap();
+    cv::enter_damaged(&layout, GEN, "x", T0, None).unwrap();
     assert_eq!(cv::read_startup_state(&layout), None);
 }

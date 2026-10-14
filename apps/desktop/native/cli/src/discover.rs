@@ -7,8 +7,9 @@
 //!    才用 `--background --agent-wake` 拉起桌面端，轮询 45 s。开发构建与随便拷走的 atm.exe 不拉起任何东西，
 //!    直接报留下的状态。先拉起、再看等不来的状态（与 atm-mcp 一致）：
 //!    - `runtime\startup-state.json` 说在等用户选数据来源（07 §7）：立刻报，拉起的宿主会把选择窗口带出来；
-//!    - `runtime\damaged.json` 说库读不出（W8h）：只认现在在跑的宿主启动之后写的。上一次运行留下的不算——
-//!      库可能已在 ATM 外换回好的，宿主起来会删掉它（W8 r8 P2-01）；等到宿主重写它才报，等满还在也报。
+//!    - `runtime\damaged.json` 说库读不出（W8h）：只认还在跑的宿主写的（它在文件里记下自己的 pid 与启动
+//!      时间，W8 r9 P2-01b）。上一次运行留下的不算——库可能已在 ATM 外换回好的，宿主起来会删掉它
+//!      （W8 r8 P2-01）；等到宿主重写它才报，等满还在也报。拉起失败（W8 r9 P2-01a）同没有桌面端，立刻报。
 //!
 //! 令牌只用在请求头里，从不打印、不写日志。
 
@@ -110,21 +111,13 @@ fn awaiting_user(root: &Path) -> Option<Unavailable> {
         .or_else(|| damaged(root).map(Unavailable::Damaged))
 }
 
-/// 损坏状态是现在在跑的宿主写的：`runtime\host.json` 记的宿主还活着（pid 与启动时间都对得上），
-/// 文件是它启动之后写的。宿主每次判定库读不出都会重写它。
+/// 损坏状态是还在跑的宿主写的：文件里记的写入者（pid 与启动时间）就是现在活着的那个进程。
+/// 宿主每次判定库读不出都会重写它；不看文件时间（时钟可能回拨、文件时间可能被复制带过来）。
 fn damaged_by_the_running_host(root: &Path) -> Option<DamagedState> {
     let state = damaged(root)?;
-    let record = atm_install_state::ipc::read_host_record(root)?;
-    let host = atm_install_state::procs::find(record.pid)?;
-    if host.started_at_ms() != record.started_at_ms {
-        return None;
-    }
-    let written = std::fs::metadata(root.join("runtime").join("damaged.json"))
-        .and_then(|m| m.modified())
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?;
-    (written.as_millis() >= u128::from(record.started_at_ms)).then_some(state)
+    let writer = state.writer?;
+    let host = atm_install_state::procs::find(writer.pid)?;
+    (host.started_at_ms() == writer.started_at_ms).then_some(state)
 }
 
 pub fn discover() -> Result<Target, Unavailable> {
@@ -145,23 +138,22 @@ pub fn discover() -> Result<Target, Unavailable> {
         .ok()
         .as_deref()
         .and_then(desktop_executable);
-    connect(&root, desktop.as_deref(), &mut |d| wake(d), WAKE_WAIT)
+    connect(&root, desktop.as_deref(), &mut wake, WAKE_WAIT)
 }
 
-/// 探活；不在跑就拉起 `desktop`（没有就直接报留下的状态），再轮询到 `wait`。见模块说明第 3 条。
+/// 探活；不在跑就拉起 `desktop`（没有、或拉不起来，就直接报留下的状态），再轮询到 `wait`。见模块说明第 3 条。
 fn connect(
     root: &Path,
     desktop: Option<&Path>,
-    wake: &mut dyn FnMut(&Path),
+    wake: &mut dyn FnMut(&Path) -> bool,
     wait: Duration,
 ) -> Result<Target, Unavailable> {
     if let Some(target) = live(root)? {
         return Ok(target);
     }
-    let Some(desktop) = desktop else {
+    if !desktop.is_some_and(wake) {
         return Err(awaiting_user(root).unwrap_or(Unavailable::NotRunning { woke: false }));
-    };
-    wake(desktop);
+    }
     let deadline = Instant::now() + wait;
     loop {
         if let Some(state) = startup_state(root) {
@@ -363,8 +355,8 @@ pub fn desktop_executable(cli: &Path) -> Option<PathBuf> {
     desktop.is_file().then_some(desktop)
 }
 
-/// 隐藏地拉起桌面端（不带窗口、自成进程组）；拉不起来就当没拉，调用方接着等、最后报服务未运行。
-fn wake(desktop: &Path) {
+/// 隐藏地拉起桌面端（不带窗口、自成进程组），返回拉起了没有。
+fn wake(desktop: &Path) -> bool {
     let mut command = std::process::Command::new(desktop);
     command
         .args(["--background", "--agent-wake"])
@@ -380,7 +372,7 @@ fn wake(desktop: &Path) {
         const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
         command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
     }
-    let _ = command.spawn();
+    command.spawn().is_ok()
 }
 
 #[cfg(test)]
@@ -496,40 +488,35 @@ mod tests {
         root
     }
 
-    fn leave_damaged(root: &Path, reason: &str) {
+    fn leave_damaged(root: &Path, reason: &str, writer: Option<atm_store::conversion::Writer>) {
         atm_store::conversion::enter_damaged(
             &Layout::new(root),
             "G",
             reason,
             "2026-10-14T00:00:00.000Z",
+            writer,
         )
         .unwrap();
     }
 
-    /// 这个测试进程扮演「在跑的宿主」：host.json 记下它的 pid 与启动时间。
-    fn this_process_is_the_host(root: &Path) -> u64 {
-        let started = atm_install_state::procs::find(std::process::id())
-            .unwrap()
-            .started_at_ms();
-        let record = atm_install_state::ipc::HostRecord {
+    /// 这个测试进程扮演「在跑的宿主」。
+    fn this_process() -> atm_store::conversion::Writer {
+        atm_store::conversion::Writer {
             pid: std::process::id(),
-            started_at_ms: started,
-        };
-        std::fs::write(
-            root.join("runtime").join("host.json"),
-            serde_json::to_vec(&record).unwrap(),
-        )
-        .unwrap();
-        started
+            started_at_ms: atm_install_state::procs::find(std::process::id())
+                .unwrap()
+                .started_at_ms(),
+        }
     }
 
     /// W8 r8 P2-01：宿主没在跑、留着上一次的损坏状态时，先拉起宿主；那份旧状态不当真，
     /// 宿主起来删掉它（库在 ATM 外换回了好的）就不报损坏。等满了它还在，才照旧报出来。
+    /// W8 r9 P2-01a：拉不起来（桌面端在、但启动失败）同没有桌面端，立刻报。
     #[test]
     fn a_leftover_damaged_state_wakes_the_host_first() {
         let root = scratch_root("leftover-damaged");
         let desktop = root.join("AyanamiTaskManager.exe");
-        leave_damaged(&root, "old");
+        leave_damaged(&root, "old", None);
 
         // 宿主起来、删掉了旧状态：没有损坏可报，只是这里没有服务可连。
         let mut woke = 0;
@@ -540,6 +527,7 @@ mod tests {
                 assert_eq!(d, desktop);
                 woke += 1;
                 std::fs::remove_file(root.join("runtime").join("damaged.json")).unwrap();
+                true
             },
             Duration::from_millis(300),
         );
@@ -547,72 +535,77 @@ mod tests {
         assert_eq!(got, Err(Unavailable::NotRunning { woke: true }));
 
         // 宿主一直没起来：旧状态等满才报，不是一看到就报。
-        leave_damaged(&root, "old");
+        leave_damaged(&root, "old", None);
         let started = Instant::now();
         let mut woke = 0;
         let got = connect(
             &root,
             Some(&desktop),
-            &mut |_| woke += 1,
+            &mut |_| {
+                woke += 1;
+                true
+            },
             Duration::from_millis(300),
         );
         assert_eq!(woke, 1);
         assert!(started.elapsed() >= Duration::from_millis(300));
         assert!(matches!(got, Err(Unavailable::Damaged(s)) if s.reason == "old"));
 
-        // 拉不起宿主（开发构建）：留下的状态就是全部答案，立刻报。
-        let started = Instant::now();
-        let got = connect(&root, None, &mut |_| unreachable!(), Duration::from_secs(5));
-        assert!(started.elapsed() < Duration::from_secs(2));
-        assert!(matches!(got, Err(Unavailable::Damaged(_))));
+        // 拉不起宿主：开发构建没有桌面端，或者桌面端在、启动失败。留下的状态就是全部答案，立刻报。
+        for desktop in [None, Some(desktop.as_path())] {
+            let started = Instant::now();
+            let got = connect(&root, desktop, &mut |_| false, Duration::from_secs(5));
+            assert!(started.elapsed() < Duration::from_secs(2), "{desktop:?}");
+            assert!(matches!(got, Err(Unavailable::Damaged(_))), "{desktop:?}");
+        }
         std::fs::remove_dir_all(&root).unwrap();
     }
 
-    /// 在跑的宿主启动之后写下的损坏状态当真，立刻报；它启动之前就有的（时间早于宿主启动）不当真。
+    /// W8 r9 P2-01b：还在跑的宿主写的（文件里的写入者就是活着的那个进程）当真、立刻报；写入者不在了、
+    /// 或者没记写入者，都当作上一次留下的，等。文件时间不算数：时间在将来也不当真。
     #[test]
     fn only_a_damaged_state_written_by_the_running_host_is_reported_at_once() {
         let root = scratch_root("host-damaged");
         let desktop = root.join("AyanamiTaskManager.exe");
-        let started_at = this_process_is_the_host(&root);
-        leave_damaged(&root, "fresh");
+        let me = this_process();
+        leave_damaged(&root, "fresh", Some(me));
         let started = Instant::now();
-        let got = connect(&root, Some(&desktop), &mut |_| {}, Duration::from_secs(5));
+        let got = connect(&root, Some(&desktop), &mut |_| true, Duration::from_secs(5));
         assert!(started.elapsed() < Duration::from_secs(2));
         assert!(matches!(got, Err(Unavailable::Damaged(s)) if s.reason == "fresh"));
 
-        let before = std::time::UNIX_EPOCH + Duration::from_millis(started_at - 1_000);
+        let waits = |writer| {
+            leave_damaged(&root, "stale", writer);
+            let started = Instant::now();
+            let got = connect(
+                &root,
+                Some(&desktop),
+                &mut |_| true,
+                Duration::from_millis(300),
+            );
+            assert!(matches!(got, Err(Unavailable::Damaged(_))));
+            started.elapsed() >= Duration::from_millis(300)
+        };
+        // 同一个 pid、启动时间不同：是复用了这个 pid 的另一个进程。
+        let reused = atm_store::conversion::Writer {
+            started_at_ms: me.started_at_ms - 1,
+            ..me
+        };
+        assert!(waits(Some(reused)));
+        assert!(waits(None));
+        // 没记写入者、文件时间在将来：照样等。
+        leave_damaged(&root, "stale", None);
         std::fs::File::options()
             .write(true)
             .open(root.join("runtime").join("damaged.json"))
             .unwrap()
-            .set_modified(before)
+            .set_modified(std::time::SystemTime::now() + Duration::from_secs(3_600))
             .unwrap();
-        let started = Instant::now();
-        let got = connect(
-            &root,
-            Some(&desktop),
-            &mut |_| {},
-            Duration::from_millis(300),
-        );
-        assert!(started.elapsed() >= Duration::from_millis(300));
-        assert!(matches!(got, Err(Unavailable::Damaged(_))));
-
-        // host.json 记的进程已经不在（pid 对、启动时间不对）：同样不当真。
-        leave_damaged(&root, "fresh");
-        let record = atm_install_state::ipc::HostRecord {
-            pid: std::process::id(),
-            started_at_ms: started_at - 1,
-        };
-        std::fs::write(
-            root.join("runtime").join("host.json"),
-            serde_json::to_vec(&record).unwrap(),
-        )
-        .unwrap();
         let started = Instant::now();
         let _ = connect(
             &root,
             Some(&desktop),
-            &mut |_| {},
+            &mut |_| true,
             Duration::from_millis(300),
         );
         assert!(started.elapsed() >= Duration::from_millis(300));

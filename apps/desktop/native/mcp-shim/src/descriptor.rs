@@ -88,25 +88,19 @@ fn damaged_report_in(
     }
 }
 
-/// `runtime/damaged.json` was written by the host running now: `runtime/host.json` names a
-/// live process started when it says, and the file is newer than that start. The host
-/// rewrites the file every time it finds the database unreadable.
+/// `runtime/damaged.json` was written by a host that is still running: the writer it records
+/// (pid and start time, W8 r9 P2-01b) is the live process with that pid. The host rewrites
+/// the file every time it finds the database unreadable. File times are not used: the clock
+/// may have moved, and a copied file carries its old time.
 pub fn damaged_by_the_running_host(root: &std::path::Path) -> Option<String> {
     let reason = damaged_in(root)?;
-    let runtime = root.join("runtime");
-    let bytes = std::fs::read(runtime.join("host.json")).ok()?;
-    let record: Value = serde_json::from_slice(&bytes).ok()?;
-    let pid = u32::try_from(record.get("pid")?.as_u64()?).ok()?;
-    let started = record.get("startedAtMs")?.as_u64()?;
-    if !crate::process::pid_alive(pid) || crate::identity::started_at_ms(pid)? != started {
-        return None;
-    }
-    let written = std::fs::metadata(runtime.join("damaged.json"))
-        .and_then(|m| m.modified())
-        .ok()?
-        .duration_since(std::time::UNIX_EPOCH)
-        .ok()?;
-    (written.as_millis() >= u128::from(started)).then_some(reason)
+    let bytes = std::fs::read(root.join("runtime").join("damaged.json")).ok()?;
+    let state: Value = serde_json::from_slice(&bytes).ok()?;
+    let writer = state.get("writer")?;
+    let pid = u32::try_from(writer.get("pid")?.as_u64()?).ok()?;
+    let started = writer.get("startedAtMs")?.as_u64()?;
+    (crate::process::pid_alive(pid) && crate::identity::started_at_ms(pid)? == started)
+        .then_some(reason)
 }
 
 /// `N/runtime/damaged.json` says the published database cannot be read (W8h): the host serves
@@ -375,24 +369,23 @@ mod tests {
         root
     }
 
-    fn leave_damaged(root: &std::path::Path, reason: &str) {
-        let state = json!({ "state": "DATABASE_DAMAGED", "since": "s", "generation": "G", "reason": reason });
+    fn leave_damaged(root: &std::path::Path, reason: &str, writer: Option<(u32, u64)>) {
+        let mut state = json!({ "state": "DATABASE_DAMAGED", "since": "s", "generation": "G", "reason": reason });
+        if let Some((pid, started)) = writer {
+            state["writer"] = json!({ "pid": pid, "startedAtMs": started });
+        }
         std::fs::write(root.join("runtime").join("damaged.json"), state.to_string()).unwrap();
     }
 
-    fn host_record(root: &std::path::Path, started_at_ms: u64) {
-        let record = json!({ "pid": std::process::id(), "startedAtMs": started_at_ms });
-        std::fs::write(root.join("runtime").join("host.json"), record.to_string()).unwrap();
-    }
-
-    /// W8 r8 P2-01: after a wake, a damaged state left by an earlier run is not reported until
-    /// the running host writes it (or time is up); with no desktop to wake it is reported at once.
+    /// W8 r8 P2-01, r9 P2-01b: after a wake, a damaged state is reported while there is time left
+    /// only when the host that wrote it is still running; with no desktop to wake, or when time
+    /// is up, what is there is reported. File times play no part.
     #[test]
     fn a_leftover_damaged_state_counts_only_once_the_running_host_writes_it() {
         use crate::process::Wake;
         let root = scratch("damaged-host");
-        leave_damaged(&root, "old");
-        // No host has run since: only when there is nothing to wait for.
+        leave_damaged(&root, "old", None);
+        // No writer recorded: left by an earlier run, reported only when there is nothing to wait for.
         assert_eq!(damaged_report_in(&root, Wake::Started, false), None);
         assert_eq!(
             damaged_report_in(&root, Wake::Started, true).as_deref(),
@@ -402,28 +395,25 @@ mod tests {
             damaged_report_in(&root, Wake::Impossible, false).as_deref(),
             Some("old")
         );
-
-        // This test process plays the running host; the state written after it started counts.
-        let started = crate::identity::started_at_ms(std::process::id()).unwrap();
-        host_record(&root, started);
-        leave_damaged(&root, "fresh");
-        assert_eq!(
-            damaged_report_in(&root, Wake::Started, false).as_deref(),
-            Some("fresh")
-        );
-
-        // Written before the host started: left by an earlier run.
+        // A time in the future does not make it current.
         std::fs::File::options()
             .write(true)
             .open(root.join("runtime").join("damaged.json"))
             .unwrap()
-            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_millis(started - 1_000))
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3_600))
             .unwrap();
         assert_eq!(damaged_report_in(&root, Wake::Started, false), None);
 
-        // host.json names a process that is not the one alive under that pid.
-        leave_damaged(&root, "fresh");
-        host_record(&root, started - 1);
+        // This test process plays the running host.
+        let me = std::process::id();
+        let started = crate::identity::started_at_ms(me).unwrap();
+        leave_damaged(&root, "fresh", Some((me, started)));
+        assert_eq!(
+            damaged_report_in(&root, Wake::Started, false).as_deref(),
+            Some("fresh")
+        );
+        // The same pid with another start time is a reused pid.
+        leave_damaged(&root, "fresh", Some((me, started - 1)));
         assert_eq!(damaged_report_in(&root, Wake::Started, false), None);
         // The host deleted it: nothing to report even when time is up.
         std::fs::remove_file(root.join("runtime").join("damaged.json")).unwrap();

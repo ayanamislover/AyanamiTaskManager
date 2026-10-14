@@ -772,6 +772,7 @@ fn a_leftover_damaged_state_is_cleared_once_the_generation_is_readable() {
         "G",
         "file is not a database",
         "2026-10-14T00:00:00.000Z",
+        None,
     )
     .unwrap();
     serving(atm_runtime::start(&options(&n, &l, &Events::default())).unwrap()).stop(&|_| {});
@@ -782,6 +783,7 @@ fn a_leftover_damaged_state_is_cleared_once_the_generation_is_readable() {
         "G",
         "file is not a database",
         "2026-10-14T00:00:00.000Z",
+        None,
     )
     .unwrap();
     let moved = d.join("L-moved");
@@ -799,6 +801,7 @@ fn a_leftover_damaged_state_is_cleared_once_the_generation_is_readable() {
         "G",
         "file is not a database",
         "2026-10-14T00:00:00.000Z",
+        None,
     )
     .unwrap();
     let Started::Conflict(c) =

@@ -1796,18 +1796,38 @@ pub struct DamagedState {
     pub since: String,
     pub generation: String,
     pub reason: String,
+    /// 写下它的宿主。桥与 CLI 据此判断它是不是还在跑的宿主判定的（W8 r9 P2-01b：不拿文件时间推断）；
+    /// 没有这一项（W8 r9 之前写的、坏文件）就当作上一次运行留下的。
+    pub writer: Option<Writer>,
+}
+
+/// 一个进程的身份：pid 与启动时间（Unix 毫秒，与 `runtime\host.json` 同一个口径）。pid 会被复用，两者合起来才认得出。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Writer {
+    pub pid: u32,
+    pub started_at_ms: u64,
 }
 
 pub const DAMAGED_STATE: &str = "damaged.json";
 
 impl DamagedState {
     pub fn to_json(&self) -> String {
-        jsjson::jcs(&Value::Object(vec![
+        let mut fields = vec![
             ("state".into(), s("DATABASE_DAMAGED")),
             ("since".into(), s(&self.since)),
             ("generation".into(), s(&self.generation)),
             ("reason".into(), s(&self.reason)),
-        ]))
+        ];
+        if let Some(w) = self.writer {
+            fields.push((
+                "writer".into(),
+                Value::Object(vec![
+                    ("pid".into(), Value::Number(f64::from(w.pid))),
+                    ("startedAtMs".into(), Value::Number(w.started_at_ms as f64)),
+                ]),
+            ));
+        }
+        jsjson::jcs(&Value::Object(fields))
     }
 
     pub fn parse(text_: &str) -> Option<DamagedState> {
@@ -1815,10 +1835,25 @@ impl DamagedState {
         if text(&v, "state")? != "DATABASE_DAMAGED" {
             return None;
         }
+        let whole = |key: &str, w: &Value| match field(w, key) {
+            Some(Value::Number(n))
+                if n.fract() == 0.0 && *n >= 0.0 && *n <= 9_007_199_254_740_991.0 =>
+            {
+                Some(*n as u64)
+            }
+            _ => None,
+        };
+        let writer = field(&v, "writer").and_then(|w| {
+            Some(Writer {
+                pid: u32::try_from(whole("pid", w)?).ok()?,
+                started_at_ms: whole("startedAtMs", w)?,
+            })
+        });
         Some(DamagedState {
             since: text(&v, "since")?,
             generation: text(&v, "generation")?,
             reason: text(&v, "reason")?,
+            writer,
         })
     }
 }
@@ -1833,6 +1868,7 @@ pub fn read_damaged(layout: &Layout) -> Option<DamagedState> {
         since: String::new(),
         generation: String::new(),
         reason,
+        writer: None,
     };
     match std::fs::read(damaged_state_path(layout)) {
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
@@ -1846,12 +1882,13 @@ pub fn read_damaged(layout: &Layout) -> Option<DamagedState> {
     }
 }
 
-/// 宿主最终判定这一代读不出（重试也没好）时调用。同一 generation 已经记着就保留原来的 `since`。
+/// 宿主最终判定这一代读不出（重试也没好）时调用，`writer` 是宿主自己。同一 generation 已经记着就保留原来的 `since`。
 pub fn enter_damaged(
     layout: &Layout,
     generation: &str,
     reason: &str,
     at: &str,
+    writer: Option<Writer>,
 ) -> std::io::Result<DamagedState> {
     let since = match read_damaged(layout) {
         Some(prev) if prev.generation == generation && !prev.since.is_empty() => prev.since,
@@ -1861,6 +1898,7 @@ pub fn enter_damaged(
         since,
         generation: generation.to_string(),
         reason: reason.to_string(),
+        writer,
     };
     std::fs::create_dir_all(layout.runtime())
         .map_err(|e| located(e, "create", &layout.runtime().display()))?;

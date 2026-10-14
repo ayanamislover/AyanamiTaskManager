@@ -789,11 +789,17 @@ impl App {
                 );
                 // The bridge and the CLI tell the Agent DATABASE_DAMAGED instead of waiting it out (W8h).
                 let at = atm_install_state::startup::iso_utc(atm_install_state::handoff::now_ms());
+                // 写下自己是谁：桥与 CLI 只把还在跑的宿主写的当真（W8 r9 P2-01b）。
+                let writer = atm_store::conversion::Writer {
+                    pid: std::process::id(),
+                    started_at_ms: crate::health::process_started_at_ms(),
+                };
                 if let Err(e) = enter_damaged(
                     &atm_store::conversion::Layout::new(&self.layout.v3_root),
                     &generation,
                     &reason,
                     &at,
+                    Some(writer),
                 ) {
                     crate::log(&self.layout.v3_root, &format!("damaged state: {e}"));
                 }

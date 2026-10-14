@@ -306,13 +306,14 @@ fn a_damaged_database_is_reported_at_once() {
     let root = bare_root("cli-damaged");
     let at = "2026-10-14T00:00:00.000Z";
     let first: DamagedState =
-        enter_damaged(&Layout::new(&root), "G", "file is not a database", at).unwrap();
+        enter_damaged(&Layout::new(&root), "G", "file is not a database", at, None).unwrap();
     // 同一 generation 再记一次：保留第一次的时间。
     let again = enter_damaged(
         &Layout::new(&root),
         "G",
         "still unreadable",
         "2026-10-14T01:00:00.000Z",
+        None,
     )
     .unwrap();
     assert_eq!(again.since, first.since);
@@ -358,6 +359,41 @@ fn a_damaged_database_is_reported_at_once() {
     std::fs::remove_file(root.join("runtime").join("damaged.json")).unwrap();
     let run = atm_in(&root, &["--json", "status"]);
     assert_eq!(run.json()["error"]["code"], "ATM_RUNTIME_UNAVAILABLE");
+}
+
+/// W8 r9 P2-01a：atm.exe 在安装布局里、旁边的桌面端却拉不起来（这里是个空文件，CreateProcess 失败），
+/// 留着上一次运行的损坏状态：立刻报，不等满 45 s。
+#[test]
+fn a_desktop_that_cannot_start_does_not_make_the_cli_wait() {
+    let root = bare_root("cli-damaged-unstartable");
+    enter_damaged(
+        &Layout::new(&root),
+        "G",
+        "left by an earlier run",
+        "2026-10-14T00:00:00.000Z",
+        None,
+    )
+    .unwrap();
+    let install = root
+        .parent()
+        .unwrap()
+        .join("cli-damaged-unstartable-install");
+    let _ = std::fs::remove_dir_all(&install);
+    let resources = install.join("resources");
+    std::fs::create_dir_all(&resources).unwrap();
+    std::fs::write(install.join("AyanamiTaskManager.exe"), b"").unwrap();
+    let exe = resources.join("atm.exe");
+    std::fs::copy(env!("CARGO_BIN_EXE_atm"), &exe).unwrap();
+    let started = Instant::now();
+    let run = atm_full(&exe, &root, &["--json", "status"], &[], None);
+    assert!(
+        started.elapsed() < Duration::from_secs(10),
+        "{:?}",
+        started.elapsed()
+    );
+    assert_eq!(run.code, 4, "{}{}", run.stdout, run.stderr);
+    assert_eq!(run.json()["error"]["code"], "ATM_DATABASE_DAMAGED");
+    let _ = std::fs::remove_dir_all(&install);
 }
 
 /// peer r4 P1-01：`doctor --offline` 的暂存目录是 `%TEMP%\atm-doctor-read\`。数据根恰好在它下面一个像遗留副本的

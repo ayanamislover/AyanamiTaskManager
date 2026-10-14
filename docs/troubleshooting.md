@@ -39,7 +39,7 @@
 
 页面显示没有整库备份、或命令报告没有可用的备份时，不要删除数据目录，先把 `%LOCALAPPDATA%\AyanamiTaskManager3` 整个复制一份留存，再求助。
 
-恢复之前，Agent 经 MCP 收到错误码 `DATABASE_DAMAGED`：`fix.kind` 是 `ask_user`，不可重试，应转告用户按上面的步骤处理，恢复完成后再原样重发。CLI 报 `ATM_DATABASE_DAMAGED`（退出码 4），`--cli doctor --offline` 把它列在 `problems` 里。这一状态记在 `%LOCALAPPDATA%\AyanamiTaskManager3\runtime\damaged.json`（不含令牌）：宿主重试两次仍读不出才写，恢复成功或下次启动能正常服务时删除。手工删掉它不会让库变好，下次启动仍读不出时会再写一次。ATM 没在运行时留下的这份状态，MCP 与 CLI 不直接当真：它们先唤醒 ATM，等它重新判定——仍读不出就重写这份状态并报上面的错误码；库已经在 ATM 外换回好的，它就删掉这份状态、照常服务。
+恢复之前，Agent 经 MCP 收到错误码 `DATABASE_DAMAGED`：`fix.kind` 是 `ask_user`，不可重试，应转告用户按上面的步骤处理，恢复完成后再原样重发。CLI 报 `ATM_DATABASE_DAMAGED`（退出码 4），`--cli doctor --offline` 把它列在 `problems` 里。这一状态记在 `%LOCALAPPDATA%\AyanamiTaskManager3\runtime\damaged.json`（不含令牌）：宿主重试两次仍读不出才写，恢复成功或下次启动能正常服务时删除。手工删掉它不会让库变好，下次启动仍读不出时会再写一次。这份状态里记着写下它的 ATM 进程。那个进程还在运行时，MCP 与 CLI 立刻报上面的错误码；它已经退出（这是上一次运行留下的），MCP 与 CLI 不直接当真：先唤醒 ATM，等它重新判定——仍读不出就重写这份状态并报错误码；库已经在 ATM 外换回好的，它就删掉这份状态、照常服务。等满（MCP 读约 45 秒、写约 30 秒，CLI 45 秒）这份状态还在，照样报错误码。找不到桌面端（开发构建）或拉不起来时不等，直接报。
 
 ## 崩溃后自动恢复
 
@@ -124,7 +124,7 @@ ATM 的最后一条心跳在 28 秒前，退出链没走完，下次启动就记
 - 2.x 写进配置的旧入口（`AyanamiTaskManager.exe --mcp-stdio`、`mcp-stdio.cjs`、`ayanami-task-manager-actions`、没有 `--profile` 的 `ayanami-task-manager`）会在 ATM 启动时被改成 `atm-mcp.exe --profile core|memory`，改之前留一份 `.bak-` 备份；没接入过 ATM 的客户端不会被改。改完要重启 Agent 客户端；
 - bridge 的 stderr 里 `ATM_RUNTIME_UNAVAILABLE` 表示 45 秒内没等到 daemon 发布，`ATM_RUNTIME_DESCRIPTOR_INVALID` 表示 `runtime/daemon.json` 内容不合法（不会等待），`MCP_PROFILE_INVALID` 表示 `--profile` 写错；
 - `ATM_SOURCE_CONFLICT` 表示 ATM 在等用户在窗口里选择数据来源（见[需要选择数据来源](#需要选择数据来源)），bridge 不等待、直接返回；写调用得到的错误信封是 `SERVICE_UNAVAILABLE`，说明里写明在等用户选择，用户处理后原样重发；
-- `DATABASE_DAMAGED` 表示数据库读不出、要用户先从备份恢复（见[数据库读不出](#数据库读不出)）。正在运行的 ATM 判定过的，bridge 立刻报、不等待；上一次运行留下的，bridge 先唤醒 ATM、等它重新判定。重试没有用；
+- `DATABASE_DAMAGED` 表示数据库读不出、要用户先从备份恢复（见[数据库读不出](#数据库读不出)）。写下它的 ATM 还在运行时 bridge 立刻报、不等待；上一次运行留下的，bridge 先唤醒 ATM、等它重新判定（拉不起 ATM 时直接报）。重试没有用；
 - 设置了 `ATM3_DATA_DIR` 时，bridge 读取的是该目录下的 `runtime/daemon.json`，须与桌面端一致；
 - `401` 表示 token 错误或已随 daemon 重启过期；优先重载 stdio bridge，手工 HTTP 配置需从设置重新复制；
 - `SESSION_CLOSED` 表示旧 Session 已结束，应重新 `atm_begin`；
