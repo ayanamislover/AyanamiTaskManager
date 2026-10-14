@@ -171,9 +171,13 @@ pub fn wait_all_gone(identities: &[ProcessIdentity], timeout: Duration) -> bool 
 /// woke — and the ATM it starts must outlive that. A job that forbids breakaway makes
 /// CreateProcess fail with access denied; then the process starts inside it, as before.
 /// A refusal either way is waited out for a while ([`start_retrying`]).
+///
+/// `CREATE_NO_WINDOW`, not `DETACHED_PROCESS`: a console program started detached has no console, so
+/// every console program it starts in turn opens a visible window (W8k). For the GUI programs this
+/// usually starts the flag is ignored.
 pub fn spawn(exe: &Path, args: &[&str]) -> std::io::Result<(std::process::Child, ProcessIdentity)> {
     use std::os::windows::process::CommandExt;
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
     const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
     let start = |flags: u32| {
@@ -185,7 +189,7 @@ pub fn spawn(exe: &Path, args: &[&str]) -> std::io::Result<(std::process::Child,
             .creation_flags(flags)
             .spawn()
     };
-    let flags = DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP;
+    let flags = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
     let child = start_retrying(
         exe,
         &mut |breakaway| {

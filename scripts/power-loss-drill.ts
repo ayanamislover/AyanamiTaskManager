@@ -27,6 +27,8 @@
  * 报告写 output/power-loss/report.json。发布链的 power-loss 阶段跑全部场景；assemble-release 只认三个场景都跑过、
  * 每项通过、二进制与候选一致的报告（power-loss-report.ts、candidate-binaries.ts）。
  */
+// 先于一切：这里拉起的宿主窗口不抢焦点、压在最底层（scripts/test-windows.ts）。
+import "./test-windows.js";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, rmSync, writeFileSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";

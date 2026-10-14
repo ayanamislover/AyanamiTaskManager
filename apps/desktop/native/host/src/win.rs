@@ -76,6 +76,27 @@ pub fn shown_normal(hwnd: isize) -> bool {
     unsafe { IsZoomed(hwnd) == 0 && IsIconic(hwnd) == 0 }
 }
 
+/// Puts the window behind every other window without activating it (the background window
+/// of test runs, [`crate::app::background_window`]).
+pub fn send_to_back(hwnd: isize) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+    };
+    let hwnd = hwnd as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: only reorders a window handle this process owns.
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            HWND_BOTTOM,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
+}
+
 pub fn wide(value: impl AsRef<OsStr>) -> Vec<u16> {
     value
         .as_ref()

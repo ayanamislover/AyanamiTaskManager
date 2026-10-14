@@ -13,7 +13,8 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const DETACHED_PROCESS: u32 = 0x0000_0008;
+/// Not `DETACHED_PROCESS`: a detached console program opens a window for each console child (W8k).
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
 /// `atm-<version>-win-x64.json`, the version as the packager writes it.
@@ -86,7 +87,7 @@ pub fn install(app_dir: &Path, data_dir: &Path, manifest: &str) -> Result<(), St
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+        .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
         .spawn()
         .map(|_| ())
         .map_err(|error| format!("UPDATE_START_FAILED: {error}"))

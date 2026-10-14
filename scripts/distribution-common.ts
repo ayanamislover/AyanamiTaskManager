@@ -5,6 +5,8 @@
  * 3.0 根 N。便携那一半把 L（ATM_DATA_DIR）和 N（ATM3_DATA_DIR）都指到 output/ 下；安装那一半只在
  * 干净机器上跑，用产品默认的根（那就是用户拿到的样子）。
  */
+// 先于一切：这里拉起的宿主窗口不抢焦点、压在最底层（scripts/test-windows.ts）。
+import "./test-windows.js";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { readFile, writeFile } from "node:fs/promises";
@@ -101,6 +103,11 @@ public static class AtmWindows {
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  public static int Foreground(uint target) {
+    uint pid; GetWindowThreadProcessId(GetForegroundWindow(), out pid);
+    return pid == target ? 1 : 0;
+  }
   public static int Count(uint target) {
     int count = 0;
     EnumWindows((h, l) => {
@@ -124,6 +131,23 @@ function appWindowVisible(pid: number): boolean {
     ),
   );
   return Number(result.stdout.trim()) > 0;
+}
+
+/** 前台窗口（正在接收输入的那个）是不是 `pid` 的。 */
+function inForeground(pid: number): boolean {
+  const result = withPowerShellScratch((env) =>
+    spawnSync(
+      "powershell.exe",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `${WINDOW_PROBE}[AtmWindows]::Foreground(${pid})`,
+      ],
+      { encoding: "utf8", windowsHide: true, env },
+    ),
+  );
+  return result.stdout.trim() === "1";
 }
 
 /** 宿主这次运行用的根。`l` 为 null：用产品默认的根（只在干净机器上的安装那一半）。 */
@@ -189,6 +213,12 @@ export async function productionChecks(
     20_000,
   );
   check(`${label}：SHOW 后宿主窗口可见`, shown, String(hostRecord.pid));
+  // 测试拉起的宿主带 ATM_BACKGROUND_WINDOW=1（scripts/test-windows.ts）：窗口在，但不抢正在用电脑的人的焦点。
+  check(
+    `${label}：测试里 SHOW 不把窗口带到前台`,
+    !inForeground(hostRecord.pid),
+    String(hostRecord.pid),
+  );
   const webviewProfile = join(roots.n, "webview", "EBWebView");
   check(
     `${label}：WebView 在 3.0 根下建起来`,

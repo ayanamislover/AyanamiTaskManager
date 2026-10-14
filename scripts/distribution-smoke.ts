@@ -11,6 +11,8 @@
  *              没有 ATM_DISTRIBUTION_CLEAN_MACHINE=1 的声明就不跑，报告记 installed: "skipped"，
  *              不写 installed 报告——INSTALLED 层随之缺席。CI 的发布验证每次都是新机器，在那里声明。
  */
+// 先于一切：这里拉起的宿主窗口不抢焦点、压在最底层（scripts/test-windows.ts）。
+import "./test-windows.js";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";

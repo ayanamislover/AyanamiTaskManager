@@ -12,6 +12,8 @@
  *
  *   ATM_SMOKE_HOST_EXE=<smoke 宿主> pnpm exec tsx scripts/conversion-watchdog-smoke.ts
  */
+// 先于一切：这里拉起的宿主窗口不抢焦点、压在最底层（scripts/test-windows.ts）。
+import "./test-windows.js";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";

@@ -35,6 +35,15 @@ fn console_stdio() -> Option<(Stdio, Stdio, Stdio)> {
     Some((Stdio::from(input), Stdio::from(output), Stdio::from(error)))
 }
 
+/// Creation flags of the entry. Not attached to the caller's terminal (stdio are pipes, as for an
+/// Agent or a script, or there is no terminal): the release host is a GUI program without a console,
+/// so the console entry it starts would open a visible window of its own. Give it a console without
+/// one (W8k). Attached: it shares the caller's terminal, as before.
+fn entry_flags(attached: bool) -> u32 {
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    if attached { 0 } else { CREATE_NO_WINDOW }
+}
+
 fn run_entry(entry: &Entry, layout: &Layout, extra: &[String], console: bool) -> i32 {
     let mut command = Command::new(&entry.exe);
     command.args(&entry.args).args(extra);
@@ -43,8 +52,17 @@ fn run_entry(entry: &Entry, layout: &Layout, extra: &[String], console: bool) ->
         command.env(key, value);
     }
     command.env("ATM_DATA_DIR", &layout.data_dir);
-    if console && let Some((input, output, error)) = console_stdio() {
-        command.stdin(input).stdout(output).stderr(error);
+    let attached = console
+        && match console_stdio() {
+            Some((input, output, error)) => {
+                command.stdin(input).stdout(output).stderr(error);
+                true
+            }
+            None => false,
+        };
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(entry_flags(attached));
     }
     match command.status() {
         Ok(status) => status.code().unwrap_or(1),
@@ -68,5 +86,17 @@ pub fn run(layout: &Layout, mode: &Headless) -> i32 {
             ));
             run_entry(&entry, layout, args, false)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::entry_flags;
+
+    /// An entry not attached to a terminal gets a console without a window; one attached shares it.
+    #[test]
+    fn an_entry_without_a_terminal_gets_a_console_without_a_window() {
+        assert_eq!(entry_flags(false), 0x0800_0000);
+        assert_eq!(entry_flags(true), 0);
     }
 }

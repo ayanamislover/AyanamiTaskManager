@@ -135,6 +135,7 @@ fn session(args: &[String]) {
         "pid": std::process::id(),
         "grandchild": grandchild,
         "console": has_console(),
+        "consoleWindowVisible": console_window_visible(),
         "showWindow": show_window(),
     });
     let _ = std::fs::write(
@@ -188,7 +189,7 @@ fn session(args: &[String]) {
     }
 }
 
-/// 有没有挂着控制台：`DETACHED_PROCESS` 起的会话没有；继承了宿主的（哪怕是没有窗口的）或新开了一个的都有。
+/// 有没有挂着控制台：`DETACHED_PROCESS` 起的没有；`CREATE_NO_WINDOW` 起的、继承了宿主的（哪怕是没有窗口的）或新开了一个的都有。
 /// 不用 `GetConsoleWindow`：宿主自己是无窗口控制台时它也是空。
 #[cfg(windows)]
 fn has_console() -> bool {
@@ -198,6 +199,22 @@ fn has_console() -> bool {
 
 #[cfg(not(windows))]
 fn has_console() -> bool {
+    false
+}
+
+/// 挂着的控制台有没有一个看得见的窗口（`CREATE_NO_WINDOW` 的控制台没有窗口）。
+#[cfg(windows)]
+fn console_window_visible() -> bool {
+    // SAFETY: 只查询；没有控制台窗口时返回空句柄。
+    unsafe {
+        let window = windows_sys::Win32::System::Console::GetConsoleWindow();
+        !window.is_null()
+            && windows_sys::Win32::UI::WindowsAndMessaging::IsWindowVisible(window) != 0
+    }
+}
+
+#[cfg(not(windows))]
+fn console_window_visible() -> bool {
     false
 }
 

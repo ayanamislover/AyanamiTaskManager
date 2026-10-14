@@ -1,3 +1,5 @@
+// 先于一切：这里拉起的宿主窗口不抢焦点、压在最底层（scripts/test-windows.ts）。
+import "./test-windows.js";
 import { agentFetch } from "./agent-fetch.js";
 import { binariesOf } from "./candidate-binaries.js";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
@@ -257,7 +259,12 @@ type UserPath = {
  * 后台启动的宿主没有窗口：先像用户再点一次入口那样发 SHOW（第二实例），窗口和 WebView 才建。
  */
 async function connectUserRenderer(): Promise<UserPath> {
-  const show = spawn(executable, [], { cwd: root, env: hostEnvironment, stdio: "ignore" });
+  const show = spawn(executable, [], {
+    cwd: root,
+    env: hostEnvironment,
+    stdio: "ignore",
+    windowsHide: true,
+  });
   await waitForExit(show, 10_000);
   const port = await waitUntil(async () => {
     if (!existsSync(devToolsPortFile)) return null;

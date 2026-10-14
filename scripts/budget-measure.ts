@@ -29,6 +29,8 @@
  *   - 只结束自己拉起的宿主：优先经它的 second-instance 管道发 QUIT，不行再按 PID 结束进程树。
  *   - daemon.json 里的 Agent 令牌只在本进程内存里用来发读请求，不写日志、不进报告。
  */
+// 先于一切：这里拉起的宿主窗口不抢焦点、压在最底层（scripts/test-windows.ts）。
+import "./test-windows.js";
 import { agentFetch } from "./agent-fetch.js";
 import { binariesOf } from "./candidate-binaries.js";
 import { budgetVerdicts, stats } from "./budget-verdicts.js";

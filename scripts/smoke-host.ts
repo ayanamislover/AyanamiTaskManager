@@ -11,6 +11,8 @@
  *   - 数据根只能在仓库 output/ 下，绝不碰真实安装与真实数据根。
  *   - 结束进程只按自己拉起的宿主 PID 结束进程树，从不按镜像名。
  */
+// 先于一切：这里拉起的宿主窗口不抢焦点、压在最底层（scripts/test-windows.ts）。
+import "./test-windows.js";
 import { agentFetch } from "./agent-fetch.js";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
@@ -343,7 +345,12 @@ async function waitForExit(child: ChildProcess, timeoutMs: number): Promise<bool
 
 /** 用户再点一次入口：第二实例把 SHOW 交给正在运行的宿主后退出。 */
 export async function requestShow(host: SmokeHost): Promise<void> {
-  const show = spawn(host.executable, [], { cwd: repoRoot, env: host.env, stdio: "ignore" });
+  const show = spawn(host.executable, [], {
+    cwd: repoRoot,
+    env: host.env,
+    stdio: "ignore",
+    windowsHide: true,
+  });
   if (!(await waitForExit(show, 10_000))) {
     show.kill();
     throw new Error("SHOW 请求没有在 10 秒内送达");

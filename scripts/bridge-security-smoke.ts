@@ -30,6 +30,8 @@
  *
  *   pnpm exec tsx scripts/bridge-security-smoke.ts
  */
+// 先于一切：这里拉起的宿主窗口不抢焦点、压在最底层（scripts/test-windows.ts）。
+import "./test-windows.js";
 import { spawnSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { get as httpGet, request as httpRequest } from "node:http";

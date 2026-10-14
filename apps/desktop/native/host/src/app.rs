@@ -47,6 +47,15 @@ const LEGACY_RECHECK: Duration = Duration::from_secs(5);
 /// a damaged database stays damaged, so a few seconds are all this costs.
 const DAMAGED_RETRY: [Duration; 2] = [Duration::from_secs(2), Duration::from_secs(5)];
 
+/// `ATM_BACKGROUND_WINDOW=1`: the window of a test run stays out of the user's way. It is shown
+/// without being activated and put behind every other window, and nothing takes the focus for
+/// it. The test harness sets it for every host it starts (smoke, drills, budget, release chain);
+/// it changes only where the window sits, not whether or when it is shown, so "window visible"
+/// is measured the same way.
+pub(crate) fn background_window() -> bool {
+    std::env::var_os("ATM_BACKGROUND_WINDOW").is_some_and(|v| v == "1")
+}
+
 /// The recovery command the Damaged page shows, for PowerShell (the Windows terminal's default shell): the call
 /// operator and a single-quoted path, so spaces, `$` and backticks in the path are literal. A bare `"…\atm.exe" recover`
 /// is a parse error there (W8 gate peer r1 P2-01).
@@ -1697,7 +1706,11 @@ impl App {
         self.show_pending = false;
         window.set_visible(true);
         window.set_minimized(false);
-        window.set_focus();
+        if background_window() {
+            win::send_to_back(window.hwnd());
+        } else {
+            window.set_focus();
+        }
         if let Some(route) = self.route_pending.take() {
             self.emit("navigate", json!(route));
         }
@@ -1731,6 +1744,8 @@ impl App {
             .with_decorations(false)
             .with_undecorated_shadow(true)
             .with_visible(false)
+            // First shown with SW_SHOWNOACTIVATE instead of SW_SHOW (tao's MARKER_DONT_FOCUS).
+            .with_focused(!background_window())
             .with_inner_size(LogicalSize::new(1440.0, 900.0))
             .with_min_inner_size(LogicalSize::new(1100.0, 680.0));
         if let Some((position, size)) = self.saved.bounds {

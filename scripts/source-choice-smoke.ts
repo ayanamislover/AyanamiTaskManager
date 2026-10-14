@@ -16,6 +16,8 @@
  *   pnpm exec tsx scripts/source-choice-smoke.ts          # 先构建 renderer 与 smoke 宿主（debug）
  *   ATM_SMOKE_HOST_EXE=<exe> pnpm exec tsx scripts/source-choice-smoke.ts
  */
+// 先于一切：这里拉起的宿主窗口不抢焦点、压在最底层（scripts/test-windows.ts）。
+import "./test-windows.js";
 import { spawnSync } from "node:child_process";
 import { cpSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";

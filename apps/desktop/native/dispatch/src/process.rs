@@ -1,7 +1,8 @@
 //! 会话进程（2.x `process.ts`、`process-identity.ts`、`launch.ts` 的 `spawnSession`），都直接调 Windows：
 //!
-//! - **拉起**：`CreateProcessW`，`DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP`、`SW_HIDE`（Node 的 `detached` +
-//!   `windowsHide`），能脱离宿主的作业就脱离，宿主退出后会话照常跑完。只继承三个句柄：stdin 管道的读端、
+//! - **拉起**：`CreateProcessW`，`CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP`、`SW_HIDE`：会话有自己的、没有窗口的
+//!   控制台，它再起的控制台程序（`claude.cmd` 经 cmd 起的 node、git 等）都继承这个控制台、不弹窗。不用
+//!   `DETACHED_PROCESS`：那样会话没有控制台，它的每个控制台子进程都会新开一个可见窗口（W8k）。能脱离宿主的作业就脱离，宿主退出后会话照常跑完。只继承三个句柄：stdin 管道的读端、
 //!   两份日志（`PROC_THREAD_ATTRIBUTE_HANDLE_LIST`），绝不把宿主别的管道带进一个常驻的子进程。
 //! - **出生标识**：`win32:<FILETIME>`，即 `GetProcessTimes` 的创建时刻原值（100 ns 整数）。与 2.x 用 PowerShell 打印的
 //!   `StartTime.ToFileTimeUtc()` 是同一个数，2.x 记下的标识照样能核对。
@@ -175,12 +176,12 @@ mod imp {
     use windows_sys::Win32::System::Pipes::CreatePipe;
     use windows_sys::Win32::System::Threading::{
         CREATE_BREAKAWAY_FROM_JOB, CREATE_NEW_PROCESS_GROUP, CREATE_NO_WINDOW,
-        CREATE_UNICODE_ENVIRONMENT, CreateEventW, CreateProcessW, DETACHED_PROCESS,
-        DeleteProcThreadAttributeList, EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess,
-        GetProcessTimes, INFINITE, InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST,
-        OpenProcess, PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION,
-        PROCESS_QUERY_LIMITED_INFORMATION, STARTF_USESHOWWINDOW, STARTF_USESTDHANDLES,
-        STARTUPINFOEXW, SetEvent, UpdateProcThreadAttribute, WaitForMultipleObjects,
+        CREATE_UNICODE_ENVIRONMENT, CreateEventW, CreateProcessW, DeleteProcThreadAttributeList,
+        EXTENDED_STARTUPINFO_PRESENT, GetExitCodeProcess, GetProcessTimes, INFINITE,
+        InitializeProcThreadAttributeList, LPPROC_THREAD_ATTRIBUTE_LIST, OpenProcess,
+        PROC_THREAD_ATTRIBUTE_HANDLE_LIST, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
+        STARTF_USESHOWWINDOW, STARTF_USESTDHANDLES, STARTUPINFOEXW, SetEvent,
+        UpdateProcThreadAttribute, WaitForMultipleObjects,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::SW_HIDE;
 
@@ -500,7 +501,7 @@ mod imp {
             let mut env = env_block(request.env);
             let base = EXTENDED_STARTUPINFO_PRESENT
                 | CREATE_UNICODE_ENVIRONMENT
-                | DETACHED_PROCESS
+                | CREATE_NO_WINDOW
                 | CREATE_NEW_PROCESS_GROUP;
             let mut create = |flags: u32| -> Result<PROCESS_INFORMATION, std::io::Error> {
                 let mut line: Vec<u16> = std::ffi::OsStr::new(&request.command.command_line())

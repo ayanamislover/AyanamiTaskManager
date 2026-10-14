@@ -158,8 +158,10 @@ fn a_successful_session_gets_its_arguments_prompt_cwd_logs_and_a_clean_environme
     assert!(!names.contains(&"CLAUDE_CODE_ENTRYPOINT".to_owned()));
     assert_eq!(dump["env"]["ATM_DISPATCH_RUN"], run.as_str());
     assert_eq!(dump["env"]["KEEP_DISPATCH_VALUE"], "kept");
-    // detached + windowsHide：没有继承宿主（用例进程）的控制台，窗口要求隐藏（SW_HIDE = 0）。
-    assert_eq!(dump["console"], false);
+    // CREATE_NO_WINDOW：会话有控制台、但控制台没有窗口，它再起的控制台程序继承这个控制台、不弹窗（W8k；
+    // DETACHED_PROCESS 时会话没有控制台，claude.cmd 起的 node 会自己开一个可见窗口）。窗口要求隐藏（SW_HIDE = 0）。
+    assert_eq!(dump["console"], true);
+    assert_eq!(dump["consoleWindowVisible"], false);
     assert_eq!(dump["showWindow"], 0);
     // 日志落盘；摘要从 result 行来，按 500 字截断。
     let log = std::fs::read_to_string(w.logs.join(format!("{run}.jsonl"))).unwrap();

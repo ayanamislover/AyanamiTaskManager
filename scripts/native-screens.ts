@@ -12,6 +12,8 @@
  * 令牌只在内存里：v2 每次随机生成，v3 从沙箱的 daemon.json 读，不打印、不写进报告。
  * v3 给了 ATM_SMOKE_HOST_EXE 就用它（跳过构建）。
  */
+// 先于一切：这里拉起的宿主窗口不抢焦点、压在最底层（scripts/test-windows.ts）。
+import "./test-windows.js";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";

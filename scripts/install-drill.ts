@@ -19,6 +19,8 @@
  * 它不在仓库里：`pnpm exec tsx scripts/build-drill-package-20.ts` 从 2.0.0 的提交打一份（CI 在
  * release 之前跑它）。生产 2.0 的 setup 没有沙箱，不能用。
  */
+// 先于一切：这里拉起的宿主窗口不抢焦点、压在最底层（scripts/test-windows.ts）。
+import "./test-windows.js";
 import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import {
   closeSync,

@@ -154,6 +154,8 @@ impl Sandbox {
             .arg("--background")
             .env("LOCALAPPDATA", self.local())
             .env("ATM_DEV_REPOSITORY_ROOT", repo)
+            // 要是开了窗口，也不抢正在用电脑的人的焦点（host/src/app.rs background_window）。
+            .env("ATM_BACKGROUND_WINDOW", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
