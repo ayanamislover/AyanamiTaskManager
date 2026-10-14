@@ -165,17 +165,19 @@ fn doctor_offline_reads_the_wal_of_a_killed_service_without_touching_it() {
     std::fs::rename(side.join("db"), &db).unwrap();
     std::fs::rename(side.join("wal"), data.join("atm.sqlite-wal")).unwrap();
     let _ = std::fs::remove_dir(&side);
-    let before = tree(&root);
+    // 删掉 `-shm` 之后，别的程序偶尔在库旁短暂建一个锁着的 `ATM.SQLITE-SHM.tmp`：等它走了再拍「之前」。
+    let before = settled_tree(&root);
 
     let run = atm_in(&root, &["--json", "doctor", "--offline"]);
     assert_eq!(run.code, 0, "{}{}", run.stdout, run.stderr);
     let v = run.json();
     assert_eq!(v["database"]["generation"], "G-IN-THE-WAL", "{v}");
     assert_eq!(v["database"]["interrupted_write"], false, "{v}");
-    assert_eq!(
-        tree(&root),
-        before,
-        "doctor --offline wrote beside the database"
+    let after = tree(&root);
+    assert!(
+        after == before,
+        "doctor --offline wrote beside the database: {}",
+        tree_diff(&before, &after)
     );
     assert!(!data.join("atm.sqlite-shm").exists());
 }

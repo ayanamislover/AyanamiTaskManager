@@ -230,6 +230,40 @@ pub fn tree(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
     out
 }
 
+/// 等 [`tree`] 稳定下来再返回：连续两次一样、没有读不了的文件（最多 5 s，之后照样返回最后一次）。
+/// 只用在没有服务锁着文件的根上，拍「之前」的快照。
+pub fn settled_tree(root: &Path) -> std::collections::BTreeMap<String, Vec<u8>> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let mut last = tree(root);
+    loop {
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let now = tree(root);
+        let locked = now.values().any(|v| v.as_slice() == b"<locked>");
+        if (now == last && !locked) || std::time::Instant::now() >= deadline {
+            return now;
+        }
+        last = now;
+    }
+}
+
+/// 两棵 [`tree`] 不同的地方：多出、少了、内容变了的文件，各自的字节数或 `<locked>`。
+pub fn tree_diff(
+    before: &std::collections::BTreeMap<String, Vec<u8>>,
+    after: &std::collections::BTreeMap<String, Vec<u8>>,
+) -> String {
+    let show = |v: Option<&Vec<u8>>| match v {
+        None => "absent".to_owned(),
+        Some(b) if b.as_slice() == b"<locked>" => "<locked>".to_owned(),
+        Some(b) => format!("{} bytes", b.len()),
+    };
+    let keys: std::collections::BTreeSet<_> = before.keys().chain(after.keys()).collect();
+    keys.into_iter()
+        .filter(|k| before.get(*k) != after.get(*k))
+        .map(|k| format!("{k}: {} -> {}", show(before.get(k)), show(after.get(k))))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
 /// 与宿主发布的同一个形状（`runtime\daemon.json`）。
 pub fn write_descriptor(root: &Path, port: u16, token: &str) {
     let runtime = root.join("runtime");
