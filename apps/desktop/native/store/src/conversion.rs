@@ -1787,6 +1787,97 @@ fn clear_startup_state(layout: &Layout) -> std::io::Result<()> {
     }
 }
 
+/// `N\runtime\damaged.json`（W8h）：宿主最终判定已发布的这一代库读不出（[`Startup::Damaged`]，等用户
+/// `atm recover --offline`）时写，不含凭据。`atm-mcp.exe` 桥和 CLI 连不上服务时读它，向 Agent 报
+/// `DATABASE_DAMAGED`（要用户处理，等多久都不会好）。与 `startup-state.json` 分开：那个文件里不认识的状态
+/// 一律当作数据源冲突。下一次启动这一代能服务（或进入冲突）、或 recover 恢复完，都会删掉它。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DamagedState {
+    pub since: String,
+    pub generation: String,
+    pub reason: String,
+}
+
+pub const DAMAGED_STATE: &str = "damaged.json";
+
+impl DamagedState {
+    pub fn to_json(&self) -> String {
+        jsjson::jcs(&Value::Object(vec![
+            ("state".into(), s("DATABASE_DAMAGED")),
+            ("since".into(), s(&self.since)),
+            ("generation".into(), s(&self.generation)),
+            ("reason".into(), s(&self.reason)),
+        ]))
+    }
+
+    pub fn parse(text_: &str) -> Option<DamagedState> {
+        let v = jsjson::parse_value(text_).ok().flatten()?;
+        if text(&v, "state")? != "DATABASE_DAMAGED" {
+            return None;
+        }
+        Some(DamagedState {
+            since: text(&v, "since")?,
+            generation: text(&v, "generation")?,
+            reason: text(&v, "reason")?,
+        })
+    }
+}
+
+fn damaged_state_path(layout: &Layout) -> PathBuf {
+    layout.runtime().join(DAMAGED_STATE)
+}
+
+/// 读损坏状态。文件在却读不出、或内容坏了，仍当作损坏（与启动状态同一个取向：坏文件不能变成「再等等」），原因写明。
+pub fn read_damaged(layout: &Layout) -> Option<DamagedState> {
+    let broken = |reason: String| DamagedState {
+        since: String::new(),
+        generation: String::new(),
+        reason,
+    };
+    match std::fs::read(damaged_state_path(layout)) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => Some(broken(format!("the damaged state cannot be read: {e}"))),
+        Ok(bytes) => Some(
+            std::str::from_utf8(&bytes)
+                .ok()
+                .and_then(DamagedState::parse)
+                .unwrap_or_else(|| broken("the damaged state is corrupt".into())),
+        ),
+    }
+}
+
+/// 宿主最终判定这一代读不出（重试也没好）时调用。同一 generation 已经记着就保留原来的 `since`。
+pub fn enter_damaged(
+    layout: &Layout,
+    generation: &str,
+    reason: &str,
+    at: &str,
+) -> std::io::Result<DamagedState> {
+    let since = match read_damaged(layout) {
+        Some(prev) if prev.generation == generation && !prev.since.is_empty() => prev.since,
+        _ => at.to_string(),
+    };
+    let state = DamagedState {
+        since,
+        generation: generation.to_string(),
+        reason: reason.to_string(),
+    };
+    std::fs::create_dir_all(layout.runtime())
+        .map_err(|e| located(e, "create", &layout.runtime().display()))?;
+    write_atomic(&damaged_state_path(layout), state.to_json().as_bytes())?;
+    Ok(state)
+}
+
+/// 这一代又能读了（启动走到服务或冲突），或 recover 恢复完：删掉损坏状态。本来就没有不算错。
+pub fn clear_damaged(layout: &Layout) -> std::io::Result<()> {
+    match std::fs::remove_file(damaged_state_path(layout)) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(located(e, "remove", &damaged_state_path(layout).display()))
+        }
+        _ => Ok(()),
+    }
+}
+
 /// 进入数据源冲突（07 §7）：写启动状态，之后 [`decide`] 对这个 generation 返回 [`Startup::SourceConflict`]，
 /// 宿主不起 HTTP、不写 daemon.json、不起调度器 / 同步 / 派单。已经在冲突中就保留原来的 `since`。
 /// 这里不写任何业务数据；后台比较发现冲突之前写进 3.0 的数据留在 3.0 这一边。

@@ -57,6 +57,14 @@ pub fn doctor(root: &Path) -> Report {
         json!({ "state": s.state, "since": s.since, "reason": s.reason })
     });
 
+    let damaged = discover::damaged(root).map(|d| {
+        problems.push(format!(
+            "数据库读不出，等用户从备份恢复（{}）：退出 ATM 后运行 atm recover --offline",
+            d.reason
+        ));
+        json!({ "since": d.since, "generation": d.generation, "reason": d.reason })
+    });
+
     let service = match discover::read_descriptor(root) {
         Ok(None) => json!({ "descriptor": "MISSING" }),
         Ok(Some(d)) => {
@@ -72,12 +80,14 @@ pub fn doctor(root: &Path) -> Report {
     let database = database(&layout.database(), &mut problems);
 
     let backups_dir = root.join("backups");
+    // 每份整库备份是 `backups\<id>\` 一个目录；`.` 开头的是正在建或待清理的（store::backup）。
     let backups = std::fs::read_dir(&backups_dir).map_or(json!({ "exists": false }), |entries| {
-        let files = entries
+        let count = entries
             .filter_map(Result::ok)
-            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
+            .filter(|e| !e.file_name().to_string_lossy().starts_with('.'))
             .count();
-        json!({ "exists": true, "files": files })
+        json!({ "exists": true, "count": count })
     });
 
     let healthy = problems.is_empty();
@@ -90,6 +100,7 @@ pub fn doctor(root: &Path) -> Report {
             "problems": problems.clone(),
             "conversion": conversion,
             "startup_state": startup,
+            "damaged": damaged,
             "service": service,
             "database": database,
             "backups": backups,

@@ -1013,6 +1013,53 @@ fn a_source_conflict_is_reported_at_once() {
     );
 }
 
+/// W8h：库读不出（`runtime/damaged.json`）时桥立刻报，不等满预算。读类请求是 JSON-RPC 错误，消息以
+/// DATABASE_DAMAGED 开头；写类是专门的信封：code DATABASE_DAMAGED、不可重试、`fix` 是转告用户，没有发出。
+#[test]
+fn a_damaged_database_is_reported_at_once() {
+    let r = rig("bridge-damaged");
+    std::fs::remove_file(r.root.join("runtime").join("daemon.json")).unwrap();
+    std::fs::write(
+        r.root.join("runtime").join("damaged.json"),
+        r#"{"generation":"G1","reason":"file is not a database","since":"2026-10-14T00:00:00.000Z","state":"DATABASE_DAMAGED"}"#,
+    )
+    .unwrap();
+    let mut b = r.bridge();
+    let started = Instant::now();
+    let reply = b.initialize("claude-code");
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let message = reply["error"]["message"].as_str().unwrap();
+    assert!(message.starts_with("DATABASE_DAMAGED"), "{message}");
+    assert!(message.contains("file is not a database"), "{message}");
+    let started = Instant::now();
+    let e = b.call(
+        "atm_record",
+        json!({"kind": "FACT", "title": "t", "summary": "s"}),
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+    let env = err(&e);
+    assert_eq!(env["code"], "DATABASE_DAMAGED", "{e}");
+    assert_eq!(env["retryable"], false, "{e}");
+    assert_eq!(env["committed"], false, "{e}");
+    assert_eq!(env["fix"]["kind"], "ask_user", "{e}");
+    assert!(
+        env["fix"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("file is not a database") && m.contains("恢复")),
+        "{e}"
+    );
+    assert_eq!(env["details"]["sent"], false, "{e}");
+    assert!(r.proxy.seen().is_empty());
+
+    // 文件坏了也不是「再等等」。
+    std::fs::write(r.root.join("runtime").join("damaged.json"), b"{not json").unwrap();
+    let e = b.call(
+        "atm_record",
+        json!({"kind": "FACT", "title": "t2", "summary": "s"}),
+    );
+    assert_eq!(err(&e)["code"], "DATABASE_DAMAGED", "{e}");
+}
+
 /// 没有 --profile 的旧配置：退出码非零并提示重新安装，不转发到任何入口。
 #[test]
 fn a_missing_profile_is_refused() {

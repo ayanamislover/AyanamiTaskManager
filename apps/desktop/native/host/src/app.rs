@@ -9,7 +9,8 @@ use atm_runtime::update::{self as updates, Coordinator, Schedule};
 use atm_runtime::{
     Background, BootError, Conflicted, Handoff, Observation, Serving, SourceChoice, Started,
 };
-use atm_store::conversion::{StartupState, conflict_cause};
+use atm_store::conversion::{StartupState, conflict_cause, enter_damaged};
+use atm_store::recover::Candidate;
 use atm_ui_bridge::{Reply, Ui};
 use serde_json::{Value, json};
 use tao::dpi::{LogicalSize, PhysicalPosition, PhysicalSize};
@@ -54,6 +55,28 @@ fn recover_command(exe: &std::path::Path) -> String {
         "& '{}' recover --offline",
         exe.display().to_string().replace('\'', "''")
     )
+}
+
+/// The Damaged page's `backups` and `backupsError` (W8h): both null while the list is still being checked.
+fn damaged_backups(listed: Option<&Result<Vec<Candidate>, String>>) -> (Value, Value) {
+    match listed {
+        None => (Value::Null, Value::Null),
+        Some(Err(e)) => (Value::Null, json!(e)),
+        Some(Ok(list)) => (
+            list.iter()
+                .map(|c| {
+                    json!({
+                        "id": c.id,
+                        "kind": c.kind,
+                        "createdAt": c.created_at,
+                        "status": if c.problem.is_none() { "USABLE" } else { "UNUSABLE" },
+                        "problem": c.problem,
+                    })
+                })
+                .collect(),
+            Value::Null,
+        ),
+    }
 }
 
 /// The wait before the next look at an unreadable database (counting it in `attempts`), or `None` once
@@ -106,6 +129,8 @@ pub enum UserEvent {
         js_id: u64,
         result: Result<Value, crate::agents::Failure>,
     },
+    /// 恢复页要显示的整库备份（W8h）：工作线程核对完 `N\backups\` 下的每一份。
+    DamagedBackups(Result<Vec<Candidate>, String>),
     /// 一次界面请求在工作线程上分发完了。投递前再核对 `(generation, epoch)`（03 U4）。
     UiReply {
         generation: u64,
@@ -166,6 +191,8 @@ pub struct App {
     boot_failures: Vec<Instant>,
     /// Boots that found the published database unreadable since the last serving one ([`damaged_retry`]).
     damaged_attempts: usize,
+    /// The backups the Damaged page lists (W8h): `None` while the worker is still checking them.
+    damaged_backups: Option<Result<Vec<Candidate>, String>>,
     /// The last reason the 2.x service was waited for, logged once per change.
     legacy_wait: Option<String>,
     queued: Vec<QueuedCall>,
@@ -365,6 +392,42 @@ mod phase_tests {
         assert_eq!(damaged_retry(&mut attempts), None);
         assert_eq!(attempts, 2);
     }
+
+    /// 恢复页的备份列表（W8h）：还在核对时两项都是 null；列不出时给原因；列出来时每份带能不能用和问题。
+    #[test]
+    fn the_damaged_page_lists_each_backup_with_whether_it_can_be_used() {
+        use super::{Candidate, damaged_backups};
+        use serde_json::{Value, json};
+        assert_eq!(damaged_backups(None), (Value::Null, Value::Null));
+        assert_eq!(
+            damaged_backups(Some(&Err("io: denied".into()))),
+            (Value::Null, json!("io: denied"))
+        );
+        let listed = Ok(vec![
+            Candidate {
+                id: "B2".into(),
+                kind: "DAILY".into(),
+                created_at: "2026-10-13T00:00:00.000Z".into(),
+                problem: None,
+            },
+            Candidate {
+                id: "B1".into(),
+                kind: "MANUAL".into(),
+                created_at: "2026-10-12T00:00:00.000Z".into(),
+                problem: Some("hash mismatch".into()),
+            },
+        ]);
+        assert_eq!(
+            damaged_backups(Some(&listed)),
+            (
+                json!([
+                    {"id": "B2", "kind": "DAILY", "createdAt": "2026-10-13T00:00:00.000Z", "status": "USABLE", "problem": null},
+                    {"id": "B1", "kind": "MANUAL", "createdAt": "2026-10-12T00:00:00.000Z", "status": "UNUSABLE", "problem": "hash mismatch"},
+                ]),
+                Value::Null
+            )
+        );
+    }
 }
 
 #[cfg(test)]
@@ -488,6 +551,7 @@ pub fn run(
         boot: None,
         boot_failures: Vec::new(),
         damaged_attempts: 0,
+        damaged_backups: None,
         legacy_wait: None,
         queued: Vec::new(),
         ui: None,
@@ -714,8 +778,19 @@ impl App {
                     Life::BootstrapFailed,
                     &life::error_detail("DatabaseDamaged", &reason),
                 );
+                // The bridge and the CLI tell the Agent DATABASE_DAMAGED instead of waiting it out (W8h).
+                let at = atm_install_state::startup::iso_utc(atm_install_state::handoff::now_ms());
+                if let Err(e) = enter_damaged(
+                    &atm_store::conversion::Layout::new(&self.layout.v3_root),
+                    &generation,
+                    &reason,
+                    &at,
+                ) {
+                    crate::log(&self.layout.v3_root, &format!("damaged state: {e}"));
+                }
                 self.choosing = false;
                 self.service = Service::Damaged { generation, reason };
+                self.list_damaged_backups();
                 self.answer_queued();
                 if !self.snapshot.damaged {
                     self.snapshot.damaged = true;
@@ -833,6 +908,12 @@ impl App {
                             self.deliver(&bridge::error_with(js_id, &code, &message, details))
                         }
                     }
+                }
+            }
+            UserEvent::DamagedBackups(listed) => {
+                if matches!(self.service, Service::Damaged { .. }) {
+                    self.damaged_backups = Some(listed);
+                    self.emit_data_source();
                 }
             }
             UserEvent::ModeSet(Ok(())) => {}
@@ -1466,12 +1547,15 @@ impl App {
         if let Service::Damaged { generation, reason } = &self.service {
             // The exact atm.exe of this version, so the command can be copied and run as is
             // (atm.exe is not on PATH). recover asks for the backup id on stdin.
+            let (backups, backups_error) = damaged_backups(self.damaged_backups.as_ref());
             return json!({
                 "state": "DAMAGED",
                 "generation": generation,
                 "reason": reason,
                 "command": recover_command(&self.layout.cli.exe),
                 "dataDir": self.layout.v3_root.display().to_string(),
+                "backups": backups,
+                "backupsError": backups_error,
             });
         }
         let state = match &self.service {
@@ -1557,6 +1641,18 @@ impl App {
         if entered {
             self.request_show_later();
         }
+    }
+
+    /// Checks the whole-store backups on a worker (each one is hashed, which can take a while) and hands
+    /// the list to the Damaged page. Read only: recover itself still asks for the id on the command line.
+    fn list_damaged_backups(&mut self) {
+        self.damaged_backups = None;
+        let proxy = self.proxy.clone();
+        let layout = atm_store::conversion::Layout::new(&self.layout.v3_root);
+        std::thread::spawn(move || {
+            let listed = atm_store::recover::candidates(&layout).map_err(|e| e.to_string());
+            let _ = proxy.send_event(UserEvent::DamagedBackups(listed));
+        });
     }
 
     fn emit_data_source(&self) {

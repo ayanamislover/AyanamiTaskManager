@@ -1019,7 +1019,11 @@ fn unavailable(out: Out, why: &discover::Unavailable, diagnose: bool) -> i32 {
         .as_deref()
         .and_then(discover::startup_state)
         .map(|s| json!({"state": s.state, "since": s.since, "reason": s.reason}));
-    let mut error = json!({"code": why.code(), "message": why.message(), "startup_state": startup});
+    let damaged = root
+        .as_deref()
+        .and_then(discover::damaged)
+        .map(|d| json!({"since": d.since, "generation": d.generation, "reason": d.reason}));
+    let mut error = json!({"code": why.code(), "message": why.message(), "startup_state": startup, "damaged": damaged});
     if diagnose && let Some(root) = &root {
         error["local"] = offline::doctor(root).value;
     }

@@ -110,6 +110,9 @@ fn runtime(
                 if let Some(reason) = descriptor::source_conflict() {
                     return Err(format!("ATM_SOURCE_CONFLICT: {reason}"));
                 }
+                if let Some(reason) = descriptor::damaged() {
+                    return Err(format!("{DAMAGED}{reason}"));
+                }
                 if Instant::now() >= deadline {
                     return Err("ATM_RUNTIME_UNAVAILABLE".to_owned());
                 }
@@ -177,9 +180,8 @@ pub fn call(link: &Link<'_>, message: &Value) -> String {
             // A3: nothing was sent; the original call, unchanged, is a fresh signing.
             return tool_error(
                 &id,
-                &envelope(
-                    "SERVICE_UNAVAILABLE",
-                    &unavailable_message(&reason),
+                &unavailable(
+                    &reason,
                     if explicit_op {
                         json!("unknown")
                     } else {
@@ -187,7 +189,6 @@ pub fn call(link: &Link<'_>, message: &Value) -> String {
                     },
                     json!({"kind": "call", "call": {"name": tool, "arguments": original},
                                    "why": "这次调用没有发出：服务可用之后原样重发"}),
-                    json!({"sent": false, "reason": reason}),
                 ),
             );
         };
@@ -294,16 +295,14 @@ pub fn call(link: &Link<'_>, message: &Value) -> String {
     }
     tool_error(
         &id,
-        &envelope(
-            "SERVICE_UNAVAILABLE",
-            &unavailable_message(&reason),
+        &unavailable(
+            &reason,
             if explicit_op {
                 json!("unknown")
             } else {
                 json!(false)
             },
             json!({"kind": "call", "call": call, "why": "这次写入没有送达：服务可用之后原样重发"}),
-            json!({"sent": false, "reason": reason}),
         ),
     )
 }
@@ -312,6 +311,36 @@ pub fn call(link: &Link<'_>, message: &Value) -> String {
 /// the outcome unknown (A3 RESULT_UNKNOWN); a refusal or an unsent request is provably not.
 fn may_have_arrived(e: &http::Error) -> bool {
     matches!(e, http::Error::Request | http::Error::Body)
+}
+
+/// The reason prefix [`runtime`] gives when `runtime/damaged.json` is there (W8h).
+const DAMAGED: &str = "ATM_DATABASE_DAMAGED: ";
+
+/// The envelope of a call that was not delivered. A damaged database is its own code with an
+/// `ask_user` fix: resending cannot help until the user restores a backup (W8h).
+fn unavailable(reason: &str, committed: Value, resend: Value) -> Value {
+    let details = json!({"sent": false, "reason": reason});
+    if let Some(r) = reason.strip_prefix(DAMAGED) {
+        let message = format!(
+            "ATM 的数据库读不出（{r}），需要用户先从备份恢复：请用户打开 ATM 窗口，按页面上的步骤退出 ATM 并运行恢复命令；恢复完成后原样重发"
+        );
+        let mut e = envelope(
+            "DATABASE_DAMAGED",
+            &message,
+            committed,
+            json!({"kind": "ask_user", "message": message}),
+            details,
+        );
+        e["retryable"] = json!(false);
+        return e;
+    }
+    envelope(
+        "SERVICE_UNAVAILABLE",
+        &unavailable_message(reason),
+        committed,
+        resend,
+        details,
+    )
 }
 
 fn unavailable_message(reason: &str) -> String {

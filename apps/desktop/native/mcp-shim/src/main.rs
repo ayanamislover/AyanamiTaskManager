@@ -245,6 +245,12 @@ fn wait_for_runtime(stale: Option<&Runtime>) -> Result<Runtime, String> {
                         "ATM_SOURCE_CONFLICT: ATM 需要用户在窗口里选择数据来源（{reason}）"
                     ));
                 }
+                // W8h: the host serves nothing until the user restores a backup.
+                if let Some(reason) = descriptor::damaged() {
+                    return Err(format!(
+                        "DATABASE_DAMAGED: ATM 的数据库读不出（{reason}），需要用户先从备份恢复：请用户打开 ATM 窗口按页面上的步骤处理"
+                    ));
+                }
                 if Instant::now() >= deadline {
                     return Err("ATM_RUNTIME_UNAVAILABLE".to_owned());
                 }

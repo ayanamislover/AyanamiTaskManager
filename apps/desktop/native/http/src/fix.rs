@@ -981,6 +981,7 @@ pub static GENERATORS: &[(ErrorCode, Gen)] = {
         // 忙与不可用
         (C::STORE_BUSY, g_wait),
         (C::SERVICE_UNAVAILABLE, g_wait),
+        (C::DATABASE_DAMAGED, g_ask_user),
         (C::INVALID_RESPONSE, g_wait),
         (C::KNOWLEDGE_UNAVAILABLE, g_wait),
         // 知识

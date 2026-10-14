@@ -162,6 +162,8 @@ catalog! {
     WORK_ITEM_TERMINAL => 409, false, Call;
     STORE_BUSY => 503, true, Wait;
     SERVICE_UNAVAILABLE => 503, true, Wait;
+    // W8h：已发布的库读不出，桥直接报（服务这时不在）；只有用户从备份恢复之后才能重发。
+    DATABASE_DAMAGED => 503, false, AskUser;
     KNOWLEDGE_SLUG_CONFLICT => 409, false, Call;
     OPERATION_UNDONE_BY_RESTORE => 409, false, Reread;
     SCOPE_RESTORED => 409, false, Reread;

@@ -10,7 +10,7 @@
 //! 令牌只用在请求头里，从不打印、不写日志。
 
 use crate::http;
-use atm_store::conversion::{Layout, StartupState, read_startup_state};
+use atm_store::conversion::{DamagedState, Layout, StartupState, read_damaged, read_startup_state};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -37,6 +37,8 @@ pub enum Unavailable {
     DescriptorInvalid,
     /// 宿主在等用户选择数据来源。
     SourceConflict(StartupState),
+    /// 已发布的库读不出（W8h）：要用户先从备份恢复，等多久都不会好。
+    Damaged(DamagedState),
     /// 没有在跑的服务（拉起过也没等到）。
     NotRunning { woke: bool },
 }
@@ -48,6 +50,7 @@ impl Unavailable {
             Unavailable::OverrideInvalid => "ATM_RUNTIME_ENDPOINT_INVALID",
             Unavailable::DescriptorInvalid => "ATM_RUNTIME_DESCRIPTOR_INVALID",
             Unavailable::SourceConflict(_) => "ATM_SOURCE_CONFLICT",
+            Unavailable::Damaged(_) => "ATM_DATABASE_DAMAGED",
             Unavailable::NoDataRoot | Unavailable::NotRunning { .. } => "ATM_RUNTIME_UNAVAILABLE",
         }
     }
@@ -70,6 +73,10 @@ impl Unavailable {
                 "ATM 需要用户在窗口里选择数据来源（{}）：请打开 ATM 窗口处理后再试",
                 s.reason
             ),
+            Unavailable::Damaged(s) => format!(
+                "ATM 的数据库读不出（{}）：请从托盘完全退出 ATM，运行 atm recover --offline 从备份恢复后再试",
+                s.reason
+            ),
             Unavailable::NotRunning { woke: true } => {
                 "AyanamiTaskManager 服务未运行：已尝试在后台启动，45 秒内没有就绪；请打开 ATM 桌面端".into()
             }
@@ -89,6 +96,17 @@ pub fn startup_state(root: &Path) -> Option<StartupState> {
     read_startup_state(&Layout::new(root))
 }
 
+pub fn damaged(root: &Path) -> Option<DamagedState> {
+    read_damaged(&Layout::new(root))
+}
+
+/// 等不来的两种状态：等用户选数据来源，或等用户从备份恢复。
+fn awaiting_user(root: &Path) -> Option<Unavailable> {
+    startup_state(root)
+        .map(Unavailable::SourceConflict)
+        .or_else(|| damaged(root).map(Unavailable::Damaged))
+}
+
 pub fn discover() -> Result<Target, Unavailable> {
     let endpoint = std::env::var("ATM_ENDPOINT").ok().filter(|v| !v.is_empty());
     let token = std::env::var("ATM_TOKEN").ok().filter(|v| !v.is_empty());
@@ -106,8 +124,8 @@ pub fn discover() -> Result<Target, Unavailable> {
     if let Some(target) = live(&root)? {
         return Ok(target);
     }
-    if let Some(state) = startup_state(&root) {
-        return Err(Unavailable::SourceConflict(state));
+    if let Some(why) = awaiting_user(&root) {
+        return Err(why);
     }
     let Some(desktop) = std::env::current_exe()
         .ok()
@@ -123,8 +141,8 @@ pub fn discover() -> Result<Target, Unavailable> {
         if let Some(target) = live(&root)? {
             return Ok(target);
         }
-        if let Some(state) = startup_state(&root) {
-            return Err(Unavailable::SourceConflict(state));
+        if let Some(why) = awaiting_user(&root) {
+            return Err(why);
         }
     }
     Err(Unavailable::NotRunning { woke: true })

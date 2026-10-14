@@ -447,6 +447,8 @@ fn boot(o: &Options, background: Compare) -> Result<Started, BootError> {
                 continue;
             }
             Startup::SourceConflict(state) => {
+                // 走到冲突说明这一代读得出：之前留下的损坏状态不再成立（W8h）。
+                cv::clear_damaged(&layout).map_err(failed)?;
                 reporter.awaiting_user();
                 (o.observe)(Event::Conflict);
                 return Ok(Started::Conflict(Conflicted {
@@ -456,6 +458,8 @@ fn boot(o: &Options, background: Compare) -> Result<Started, BootError> {
             }
             Startup::Published(m) => m,
         };
+        // 这一代又能服务了：之前留下的损坏状态不再成立（W8h）。
+        cv::clear_damaged(&layout).map_err(failed)?;
         reporter.set_generation(Some(&m.generation));
         let a = cv::read_authority(&layout);
         if !cv::must_compare_before_serving(&a, &m, &o.legacy) {

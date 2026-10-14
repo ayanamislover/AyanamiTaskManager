@@ -3,7 +3,7 @@
 
 mod support;
 
-use atm_store::conversion::StartupState;
+use atm_store::conversion::{DamagedState, Layout, StartupState, enter_damaged};
 use serde_json::{Value, json};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -37,7 +37,11 @@ fn doctor_offline_reads_files_only() {
     let mock = Mock::start();
     write_descriptor(&root, mock.port, TOKEN);
     std::fs::create_dir_all(root.join("backups")).unwrap();
-    std::fs::write(root.join("backups").join("a.atmbak"), b"x").unwrap();
+    // 一份整库备份是一个目录；`.` 开头的（正在建、待清理）与零散文件都不算。
+    std::fs::create_dir_all(root.join("backups").join("01BACKUP")).unwrap();
+    std::fs::create_dir_all(root.join("backups").join("02BACKUP")).unwrap();
+    std::fs::create_dir_all(root.join("backups").join(".creating-01X")).unwrap();
+    std::fs::write(root.join("backups").join("stray.txt"), b"x").unwrap();
     // A tripped keepalive breaker is reported, never a problem: the stop is deliberate.
     std::fs::write(
         root.join("runtime").join("keepalive.json"),
@@ -62,9 +66,10 @@ fn doctor_offline_reads_files_only() {
     assert_eq!(v["database"]["wal_bytes"], Value::Null, "{v}");
     assert_eq!(v["service"]["descriptor"], "PRESENT", "{v}");
     assert_eq!(v["service"]["pid_alive"], true, "{v}");
-    assert_eq!(v["backups"]["files"], 1, "{v}");
+    assert_eq!(v["backups"]["count"], 2, "{v}");
     assert_eq!(v["conversion"]["state"], "MISSING", "{v}");
     assert_eq!(v["startup_state"], Value::Null);
+    assert_eq!(v["damaged"], Value::Null);
 
     // 不连服务、不改任何文件（也没有留下 -wal / -shm），令牌与游标密钥不出现在输出里。
     assert_eq!(mock.hits(), 0, "doctor --offline reached the service");
@@ -288,6 +293,67 @@ fn an_absent_service_is_reported_with_the_startup_state() {
         "{}",
         doctor.stderr
     );
+}
+
+/// W8h：宿主判定库读不出、写了 `runtime\damaged.json` 后，在线命令立刻报 ATM_DATABASE_DAMAGED（不等 45 s），
+/// 附上不含凭据的损坏状态；`doctor --offline` 把它列为问题。文件坏了也当作损坏，不变成「再等等」。
+#[test]
+fn a_damaged_database_is_reported_at_once() {
+    let root = bare_root("cli-damaged");
+    let at = "2026-10-14T00:00:00.000Z";
+    let first: DamagedState =
+        enter_damaged(&Layout::new(&root), "G", "file is not a database", at).unwrap();
+    // 同一 generation 再记一次：保留第一次的时间。
+    let again = enter_damaged(
+        &Layout::new(&root),
+        "G",
+        "still unreadable",
+        "2026-10-14T01:00:00.000Z",
+    )
+    .unwrap();
+    assert_eq!(again.since, first.since);
+    for args in [
+        &["--json", "status"][..],
+        &["--json", "task", "list", "ATM"][..],
+    ] {
+        let started = Instant::now();
+        let run = atm_in(&root, args);
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(run.code, 4, "{args:?}");
+        let v = run.json();
+        assert_eq!(v["error"]["code"], "ATM_DATABASE_DAMAGED", "{v}");
+        assert!(
+            v["error"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("still unreadable")
+                && v["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("recover --offline"),
+            "{v}"
+        );
+        assert_eq!(v["error"]["damaged"]["since"], at, "{v}");
+        assert_eq!(v["error"]["startup_state"], Value::Null, "{v}");
+    }
+    let run = atm_in(&root, &["--json", "doctor", "--offline"]);
+    assert_eq!(run.code, 1);
+    let v = run.json();
+    assert_eq!(v["damaged"]["reason"], "still unreadable", "{v}");
+    assert_eq!(v["healthy"], false, "{v}");
+
+    std::fs::write(root.join("runtime").join("damaged.json"), b"{not json").unwrap();
+    let run = atm_in(&root, &["--json", "status"]);
+    assert_eq!(run.json()["error"]["code"], "ATM_DATABASE_DAMAGED");
+    assert_eq!(
+        run.json()["error"]["damaged"]["reason"],
+        "the damaged state is corrupt"
+    );
+
+    // 恢复之后（宿主或 recover 删掉了它）：回到服务未运行。
+    std::fs::remove_file(root.join("runtime").join("damaged.json")).unwrap();
+    let run = atm_in(&root, &["--json", "status"]);
+    assert_eq!(run.json()["error"]["code"], "ATM_RUNTIME_UNAVAILABLE");
 }
 
 /// peer r4 P1-01：`doctor --offline` 的暂存目录是 `%TEMP%\atm-doctor-read\`。数据根恰好在它下面一个像遗留副本的

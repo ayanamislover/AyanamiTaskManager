@@ -743,6 +743,7 @@ fn a_damaged_database_waits_for_an_offline_recovery() {
             "the publication was quarantined"
         );
         assert_eq!(std::fs::read(layout.database()).unwrap(), bytes);
+        assert_eq!(cv::read_damaged(&layout), None, "only the host records it");
     }
 
     let o = RecoverOptions {
@@ -756,6 +757,61 @@ fn a_damaged_database_waits_for_an_offline_recovery() {
         other => panic!("{other:?}"),
     }
     s.stop(&|_| {});
+}
+
+/// W8h：宿主判定读不出时留下的 `runtime\damaged.json`，在这一代又能读时由启动删掉：走到服务删，走到数据源冲突
+/// 也删（冲突说明库读得出）。运行时自己判定 Damaged 时不写它（宿主重试过还不行才写）。
+#[test]
+fn a_leftover_damaged_state_is_cleared_once_the_generation_is_readable() {
+    let d = dir("damaged-cleared");
+    let (n, l) = (d.join("N"), legacy_root(&d));
+    let layout = Layout::new(&n);
+    serving(atm_runtime::start(&options(&n, &l, &Events::default())).unwrap()).stop(&|_| {});
+    cv::enter_damaged(
+        &layout,
+        "G",
+        "file is not a database",
+        "2026-10-14T00:00:00.000Z",
+    )
+    .unwrap();
+    serving(atm_runtime::start(&options(&n, &l, &Events::default())).unwrap()).stop(&|_| {});
+    assert_eq!(cv::read_damaged(&layout), None, "serving clears it");
+
+    cv::enter_damaged(
+        &layout,
+        "G",
+        "file is not a database",
+        "2026-10-14T00:00:00.000Z",
+    )
+    .unwrap();
+    let moved = d.join("L-moved");
+    copy_tree(&l, &moved);
+    let Started::Conflict(c) =
+        atm_runtime::start(&options(&n, &moved, &Events::default())).unwrap()
+    else {
+        panic!("the moved source must not be served")
+    };
+    drop(c);
+    assert_eq!(cv::read_damaged(&layout), None, "a conflict clears it");
+    // 冲突已经记下：再启动直接从启动状态判定冲突，也删。
+    cv::enter_damaged(
+        &layout,
+        "G",
+        "file is not a database",
+        "2026-10-14T00:00:00.000Z",
+    )
+    .unwrap();
+    let Started::Conflict(c) =
+        atm_runtime::start(&options(&n, &moved, &Events::default())).unwrap()
+    else {
+        panic!("the conflict must stay")
+    };
+    drop(c);
+    assert_eq!(
+        cv::read_damaged(&layout),
+        None,
+        "a recorded conflict clears it"
+    );
 }
 
 /// 宿主正在退出（`may_open` 答 false）：入口一样都不开——没有 lease、HTTP、daemon.json，也没有观察到 Lease；

@@ -183,6 +183,7 @@
 | `WORK_ITEM_TERMINAL` | 409 |  | `call` |
 | `STORE_BUSY` | 503 | 是 | `wait` |
 | `SERVICE_UNAVAILABLE` | 503 | 是 | `wait` |
+| `DATABASE_DAMAGED` | 503 |  | `ask_user` |
 | `KNOWLEDGE_SLUG_CONFLICT` | 409 |  | `call` |
 | `OPERATION_UNDONE_BY_RESTORE` | 409 |  | `reread` |
 | `SCOPE_RESTORED` | 409 |  | `reread` |

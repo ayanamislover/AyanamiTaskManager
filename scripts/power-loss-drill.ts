@@ -843,6 +843,30 @@ async function scenarioRecover(executable: string): Promise<void> {
       { exitCode: broken.child.exitCode },
     );
     check("坏库没有被隔离，也没有建新库，字节不变", untouched());
+    // W8h：重试过还读不出，宿主记下损坏状态；CLI（与桥）据此立刻报 ATM_DATABASE_DAMAGED，不再等服务。
+    const damagedState = join(n, "runtime", "damaged.json");
+    const recorded = await (async () => {
+      const deadline = Date.now() + 30_000;
+      while (Date.now() < deadline && !existsSync(damagedState)) await sleep(200);
+      return existsSync(damagedState);
+    })();
+    check("坏库上的生产宿主写下 runtime\\damaged.json", recorded);
+    const status = runCli(executable, ["--json", "status"]);
+    const statusCode = (() => {
+      try {
+        return (JSON.parse(status.stdout) as { error?: { code?: string } }).error?.code ?? null;
+      } catch {
+        return null;
+      }
+    })();
+    check(
+      "CLI 立刻报 ATM_DATABASE_DAMAGED（退出码 4）",
+      status.code === 4 && statusCode === "ATM_DATABASE_DAMAGED",
+      {
+        code: status.code,
+        stdout: status.stdout.slice(0, 300),
+      },
+    );
     const refused = runCli(
       executable,
       ["--json", "recover", "--offline", "--from", backupId],
@@ -872,6 +896,20 @@ async function scenarioRecover(executable: string): Promise<void> {
         "smoke 宿主的窗口显示恢复页，命令是它自带的 atm.exe recover --offline",
         visible && /^& '.+\\atm\.exe' recover --offline$/u.test(command),
         command,
+      );
+      // W8h：恢复页列出整库备份，标出恢复命令默认用的那一份。
+      const row = page.locator(".atm-damaged-backups .atm-row", { hasText: backupId });
+      const listedOnPage = visible
+        ? await row
+            .waitFor({ timeout: 60_000 })
+            .then(() => true)
+            .catch(() => false)
+        : false;
+      const rowText = listedOnPage ? ((await row.textContent()) ?? "") : "";
+      check(
+        "恢复页列出这份备份，标为恢复命令默认用的那一份",
+        listedOnPage && rowText.includes("恢复命令默认用这一份"),
+        rowText,
       );
     } finally {
       await browser.close().catch(() => undefined);
@@ -918,6 +956,7 @@ async function scenarioRecover(executable: string): Promise<void> {
     typeof result?.quarantine === "string" && existsSync(result.quarantine),
     result,
   );
+  check("恢复完删掉了 runtime\\damaged.json", !existsSync(join(n, "runtime", "damaged.json")));
   const lifecycle = readFileSync(join(n, "logs", "lifecycle.ndjson"), "utf8")
     .trim()
     .split(/\r?\n/u);

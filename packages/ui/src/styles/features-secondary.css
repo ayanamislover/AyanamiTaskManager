@@ -385,6 +385,13 @@
 .atm-damaged-hint code {
   font: 12px var(--atm-mono);
 }
+/* 恢复页的整库备份列表（W8h）：在恢复步骤下面另起一块，间距同设置页；ID 就是命令里要输入的那串，和命令一样等宽。 */
+.atm-source-choice > .atm-panel + .atm-panel {
+  margin-top: 18px;
+}
+.atm-damaged-backups code {
+  font: 12px var(--atm-mono);
+}
 .atm-damaged-command {
   display: block;
   padding: 10px 12px;

@@ -5,7 +5,8 @@
 //! The error categories decide what the caller does next: `DescriptorInvalid` fails the
 //! request at once, everything else means "not up yet" and is waited out (with one wake
 //! attempt) — unless `runtime/startup-state.json` says the host is waiting for the user
-//! to pick a data source (07 §7), which no amount of waiting fixes.
+//! to pick a data source (07 §7), or `runtime/damaged.json` says the database has to be
+//! restored from a backup first (W8h): no amount of waiting fixes either.
 
 use serde_json::Value;
 use std::path::PathBuf;
@@ -64,6 +65,26 @@ pub fn source_conflict() -> Option<String> {
         Some(_) => None,
         None => Some("the startup state is corrupt".to_owned()),
     }
+}
+
+/// `N/runtime/damaged.json` says the published database cannot be read (W8h): the host serves
+/// nothing until the user restores a backup with `atm recover --offline`, so waiting cannot help.
+/// Returns the reason to report. A file that exists but cannot be read or parsed still counts,
+/// like the host's own reading of it.
+pub fn damaged() -> Option<String> {
+    let path = data_directory()?.join("runtime").join("damaged.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return Some("the damaged state cannot be read".to_owned()),
+    };
+    let value: Option<Value> = serde_json::from_slice(&bytes).ok();
+    let reason = value
+        .as_ref()
+        .filter(|v| v.get("state").and_then(Value::as_str) == Some("DATABASE_DAMAGED"))
+        .and_then(|v| v.get("reason"))
+        .and_then(Value::as_str);
+    Some(reason.unwrap_or("the damaged state is corrupt").to_owned())
 }
 
 pub fn load() -> Result<Runtime, RuntimeError> {

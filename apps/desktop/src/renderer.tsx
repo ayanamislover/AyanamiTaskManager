@@ -47,6 +47,14 @@ type DataSourceState =
       reason: string;
       command: string;
       dataDir: string;
+      backups: Array<{
+        id: string;
+        kind: string;
+        createdAt: string;
+        status: "USABLE" | "UNUSABLE";
+        problem: string | null;
+      }> | null;
+      backupsError: string | null;
     };
 type McpBridgeObservation = {
   sampledAt: string;

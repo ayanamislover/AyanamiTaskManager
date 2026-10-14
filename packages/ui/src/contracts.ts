@@ -100,7 +100,20 @@ export type DataSourceState =
       reason: string;
       command: string;
       dataDir: string;
+      /** `N\backups\` 下的整库备份，最新的在前（W8h）；宿主还在核对时为 null。 */
+      backups: DamagedBackup[] | null;
+      /** 列不出备份时的原因（原文）。 */
+      backupsError: string | null;
     };
+
+/** 恢复页上的一份整库备份。`recover --offline` 默认用第一份 `USABLE` 的。 */
+export type DamagedBackup = {
+  id: string;
+  kind: string;
+  createdAt: string;
+  status: "USABLE" | "UNUSABLE";
+  problem: string | null;
+};
 
 export type DesktopBridge = {
   setAutoLaunch?: (enabled: boolean) => Promise<boolean>;

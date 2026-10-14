@@ -251,7 +251,14 @@ fn a_corrupt_store_is_recovered_and_the_ledgers_are_marked_lost() {
     let mut bytes = std::fs::read(&db).unwrap();
     bytes[..100].fill(0x5a);
     std::fs::write(&db, &bytes).unwrap();
+    // 宿主判定读不出时记下的损坏状态（W8h）：恢复完就不再成立。
+    cv::enter_damaged(&w.layout, GEN, "file is not a database", T1).unwrap();
     let r = recover::recover(&w.layout, &w.backup, options()).unwrap();
+    assert_eq!(
+        cv::read_damaged(&w.layout),
+        None,
+        "recover clears the damaged state"
+    );
     assert!(r.ledgers_lost);
     assert_eq!(
         std::fs::read(r.quarantine.join("data").join("atm.sqlite")).unwrap(),
@@ -401,4 +408,38 @@ fn copy_dir(from: &Path, to: &Path) {
             std::fs::copy(e.path(), target).unwrap();
         }
     }
+}
+
+/// W8h：`runtime\damaged.json` 的读写。同一 generation 再记保留最早的时间；换了 generation 重新计时；
+/// 文件在却读不出或内容不对仍算损坏（原因写明），删掉之后才是没有；本来就没有时删也不算错。
+#[test]
+fn the_damaged_state_round_trips_and_a_broken_file_still_counts() {
+    let layout = Layout::new(dir("damaged-state"));
+    assert_eq!(cv::read_damaged(&layout), None);
+    cv::clear_damaged(&layout).unwrap();
+    let first = cv::enter_damaged(&layout, GEN, "file is not a database", T0).unwrap();
+    assert_eq!(cv::read_damaged(&layout), Some(first.clone()));
+    let again = cv::enter_damaged(&layout, GEN, "still unreadable", T1).unwrap();
+    assert_eq!(
+        (again.since.as_str(), again.reason.as_str()),
+        (T0, "still unreadable")
+    );
+    let other = cv::enter_damaged(&layout, "01J000000000000000000OTHER", "x", T2).unwrap();
+    assert_eq!(other.since, T2);
+    let path = layout.runtime().join(cv::DAMAGED_STATE);
+    for broken in [
+        &b"{not json"[..],
+        br#"{"state":"SOURCE_CONFLICT","since":"","generation":"","reason":""}"#,
+    ] {
+        std::fs::write(&path, broken).unwrap();
+        assert_eq!(
+            cv::read_damaged(&layout).map(|d| d.reason),
+            Some("the damaged state is corrupt".to_owned())
+        );
+    }
+    cv::clear_damaged(&layout).unwrap();
+    assert_eq!(cv::read_damaged(&layout), None);
+    // 损坏状态不进启动状态：store 与 CLI 把那里不认识的状态都当作数据源冲突。
+    cv::enter_damaged(&layout, GEN, "x", T0).unwrap();
+    assert_eq!(cv::read_startup_state(&layout), None);
 }

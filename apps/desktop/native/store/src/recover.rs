@@ -25,7 +25,7 @@ use crate::backup::{
     BackupError, FileEntry, MANIFEST_FORMAT, attachments_digest, copy_tree, hash_file, list_tree,
     side_reader,
 };
-use crate::conversion::{Layout, ManifestState, read_manifest};
+use crate::conversion::{Layout, ManifestState, clear_damaged, read_manifest};
 use crate::events::{EventError, append_global, ulid};
 use crate::restore::allocate_generation;
 use atm_install_state::is_path_name;
@@ -476,6 +476,8 @@ pub fn recover_with(
     let _ = fs::remove_dir_all(&staging);
     write_marker(layout, &intent)?;
     fs::remove_file(layout.runtime().join(INTENT))?;
+    // 恢复完了：桥和 CLI 不该再报 DATABASE_DAMAGED（W8h）。删不掉也不算恢复失败，下次启动能服务时宿主还会删。
+    let _ = clear_damaged(layout);
     Ok(Recovered {
         backup_id: intent.backup_id,
         quarantine,
