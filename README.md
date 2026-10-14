@@ -40,6 +40,18 @@ Agent 写代码不难，难的是**换一次 Session 就忘了项目到哪儿了
 
 AyanamiTaskManager（ATM）把计划、任务、进度、阻塞、长期记录、证据和 Session 交接收进一个稳定的事实源，Agent 开工时读一份 brief 就能接着干。它不是另一份待办清单，也不保存整段对话，只保留真正会影响项目推进的结构化事实。桌面 UI、MCP、CLI 与本地 HTTP 共用同一套事务应用服务——你在界面上看到的，和 Agent 读到的，永远是同一份数据。
 
+## 3.0.0 · 单进程原生宿主，数据换到新目录
+
+这一版把 2.x 的 Electron + Node 换成**一个 Rust 原生宿主进程**：窗口、托盘、本地服务与 Agent 接入都在这一个进程里，界面由系统自带的 WebView2 渲染，安装包不再携带 Node。
+
+- **数据换到新目录。** 3.0 的数据位于 `%LOCALAPPDATA%\AyanamiTaskManager3`，所有项目、共享知识与设置都在一个数据库 `data\atm.sqlite` 里。
+- **首次启动自动转换 2.x 数据。** 3.0 第一次启动时把 `%LOCALAPPDATA%\AyanamiTaskManager` 里的 2.x 数据转换到新目录；旧目录保持不动。
+- **1.x 要先升级到 2.x。** 3.0 只从 2.x 的数据转换，仍在用 1.x 时先升级到 2.x，再升级到 3.0。
+- **可以经安装器回退到 2.x。** 2.x 数据原样可用，但 3.0 期间的写入不会带回 2.x；回退后再升级的处理见[用户指南](./docs/user-guide.md#从-2x-升级与回退)。
+- **数据库读不出时有恢复页。** ATM 不服务、不改动任何文件，窗口列出整库备份并给出恢复命令；步骤见[排障指南](./docs/troubleshooting.md#数据库读不出)。
+
+正式发布状态和制品证据以 [GitHub Release](https://github.com/ayanamislover/AyanamiTaskManager/releases) 为准。
+
 ## 1.1.5 · 知识能完整读回，交接更稳
 
 这一轮聚焦知识工作流的可靠性：**合法内容读得全，保存重试不重复，长历史也能找到最初的版本。**
@@ -54,7 +66,7 @@ AyanamiTaskManager（ATM）把计划、任务、进度、阻塞、长期记录�
 
 ### 共享知识库 · 让经验跨项目复用
 
-**项目事实留在项目里，通用知识按需读取。** 本地共享知识库独立于项目数据库；项目归档后，已经发布的知识修订仍可引用。
+**项目事实留在项目里，通用知识按需读取。** 共享知识与项目数据在同一个本地数据库里，作为独立范围保存、备份与恢复；项目归档后，已经发布的知识修订仍可引用。
 
 - **先筛选，再读正文。** `atm_knowledge_search` 返回摘要、使用场景和适用范围；`atm_knowledge_get` 再读取选中条目或指定章节。不把整库塞进开工 brief。
 - **引用不随编辑漂移。** 使用不可变的 `id@revisionId`，正文可按字符预算分页读取；条目修改后，旧修订仍有自己的身份。
@@ -71,10 +83,10 @@ AyanamiTaskManager（ATM）把计划、任务、进度、阻塞、长期记录�
 | **一份事实源**   | 目标、里程碑、叶子 WorkItem、依赖、验收标准与证据始终一致；界面和 Agent 读同一份数据                                                 |
 | **Agent 原生**   | Codex、Claude Desktop、Claude Code、Kimi Code 经 MCP 直接领取、推进、交接，不需要人来转述                                            |
 | **压缩后可恢复** | brief / delta / 精确读取 + 长期 records，开工读一份摘要即可续上，不重扫历史                                                          |
-| **跨项目知识**   | 独立本地知识库、不可变修订和按需读取，让通用经验复用而不淹没开工 brief                                                               |
+| **跨项目知识**   | 本地共享知识库、不可变修订和按需读取，让通用经验复用而不淹没开工 brief                                                               |
 | **并发不打架**   | Session 领取、幂等 mutation、乐观并发版本号、租约过期接管、Review 状态全程可追溯                                                     |
 | **工程可见**     | 项目时间线、Session 的 Git 上下文、工程统计、在线备份恢复与发布证据同屏呈现                                                          |
-| **完全本地**     | 每项目独立 SQLite，仅监听 loopback，令牌每次启动轮换，不需要任何云端账号                                                             |
+| **完全本地**     | 全部数据在一个本地 SQLite 库，仅监听 loopback，令牌每次启动轮换，不需要任何云端账号                                                  |
 | **手机随身**     | 手机 App 看任务、发任务，勾一下「交给 Claude」就自动领取、完善目标并开工；中继服务器像 RustDesk 一样自己配，内容端到端加密，默认关闭 |
 
 ## 用 ATM 开发 ATM
@@ -115,7 +127,7 @@ ATM 自己就是用 ATM 管的。下面是本机 SQLite 里的真实计数，截
 | 增量拉取 100 条事件         | p95 100 ms |
 | 隔离服务探针的空闲 RSS      | 150 MB     |
 
-服务启动时间不等于桌面首屏时间，服务 RSS 也不是整个桌面应用（宿主、core 与 WebView2 进程）的内存总量。知识库检索与这里的项目文档检索是不同入口；每个版本的实际结果请看对应发行报告。
+服务启动时间不等于桌面首屏时间，服务 RSS 也不是整个桌面应用（宿主进程与 WebView2 进程）的内存总量。知识库检索与这里的项目文档检索是不同入口；每个版本的实际结果请看对应发行报告。
 
 每个版本还带一份可核对的证据包：候选先算指纹（gitHead、工作区脏状态哈希、源码哈希、lockfile 哈希、各阶段哈希），再逐层验证，每层记录产物的 SHA-256——
 
@@ -128,7 +140,7 @@ ATM 自己就是用 ATM 管的。下面是本机 SQLite 里的真实计数，截
 <div align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/architecture-dark.svg" />
-    <img src="./docs/assets/architecture-light.svg" alt="AI Agents 经 MCP 连接本地动态 bridge，与桌面 UI（WebView2）、CLI 共用同一套应用服务，写入全局 registry 与每项目 SQLite" width="100%" />
+    <img src="./docs/assets/architecture-light.svg" alt="AI Agents 经 MCP 连接本地动态 bridge，与桌面 UI（WebView2）、CLI 共用同一套应用服务，写入本地 SQLite" width="100%" />
   </picture>
 </div>
 
@@ -143,12 +155,12 @@ ATM 自己就是用 ATM 管的。下面是本机 SQLite 里的真实计数，截
 3. 启动 ATM，在“设置 → Agent 接入”中安装 Codex、Claude Desktop、Claude Code 或 Kimi Code 配置。
 4. 开启“登录启动”后，ATM 会在 Windows 登录后随机延迟后台启动；关闭窗口只会收进托盘。
 
-应用数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager`。安装版会把精简 Agent Guide 与完整文档同步到该目录，换设备后仍能从同一路径发现使用说明。
+3.0 的应用数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager3`（数据库为 `data\atm.sqlite`）。`%LOCALAPPDATA%\AyanamiTaskManager` 保留 2.x 数据（3.0 只读不写，供回退），安装版还会把精简 Agent Guide 与完整文档同步到这里，换设备后仍能从同一路径发现使用说明。
 
 下载后可用 Release 附带的 `SHA256SUMS.txt` 核对文件。Setup 与 portable 是两种分发方式，使用差异见[便携版说明](./docs/portable-usage.md)；`atm-*-win-x64.zip` 与同名 `.json` 是安装版的更新包和清单，由安装器读取，不是另一个需要手动安装的应用。
 
 > [!IMPORTANT]
-> 不要把 `%LOCALAPPDATA%\AyanamiTaskManager\runtime\daemon.json`、Bearer token、项目数据库或备份提交到仓库。ATM 的运行时发现文件只服务当前 Windows 用户和当前 daemon 实例。
+> 不要把 `%LOCALAPPDATA%\AyanamiTaskManager3\runtime\daemon.json`、Bearer token、`data\atm.sqlite` 或 `backups\` 提交到仓库。ATM 的运行时发现文件只服务当前 Windows 用户和当前 daemon 实例。
 
 ## Agent 接入
 
@@ -224,7 +236,7 @@ ATM 会最小合并现有配置，并在写入前创建备份：
 
 - 总览、项目、任务列表/看板/时间线/层级和长期记录；
 - Agent 按项目聚合、Session Git 上下文、claim 与交接；
-- 临时任务晋升、保存视图、中文搜索和实时事件；
+- 临时任务晋升、保存视图和中文搜索；
 - 在线备份恢复、导入导出、工程统计与托盘通知；
 - 本地共享知识库、修订历史、归档与 Markdown 导入／导出；
 - 开机随机延迟后台启动，以及关闭到托盘的常驻模式。
@@ -234,7 +246,7 @@ ATM 会最小合并现有配置，并在写入前创建备份：
 
 ## 本地开发
 
-需要 Node.js `>=22.13.0` 与 pnpm `11.16.0`：
+需要 Node.js `>=22.13.0`、pnpm `11.16.0` 与 Rust 工具链（版本钉在 `apps/desktop/native/rust-toolchain.toml`，rustup 在该目录首次构建时自动安装）：
 
 ```powershell
 git clone https://github.com/ayanamislover/AyanamiTaskManager.git
@@ -244,7 +256,7 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-开发态 Web 界面固定监听 `http://127.0.0.1:9999`；daemon API 使用运行时发现文件声明的独立 loopback 端口。开发和测试可通过 `ATM_DATA_DIR` 指向隔离数据目录。
+`pnpm dev` 先构建 debug 原生宿主，再用 Vite 持续构建界面到 `apps/desktop/dist/renderer`，由宿主直接加载；`pnpm test:e2e` 用的 Vite 开发服务器固定监听 `http://127.0.0.1:9999`。本地服务 API 使用运行时发现文件声明的独立 loopback 端口。`pnpm dev` 默认把两个数据根都放在 `output/` 下、与本机正在用的 ATM 分开：2.x 源根 `ATM_DATA_DIR` 是 `output/dev-data`，3.0 数据根 `ATM3_DATA_DIR` 是 `output/dev-data3`；启动前设置这两个变量可以换成别的目录。
 
 六道质量门禁，缺一道都不算过：
 

@@ -216,6 +216,8 @@ type TaskCard = {
 
 ## 7. 电脑侧连接器（packages/sync）
 
+> 以下为 2.x 实现；3.0 中连接器是宿主进程内的 `atm-sync`（`apps/desktop/native/sync`），配置、游标与已处理命令集合存入 `data\atm.sqlite` 的 `sync_state`、`sync_processed` 等表，密钥在 `%LOCALAPPDATA%\AyanamiTaskManager3\data\sync\secrets.dpapi.json`。
+
 - 运行在 daemon 所在进程（桌面端是原生宿主拉起的 core，接线见 `apps/desktop/src/core-mobile.ts`），
   直接调用 `AyanamiTaskService`，不走 HTTP。
 - 非敏感配置 `<数据目录>/sync/config.json`：`enabled、relayUrl、appId、deviceId、deviceName、spaceId、cursor`
@@ -268,6 +270,8 @@ type TaskCard = {
 | POST | `/api/v1/dispatch/runs/:run/cancel`                  | USER_ONLY                | 结束一次派单：核验进程身份、确认进程树已结束才回 `cancelled`；没结束掉回 500 `DISPATCH_CANCEL_FAILED`（retryable，派单仍运行、名额不释放）                               |
 
 ## 8. Claude 自动派单（packages/agent-dispatch）
+
+> 以下为 2.x 实现；3.0 中派单器是宿主进程内的 `atm-dispatch`（`apps/desktop/native/dispatch`），派单历史与请求账本是 `data\atm.sqlite` 的 `dispatch_runs`、`dispatch_requests` 表，两者在同一个写事务里落盘，不再需要 `requestsSince` 标记；会话日志在 `%LOCALAPPDATA%\AyanamiTaskManager3\data\dispatch\logs`。
 
 - 默认关闭；开启后只处理**用户明确要求**的任务（手机勾选「交给 Claude」或桌面按钮），从不自己挑任务。
 - 工作目录 = 项目的主路径（`project_paths` 里 `is_primary` 优先）。项目没有绑定路径则拒绝并说明。

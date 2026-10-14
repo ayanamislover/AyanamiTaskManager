@@ -21,13 +21,13 @@ Claude Code 的注册由 ATM 调用 `claude` CLI 完成，ATM 不直接改写 `~
 
 ATM 改 Codex 的 `config.toml` 时只动 `[mcp_servers.ayanami-task-manager-*]` 这几段：你自己的 server 和其他设置原样保留，包括表头后面的注释、引号键、`[[数组表]]`、多行字符串和行尾（CRLF 也照旧）；ATM 段里你写的注释也会留下。ATM 的条目如果是你写成别的形式的（`[mcp_servers]` 下的行内表 `ayanami-task-manager-core = { … }`、点分键 `ayanami-task-manager-core.command = …`，或顶层的 `mcp_servers.ayanami-task-manager-core.…`），修复时会换成上面那种段，不会重复定义。如果文件里有 ATM 认不出的写法（例如表头没闭合、多行字符串没结束），安装、修复、卸载会报 `CODEX_CONFIG_INVALID_TOML`；如果整个 `mcp_servers` 写成了一张行内表（`mcp_servers = { … }`）或数组表（`[[mcp_servers]]`），ATM 没法往里加自己的段，会报 `CODEX_CONFIG_UNSUPPORTED`；卸载只在里面有 ATM 的条目时才会这样。哪些条目是 ATM 的，按 TOML 解码后的键判断（与 Codex 用同一个解析器），你自己 server 的参数、注释里提到 ATM 的名字不算；ATM 的条目写成数组表 `[[mcp_servers.ayanami-task-manager-core]]`、env 写成裸键或字面串，也都按解析出的内容判断是否需要修复。每次改写之后 ATM 会把结果再解析一遍，核对你的内容一个值都没变，核对不过就不写。这两种情况下这次操作什么都不写（配置、规则文件、Skills 都不动），启动时也不会去改配置；把文件改成 `[mcp_servers.<名字>]` 段的写法后，在设置里点「修复」即可。
 
-只有正式安装、并且用的是默认数据目录时，ATM 启动才会自动修复：`ATM_DATA_DIR`、`AYANAMI_TASK_DATA_DIR`、`ATM3_DATA_DIR` 任何一个指到别处，或 `APPDATA`、`LOCALAPPDATA`、`USERPROFILE` 被改到别的位置时，都不会自动改你的 Agent 配置。设置里的「安装」「修复」「卸载」不受这条影响。
+只有打包版（安装版或便携版）、并且用的是默认数据目录时，ATM 启动才会自动修复：`ATM_DATA_DIR`、`AYANAMI_TASK_DATA_DIR`、`ATM3_DATA_DIR` 任何一个指到别处，或 `APPDATA`、`LOCALAPPDATA`、`USERPROFILE` 被改到别的位置时，都不会自动改你的 Agent 配置。设置里的「安装」「修复」「卸载」不受这条影响。
 
 Kimi Code 的 VS Code 扩展与 CLI 共用 `~/.kimi-code`，装一次两边都生效。ATM 直接最小合并 `mcp.json`：只替换 ATM 自己的服务并写明 `"transport": "stdio"`，其他服务与顶层键原样保留；原来手工写在 `AGENTS.md` 里、没有 ATM 标记的规则文字不会被删，确认受管区块生效后可自行删掉那份手写副本。
 
 本地服务只监听 `127.0.0.1`。正式桌面 daemon 每次启动都会生成新的 token 和端口，并原子发布 `%LOCALAPPDATA%\AyanamiTaskManager3\runtime\daemon.json`（设置了 `ATM3_DATA_DIR` 时在它下面）；旧 endpoint/token 不可复用。不要把 token 写进仓库、任务记录、日志、命令行参数或长期配置。完整威胁边界见 [security-model.md](./security-model.md)。
 
-stdio MCP 由原生转发程序 `atm-mcp.exe` 承担：它每次请求都重新读 `daemon.json`，把每行 JSON-RPC 转发到本机服务，不需要任何环境变量。写进 Agent 配置的路径是版本无关链接 `%LOCALAPPDATA%\AyanamiTaskManager\current\resources\atm-mcp.exe`，升级后旧配置依然有效。参数只有 `--profile core|memory`（`actions` 是 core 的别名，只为旧配置保留）；不带 `--profile` 时以 `MCP_PROFILE_REQUIRED` 退出。服务未运行时它会唤醒一次同目录的桌面程序并等待发布。桌面 EXE 本身不是 stdio 程序，不要直接把它写进 Agent 配置。
+stdio MCP 由原生转发程序 `atm-mcp.exe` 承担：它每次请求都重新读 `daemon.json`，把每行 JSON-RPC 转发到本机服务，不需要任何环境变量。写进 Agent 配置的路径是版本无关链接 `%LOCALAPPDATA%\AyanamiTaskManager\current\resources\atm-mcp.exe`，升级后旧配置依然有效。参数只有 `--profile core|memory`（`actions` 是 core 的别名，只为旧配置保留）；不带 `--profile` 时以 `MCP_PROFILE_REQUIRED` 退出。服务未运行时它会唤醒一次安装根（`resources\` 的上一级）里的 `AyanamiTaskManager.exe` 并等待发布。桌面 EXE 本身不是 stdio 程序，不要直接把它写进 Agent 配置。
 
 桥还负责两件事：
 
@@ -190,7 +190,7 @@ MCP 登记两个 Profile，共用同一个服务与数据库：
 
 ### 精确读取与长字段续读
 
-`atm_search` 会先处理公开精确标识，再进入全文搜索：WorkItem/Record 使用公开 key；Progress 与 Session 使用 `progress:<ULID>`、`session:<ULID>`；写操作可用 `op_id` 并按 `session` 收窄。`field_mask` 只返回点名字段；响应给出 continuation cursor 时，后续请求必须保持相同项目、实体、类型和字段集合。cursor 的确定性 SHA-256 摘要绑定项目、实体、字段集合和字段内容，篡改、跨实体复用或内容变化都会 fail closed；它用于损坏检测与作用域绑定，不是认证签名或授权凭据。升级前拿到的旧游标报 `INVALID_CURSOR`（`reason: "FORMAT_RETIRED"`），去掉 cursor 从头读。
+`atm_search` 会先处理公开精确标识，再进入全文搜索：WorkItem/Record 使用公开 key；Progress 与 Session 使用 `progress:<ULID>`、`session:<ULID>`；写操作可用 `op_id` 并按 `session` 收窄。`field_mask` 只返回点名字段；响应给出 continuation cursor 时，后续请求必须保持相同项目、实体、类型和字段集合。cursor 带库内密钥（不出库）算出的 HMAC-SHA256 校验值，绑定项目、实体、字段集合和字段内容摘要，篡改、跨实体复用或内容变化都会 fail closed；它用于损坏检测与作用域绑定，不是认证签名或授权凭据，访问权限仍由 Bearer token 决定。升级前拿到的旧游标报 `INVALID_CURSOR`（`reason: "FORMAT_RETIRED"`），去掉 cursor 从头读。
 
 ### MCP 与 REST 字段名
 
@@ -215,15 +215,16 @@ begin 默认 `resume: "auto"`：
 ## CLI 等价入口
 
 ```powershell
-pnpm atm status
-pnpm atm brief ATM
-pnpm atm task list ATM --ready
-pnpm atm task show ATM-T-0003 --view context
-pnpm atm progress ATM-T-0003 --percent 50 --summary "文档已完成一半"
-pnpm atm record ATM --kind FACT --summary "验收证据已生成"
+$atm = "$env:LOCALAPPDATA\AyanamiTaskManager\current\AyanamiTaskManager.exe"
+& $atm --cli status
+& $atm --cli brief ATM
+& $atm --cli task list ATM --ready
+& $atm --cli task show ATM-T-0003 --view context
+& $atm --cli progress ATM-T-0003 --percent 50 --summary "文档已完成一半"
+& $atm --cli record ATM --kind FACT --summary "验收证据已生成"
 ```
 
-CLI 写操作会创建短生命周期会话并在结束时关闭。需要持续领取、交接或多 Agent 协作时，应使用 MCP 或 REST 的正式会话。
+CLI 从 `%LOCALAPPDATA%\AyanamiTaskManager3\runtime\daemon.json` 找到服务，带的是 Agent 凭证；备份新建与恢复、导出、不带 `--preview` 的导入、项目归档与恢复在本地直接拒绝（退出码 3）。仓库里的 `pnpm atm` 是 2.x 的 TS CLI，找不到 3.0 的服务。CLI 写操作会创建短生命周期会话并在结束时关闭。需要持续领取、交接或多 Agent 协作时，应使用 MCP 或 REST 的正式会话。
 
 ## 多 Agent
 
