@@ -1,8 +1,9 @@
 // 先于一切：这里拉起的宿主窗口不抢焦点、压在最底层（scripts/test-windows.ts）。
 import "./test-windows.js";
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { mkdirSync, rmSync } from "node:fs";
 import { join, resolve, sep } from "node:path";
+import { buildE2eBinaries } from "./build-e2e.js";
 
 // 3.0 的 e2e（W5d）：服务是 Rust 的 atm-core-e2e（与正式宿主同一个运行时库），界面在 Vite 里。
 // - 界面经 4394 进 ui-bridge（主体 User/E2eTest），只认用户 token；
@@ -16,34 +17,8 @@ if (!dataDir.toLowerCase().startsWith(`${workspace.toLowerCase()}${sep}`)) {
 rmSync(dataDir, { recursive: true, force: true });
 mkdirSync(dataDir, { recursive: true });
 
-const native = join(workspace, "apps", "desktop", "native");
-const target = join(native, "target");
-const build = spawnSync(
-  "cargo",
-  ["build", "--locked", "-p", "atm-e2e-adapter", "--features", "e2e", "--bin", "atm-core-e2e"],
-  {
-    cwd: native,
-    stdio: "inherit",
-    windowsHide: true,
-    env: { ...process.env, CARGO_TARGET_DIR: target },
-  },
-);
-if (build.status !== 0) throw new Error(`E2E_ADAPTER_BUILD_FAILED: ${build.status}`);
-// 设置页的「Claude Code」一行探测的是真实的程序（W7e）：给它派单用例里的假 claude，不按 PATH 找本机真的那个。
-// 只探测版本与登录状态；e2e 不派单。
-const fakeClaudeBuild = spawnSync(
-  "cargo",
-  ["build", "--locked", "-p", "atm-dispatch", "--bin", "atm-fake-claude"],
-  {
-    cwd: native,
-    stdio: "inherit",
-    windowsHide: true,
-    env: { ...process.env, CARGO_TARGET_DIR: target },
-  },
-);
-if (fakeClaudeBuild.status !== 0) {
-  throw new Error(`E2E_FAKE_CLAUDE_BUILD_FAILED: ${fakeClaudeBuild.status}`);
-}
+// `pnpm test:e2e` 已在 Playwright 之前编译过（build-e2e.ts）；这里再调一次，缓存是热的，只花一两秒。
+const target = buildE2eBinaries(workspace);
 
 // 数据根只在 output/e2e 下；不从环境继承任何 ATM 数据根变量。
 const env = { ...process.env };

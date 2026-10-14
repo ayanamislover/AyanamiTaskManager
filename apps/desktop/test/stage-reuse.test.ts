@@ -39,6 +39,7 @@ const FIXTURE_FILES = [
   "migrations/project/0001_initial.sql",
   "scripts/budget-measure.ts",
   "scripts/start-e2e.ts",
+  "scripts/build-e2e.ts",
   "scripts/release.ts",
   "scripts/version-sites.ts",
   "logo.ico",

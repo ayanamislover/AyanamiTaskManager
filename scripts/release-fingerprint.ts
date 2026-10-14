@@ -54,6 +54,8 @@ export const STAGE_INPUTS: Record<string, StageInputs> = {
       "playwright.config",
       // webServer 起的是它，改了它 e2e 跑的就是另一个东西。
       "scripts/start-e2e.ts",
+      // e2e 之前先编译服务（不算进 webServer 的超时），改了它编出来的就可能是另一个东西。
+      "scripts/build-e2e.ts",
     ],
     // playwright 的 testDir 是 apps/desktop/e2e，这些目录里是 vitest 单测，由 test
     // 阶段跑。不排掉的话，改一个单测文件就会作废 e2e——1.0.7 那次正是这样。
