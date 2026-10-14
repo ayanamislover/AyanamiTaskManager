@@ -387,15 +387,25 @@ fn relaunch_from_temp(env: &Env, force: bool) -> Result<(), String> {
 
 /// The temporary copy deletes itself once it has exited.
 pub fn schedule_self_delete() {
-    use std::os::windows::process::CommandExt;
     let Ok(me) = std::env::current_exe() else {
         return;
     };
-    let command = format!("ping -n 3 127.0.0.1 >nul & del /f /q \"{}\"", me.display());
-    let _ = std::process::Command::new("cmd.exe")
+    let _ = spawn_hidden_cmd(&format!(
+        "ping -n 3 127.0.0.1 >nul & del /f /q \"{}\"",
+        me.display()
+    ));
+}
+
+/// `cmd /d /c <command>` 在一个没有窗口的控制台里跑，它起的控制台子进程（ping）继承这个控制台。
+/// 只能是 `CREATE_NO_WINDOW`：和 `DETACHED_PROCESS` 一起给时前者被系统忽略，cmd 没有控制台，
+/// ping 只好自己新开一个——每次卸载桌面上弹一个 ping 窗口。
+fn spawn_hidden_cmd(command: &str) -> std::io::Result<std::process::Child> {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    std::process::Command::new("cmd.exe")
         .raw_arg(format!("/d /c {command}"))
-        .creation_flags(0x0800_0000 | 0x0000_0008)
-        .spawn();
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn()
 }
 
 pub fn status(env: &Env) -> serde_json::Value {
@@ -591,5 +601,53 @@ mod tests {
         finish_removal(&env);
         assert!(!env.install_root.exists());
         cleanup(&env);
+    }
+
+    /// pid 属于 `pids` 的可见顶层窗口个数。
+    fn visible_windows_of(pids: &[u32]) -> usize {
+        use windows_sys::Win32::Foundation::{HWND, LPARAM};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            EnumWindows, GetWindowThreadProcessId, IsWindowVisible,
+        };
+        struct Ctx<'a> {
+            pids: &'a [u32],
+            hits: usize,
+        }
+        unsafe extern "system" fn each(hwnd: HWND, lparam: LPARAM) -> i32 {
+            let ctx = unsafe { &mut *(lparam as *mut Ctx) };
+            let mut pid = 0u32;
+            unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+            if ctx.pids.contains(&pid) && unsafe { IsWindowVisible(hwnd) } != 0 {
+                ctx.hits += 1;
+            }
+            1
+        }
+        let mut ctx = Ctx { pids, hits: 0 };
+        unsafe { EnumWindows(Some(each), &mut ctx as *mut Ctx as LPARAM) };
+        ctx.hits
+    }
+
+    /// 自删除的 cmd 和它起的 ping 都不能在桌面上弹出窗口。
+    #[test]
+    fn the_self_delete_command_never_opens_a_console_window() {
+        let mut cmd = spawn_hidden_cmd("ping -n 4 127.0.0.1 >nul").unwrap();
+        let start = std::time::Instant::now();
+        let mut ping = None;
+        while ping.is_none() && start.elapsed() < Duration::from_secs(5) {
+            ping = procs::snapshot().into_iter().find(|p| p.parent == cmd.id());
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let ping = ping.expect("cmd never started ping");
+        let pids = [cmd.id(), ping.pid];
+        // 控制台窗口在子进程启动时就建好；再多看一会儿，防止晚到。
+        let mut seen = 0;
+        for _ in 0..25 {
+            seen = seen.max(visible_windows_of(&pids));
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        procs::terminate(&ping.identity());
+        let _ = cmd.kill();
+        let _ = cmd.wait();
+        assert_eq!(seen, 0, "a visible console window appeared for {pids:?}");
     }
 }
