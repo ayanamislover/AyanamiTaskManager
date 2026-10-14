@@ -128,7 +128,9 @@ fn bridges_are_found_natively_by_the_atm_mcp_image_and_their_owner() {
     );
 
     let root = dir("observe");
-    let l = root.join("L");
+    // 数据根故意写成不规范的样子（W8 关口在 CI 上：没设 CARGO_TARGET_DIR 时 target 是 `agents\..\target`）：
+    // 桥命令由它拼出来，进程的映像路径却总是规范的，观测要认得出是同一个文件。
+    let l = root.join("x").join("..").join("L");
     let shim = l.join("current").join("resources").join("atm-mcp.exe");
     fs::create_dir_all(shim.parent().unwrap()).unwrap();
     let me = std::env::current_exe().unwrap();
@@ -176,13 +178,14 @@ fn bridges_are_found_natively_by_the_atm_mcp_image_and_their_owner() {
         }
         std::thread::sleep(Duration::from_millis(100));
     };
-    // 先确认那份不算的副本确实在跑（否则「不算」是空转）。
+    // 先确认那份不算的副本确实在跑（否则「不算」是空转）。映像路径是系统给的规范写法。
+    let shim_image = std::path::absolute(&shim).unwrap();
     let snapshot = atm_agents::bridges::snapshot();
     let stray_seen = snapshot.iter().any(|p| {
         p.pid == stray.id()
             && p.path
                 .as_deref()
-                .is_some_and(|path| path.eq_ignore_ascii_case(&shim.to_string_lossy()))
+                .is_some_and(|path| path.eq_ignore_ascii_case(&shim_image.to_string_lossy()))
     });
     fs::write(&stop, "").unwrap();
     let _ = owner.wait();

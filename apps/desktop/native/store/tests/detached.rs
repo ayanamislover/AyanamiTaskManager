@@ -19,7 +19,14 @@ const AT: &str = "2026-10-12T00:00:00.000Z";
 fn dir(name: &str) -> PathBuf {
     let target = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("../target"));
+        .unwrap_or_else(|| {
+            Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("..")
+                .join("target")
+        });
+    // 规范的绝对路径（W8 关口在 CI 上）：没设 CARGO_TARGET_DIR 时原来是 `store/../target`，交给
+    // `cmd /c mklink` 时那个 `/` 被当成开关。
+    let target = std::path::absolute(target).unwrap();
     let d = target.join("store-tests").join("detached").join(name);
     let _ = fs::remove_dir_all(&d);
     fs::create_dir_all(&d).unwrap();

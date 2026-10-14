@@ -32,7 +32,7 @@ pub struct World {
 }
 
 pub fn test_dir(name: &str) -> PathBuf {
-    std::env::var_os("CARGO_TARGET_DIR")
+    let dir = std::env::var_os("CARGO_TARGET_DIR")
         .map(PathBuf::from)
         .unwrap_or_else(|| {
             PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -40,7 +40,10 @@ pub fn test_dir(name: &str) -> PathBuf {
                 .join("target")
         })
         .join("cli-tests")
-        .join(name)
+        .join(name);
+    // 规范的绝对路径（W8 关口在 CI 上）：没设 CARGO_TARGET_DIR 时这里带 `..`，atm 输出的路径是规范的，
+    // 用例按字面比较就对不上。
+    std::path::absolute(dir).unwrap()
 }
 
 /// 一个新库：建项目与 session（begin），建一个任务，起监听器，写 daemon.json。

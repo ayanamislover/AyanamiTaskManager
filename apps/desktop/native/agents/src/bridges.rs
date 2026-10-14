@@ -1,8 +1,8 @@
 //! MCP 桥进程观测（2.0 `mcp-bridge-observation.ts`）：数 Agent 客户端直接拉起的那些桥各占多少私有内存。
 //!
 //! 2.0 起 PowerShell 与 typeperf 采样；3.0 用一次 Toolhelp32 快照拿进程树，再逐个读映像路径、创建时刻和
-//! `PrivateUsage`（只数私有页，共享页不加和）。判据照旧：映像路径与某个桥命令完全相同（不分大小写），并且直接
-//! 父进程是 `codex` 或 `claude`；采样之间退出的、父进程认不出的一律不计。2.x 的宿主入口
+//! `PrivateUsage`（只数私有页，共享页不加和）。判据照旧：映像路径与某个桥命令是同一个路径（不分大小写，
+//! 按字面规范化，见 `key`），并且直接父进程是 `codex` 或 `claude`；采样之间退出的、父进程认不出的一律不计。2.x 的宿主入口
 //! （`AyanamiTaskManager.exe --mcp-stdio`）后面挂着 `atm-core`，那一串按固定两层汇总，到 `atm-core` 为止。
 
 use serde_json::{Value, json};
@@ -31,6 +31,28 @@ fn stem(name: &str) -> String {
 
 fn supported_owner(name: &str) -> bool {
     matches!(stem(name).as_str(), "codex" | "claude")
+}
+
+/// 比较用的路径键：分隔符统一成 `\`，去掉 `.` 与多余的分隔符，按字面消掉 `..`，不分大小写。进程的映像
+/// 路径（`QueryFullProcessImageNameW`）总是规范的，桥命令不一定：它由数据根拼出来，数据根里带 `..` 或 `/`
+/// 时同一个文件也会对不上（W8 关口在 CI 上：`target` 是 `agents\..\target`）。不解析链接与短名。
+fn key(path: &str) -> String {
+    let mut parts: Vec<&str> = Vec::new();
+    for part in path.split(['\\', '/']) {
+        match part {
+            // 开头的空段是 UNC 的 `\\`，留着；中间的是多余的分隔符。
+            "" if parts.iter().all(|p| p.is_empty()) => parts.push(part),
+            "" | "." => {}
+            ".." if parts
+                .last()
+                .is_some_and(|p| !p.is_empty() && *p != ".." && !p.ends_with(':')) =>
+            {
+                parts.pop();
+            }
+            _ => parts.push(part),
+        }
+    }
+    parts.join("\\").to_lowercase()
 }
 
 fn chain_private_bytes(root: u32, procs: &[Proc]) -> u64 {
@@ -66,7 +88,7 @@ fn iso(ms: i64) -> String {
 pub fn observe_from(procs: &[Proc], commands: &[String], now_ms: i64) -> Value {
     let mut wanted: Vec<String> = Vec::new();
     for c in commands {
-        let k = c.to_lowercase();
+        let k = key(c);
         if !wanted.contains(&k) {
             wanted.push(k);
         }
@@ -75,7 +97,7 @@ pub fn observe_from(procs: &[Proc], commands: &[String], now_ms: i64) -> Value {
     let mut total: u64 = 0;
     for p in procs {
         let Some(path) = &p.path else { continue };
-        if !wanted.contains(&path.to_lowercase()) {
+        if !wanted.contains(&key(path)) {
             continue;
         }
         let (Some(started), Some(private)) = (p.started_ms, p.private_bytes) else {
@@ -240,6 +262,49 @@ mod tests {
         assert_eq!(v["bridges"].as_array().unwrap().len(), 1);
         assert_eq!(v["bridges"][0]["ownerName"], "codex");
         assert_eq!(v["metric"], "PRIVATE_BYTES");
+    }
+
+    /// W8 关口在 CI 上：桥命令由数据根拼出来，不一定是规范的路径；进程的映像路径总是规范的。
+    #[test]
+    fn a_bridge_command_written_another_way_is_the_same_path() {
+        let image = r"C:\L\current\resources\atm-mcp.exe";
+        let procs = vec![
+            p(10, 1, "codex", None, 1),
+            p(20, 10, "atm-mcp", Some(image), 100),
+        ];
+        for command in [
+            r"C:\x\..\L\current\resources\atm-mcp.exe",
+            r"C:\L\.\current\resources\\atm-mcp.exe",
+            "C:/L/current/resources/atm-mcp.exe",
+            r"c:\l\CURRENT\x\y\..\..\resources\atm-mcp.exe",
+        ] {
+            let v = observe_from(&procs, &[command.to_string()], 0);
+            assert_eq!(v["totalPrivateBytes"], 100, "{command}");
+        }
+        // Both sides go through the same key: an image path written another way matches too.
+        let other_image = vec![
+            p(10, 1, "codex", None, 1),
+            p(
+                20,
+                10,
+                "atm-mcp",
+                Some("C:/L/x/../current/resources/ATM-MCP.exe"),
+                100,
+            ),
+        ];
+        let v = observe_from(&other_image, &[image.to_string()], 0);
+        assert_eq!(v["totalPrivateBytes"], 100);
+        // Another file is still another file, however it is written.
+        for command in [
+            r"C:\L\current\resources\..\atm-mcp.exe",
+            r"C:\L\current\atm-mcp.exe\..\resources\x.exe",
+            r"\\server\L\current\resources\atm-mcp.exe",
+        ] {
+            let v = observe_from(&procs, &[command.to_string()], 0);
+            assert_eq!(v["totalPrivateBytes"], 0, "{command}");
+        }
+        assert_eq!(key(r"\\server\share\.\a\..\b"), r"\\server\share\b");
+        assert_eq!(key(r"C:\..\a"), r"c:\..\a");
     }
 
     #[test]
