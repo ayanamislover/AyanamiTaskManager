@@ -86,7 +86,7 @@ enum Outcome {
 fn runtime(
     deadline: Instant,
     stale: Option<&Runtime>,
-    woken: &mut bool,
+    woken: &mut process::Wake,
 ) -> Result<Runtime, String> {
     loop {
         let attempt = descriptor::load().and_then(|current| {
@@ -103,14 +103,14 @@ fn runtime(
                 return Err("ATM_RUNTIME_DESCRIPTOR_INVALID".to_owned());
             }
             Err(RuntimeError::NotReady) => {
-                if !*woken {
-                    *woken = true;
-                    process::wake_desktop();
-                }
+                woken.once();
                 if let Some(reason) = descriptor::source_conflict() {
                     return Err(format!("ATM_SOURCE_CONFLICT: {reason}"));
                 }
-                if let Some(reason) = descriptor::damaged() {
+                // A state left by an earlier run counts once the woken host writes it again,
+                // or when time is up (W8 r8 P2-01).
+                let damaged = descriptor::damaged_report(*woken, Instant::now() >= deadline);
+                if let Some(reason) = damaged {
                     return Err(format!("{DAMAGED}{reason}"));
                 }
                 if Instant::now() >= deadline {
@@ -160,7 +160,7 @@ pub fn call(link: &Link<'_>, message: &Value) -> String {
     let tool = params["name"].as_str().unwrap_or_default().to_owned();
     let original: Map<String, Value> = params["arguments"].as_object().cloned().unwrap_or_default();
     let explicit_op = given(&original, "op_id");
-    let mut woken = false;
+    let mut woken = process::Wake::NotYet;
 
     // ---- the retry context
     let mut context = original.clone();
@@ -387,7 +387,7 @@ fn resolve(
     link: &Link<'_>,
     body: &str,
     deadline: Instant,
-    woken: &mut bool,
+    woken: &mut process::Wake,
 ) -> Result<Resolve, String> {
     let mut stale = None;
     loop {

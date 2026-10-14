@@ -216,7 +216,7 @@ fn transport_message(error: http::Error) -> String {
 /// belong to an unrelated process, so only a newly published instance counts.
 fn wait_for_runtime(stale: Option<&Runtime>) -> Result<Runtime, String> {
     let deadline = Instant::now() + WAIT_FOR_RUNTIME;
-    let mut wake_requested = false;
+    let mut wake = process::Wake::NotYet;
     loop {
         let attempt = descriptor::load().and_then(|current| {
             if stale.is_some_and(|old| old.instance_id == current.instance_id) {
@@ -235,18 +235,17 @@ fn wait_for_runtime(stale: Option<&Runtime>) -> Result<Runtime, String> {
                 return Err("ATM_RUNTIME_DESCRIPTOR_INVALID".to_owned());
             }
             Err(RuntimeError::NotReady) => {
-                if !wake_requested {
-                    wake_requested = true;
-                    process::wake_desktop();
-                }
+                wake.once();
                 // 07 §7: the host serves nothing until the user picks a data source.
                 if let Some(reason) = descriptor::source_conflict() {
                     return Err(format!(
                         "ATM_SOURCE_CONFLICT: ATM 需要用户在窗口里选择数据来源（{reason}）"
                     ));
                 }
-                // W8h: the host serves nothing until the user restores a backup.
-                if let Some(reason) = descriptor::damaged() {
+                // W8h: the host serves nothing until the user restores a backup. A state left by
+                // an earlier run counts once the woken host writes it again, or when time is up.
+                let damaged = descriptor::damaged_report(wake, Instant::now() >= deadline);
+                if let Some(reason) = damaged {
                     return Err(format!(
                         "DATABASE_DAMAGED: ATM 的数据库读不出（{reason}），需要用户先从备份恢复：请用户打开 ATM 窗口按页面上的步骤处理"
                     ));

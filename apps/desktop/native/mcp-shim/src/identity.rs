@@ -63,6 +63,15 @@ pub fn client_process() -> Option<(u32, u64)> {
     None
 }
 
+/// When process `pid` started, in Unix milliseconds (the host's `runtime/host.json` records
+/// the same), or `None` if it cannot be opened.
+pub fn started_at_ms(pid: u32) -> Option<u64> {
+    // FILETIME: 100 ns since 1601.
+    imp::created(pid)?
+        .checked_sub(116_444_736_000_000_000)
+        .map(|t| t / 10_000)
+}
+
 pub struct Proc {
     pub pid: u32,
     pub parent: u32,

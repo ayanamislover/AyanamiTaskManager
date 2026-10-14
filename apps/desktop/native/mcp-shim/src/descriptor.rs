@@ -67,12 +67,54 @@ pub fn source_conflict() -> Option<String> {
     }
 }
 
+/// What a caller waiting for the service reports about `runtime/damaged.json`, once it has
+/// woken the desktop or found none to wake (W8 r8 P2-01). A state left by an earlier run may
+/// be stale: the database may have been put right outside ATM, and the woken host deletes
+/// the file once it is up. So while there is time left after a wake it counts only when the
+/// running host wrote it ([`damaged_by_the_running_host`]). With no desktop to wake, or when
+/// time is up, what is there is all there is.
+pub fn damaged_report(wake: crate::process::Wake, out_of_time: bool) -> Option<String> {
+    damaged_report_in(&data_directory()?, wake, out_of_time)
+}
+
+fn damaged_report_in(
+    root: &std::path::Path,
+    wake: crate::process::Wake,
+    out_of_time: bool,
+) -> Option<String> {
+    match wake {
+        crate::process::Wake::Started if !out_of_time => damaged_by_the_running_host(root),
+        _ => damaged_in(root),
+    }
+}
+
+/// `runtime/damaged.json` was written by the host running now: `runtime/host.json` names a
+/// live process started when it says, and the file is newer than that start. The host
+/// rewrites the file every time it finds the database unreadable.
+pub fn damaged_by_the_running_host(root: &std::path::Path) -> Option<String> {
+    let reason = damaged_in(root)?;
+    let runtime = root.join("runtime");
+    let bytes = std::fs::read(runtime.join("host.json")).ok()?;
+    let record: Value = serde_json::from_slice(&bytes).ok()?;
+    let pid = u32::try_from(record.get("pid")?.as_u64()?).ok()?;
+    let started = record.get("startedAtMs")?.as_u64()?;
+    if !crate::process::pid_alive(pid) || crate::identity::started_at_ms(pid)? != started {
+        return None;
+    }
+    let written = std::fs::metadata(runtime.join("damaged.json"))
+        .and_then(|m| m.modified())
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?;
+    (written.as_millis() >= u128::from(started)).then_some(reason)
+}
+
 /// `N/runtime/damaged.json` says the published database cannot be read (W8h): the host serves
-/// nothing until the user restores a backup with `atm recover --offline`, so waiting cannot help.
-/// Returns the reason to report. A file that exists but cannot be read or parsed still counts,
-/// like the host's own reading of it.
-pub fn damaged() -> Option<String> {
-    let path = data_directory()?.join("runtime").join("damaged.json");
+/// nothing until the user restores a backup with `atm recover --offline`. Returns the reason to
+/// report. A file that exists but cannot be read or parsed still counts, like the host's own
+/// reading of it.
+fn damaged_in(root: &std::path::Path) -> Option<String> {
+    let path = root.join("runtime").join("damaged.json");
     let bytes = match std::fs::read(&path) {
         Ok(bytes) => bytes,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
@@ -321,6 +363,72 @@ mod tests {
         let mut d = descriptor();
         d[key] = value;
         d
+    }
+
+    fn scratch(name: &str) -> std::path::PathBuf {
+        // Under this crate's target directory, not %TEMP%.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("atm-mcp-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("runtime")).unwrap();
+        root
+    }
+
+    fn leave_damaged(root: &std::path::Path, reason: &str) {
+        let state = json!({ "state": "DATABASE_DAMAGED", "since": "s", "generation": "G", "reason": reason });
+        std::fs::write(root.join("runtime").join("damaged.json"), state.to_string()).unwrap();
+    }
+
+    fn host_record(root: &std::path::Path, started_at_ms: u64) {
+        let record = json!({ "pid": std::process::id(), "startedAtMs": started_at_ms });
+        std::fs::write(root.join("runtime").join("host.json"), record.to_string()).unwrap();
+    }
+
+    /// W8 r8 P2-01: after a wake, a damaged state left by an earlier run is not reported until
+    /// the running host writes it (or time is up); with no desktop to wake it is reported at once.
+    #[test]
+    fn a_leftover_damaged_state_counts_only_once_the_running_host_writes_it() {
+        use crate::process::Wake;
+        let root = scratch("damaged-host");
+        leave_damaged(&root, "old");
+        // No host has run since: only when there is nothing to wait for.
+        assert_eq!(damaged_report_in(&root, Wake::Started, false), None);
+        assert_eq!(
+            damaged_report_in(&root, Wake::Started, true).as_deref(),
+            Some("old")
+        );
+        assert_eq!(
+            damaged_report_in(&root, Wake::Impossible, false).as_deref(),
+            Some("old")
+        );
+
+        // This test process plays the running host; the state written after it started counts.
+        let started = crate::identity::started_at_ms(std::process::id()).unwrap();
+        host_record(&root, started);
+        leave_damaged(&root, "fresh");
+        assert_eq!(
+            damaged_report_in(&root, Wake::Started, false).as_deref(),
+            Some("fresh")
+        );
+
+        // Written before the host started: left by an earlier run.
+        std::fs::File::options()
+            .write(true)
+            .open(root.join("runtime").join("damaged.json"))
+            .unwrap()
+            .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_millis(started - 1_000))
+            .unwrap();
+        assert_eq!(damaged_report_in(&root, Wake::Started, false), None);
+
+        // host.json names a process that is not the one alive under that pid.
+        leave_damaged(&root, "fresh");
+        host_record(&root, started - 1);
+        assert_eq!(damaged_report_in(&root, Wake::Started, false), None);
+        // The host deleted it: nothing to report even when time is up.
+        std::fs::remove_file(root.join("runtime").join("damaged.json")).unwrap();
+        assert_eq!(damaged_report_in(&root, Wake::Started, true), None);
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]

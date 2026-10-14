@@ -53,18 +53,43 @@ pub fn desktop_executable(shim: &Path) -> Option<PathBuf> {
     desktop.is_file().then_some(desktop)
 }
 
-/// Start the desktop hidden, detached and without the Node-mode switch.
+/// Whether this bridge has asked the desktop to start yet, and whether one was started.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Wake {
+    #[default]
+    NotYet,
+    Started,
+    /// No desktop next to this shim (a development build), or it could not be started:
+    /// what the data root says now is all there is to report.
+    Impossible,
+}
+
+impl Wake {
+    /// Wakes the desktop the first time it is called.
+    pub fn once(&mut self) {
+        if *self == Wake::NotYet {
+            *self = if wake_desktop() {
+                Wake::Started
+            } else {
+                Wake::Impossible
+            };
+        }
+    }
+}
+
+/// Start the desktop hidden, in its own process group, without the Node-mode switch.
+/// Returns whether a desktop was started.
 ///
-/// This is a plain detached launch, not Job isolation: a desktop woken by an Agent host
-/// can still end with that host (see docs/troubleshooting.md). A spawn failure is
-/// ignored; the caller keeps waiting and reports ATM_RUNTIME_UNAVAILABLE.
-pub fn wake_desktop() {
+/// This is a plain launch, not Job isolation: a desktop woken by an Agent host can still
+/// end with that host (see docs/troubleshooting.md). After a spawn failure the caller
+/// keeps waiting and reports ATM_RUNTIME_UNAVAILABLE.
+pub fn wake_desktop() -> bool {
     let Some(desktop) = std::env::current_exe()
         .ok()
         .as_deref()
         .and_then(desktop_executable)
     else {
-        return;
+        return false;
     };
     let mut command = std::process::Command::new(desktop);
     command
@@ -86,7 +111,7 @@ pub fn wake_desktop() {
         command.creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP);
     }
     // Dropping the Child neither waits for nor kills it.
-    let _ = command.spawn();
+    command.spawn().is_ok()
 }
 
 #[cfg(test)]
