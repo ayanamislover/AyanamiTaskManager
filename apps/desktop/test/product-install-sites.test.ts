@@ -18,6 +18,7 @@ import {
   findProductShortcuts,
   powerShellLiteral,
   productShortcutRoots,
+  REPAIR_SHORTCUT_NAME,
   stopInstalledShimsScript,
   walkProductFiles,
 } from "../../../scripts/product-install-sites.js";
@@ -35,6 +36,8 @@ function shortcutFixture(): string {
   writeFileSync(join(root, "Ayanami", "AyanamiTaskManager Desktop.lnk"), "lnk", "utf8");
   writeFileSync(join(root, "SomethingElse.lnk"), "lnk", "utf8");
   writeFileSync(join(root, "AyanamiTaskManager.txt"), "not a shortcut", "utf8");
+  writeFileSync(join(root, "Ayanami", "ATM 修复.lnk"), "lnk", "utf8");
+  writeFileSync(join(root, "ATM 修复 备份.lnk"), "lnk", "utf8");
   return root;
 }
 
@@ -44,8 +47,23 @@ describe("产品安装位置", () => {
     const found = await findProductShortcuts([root]);
     expect(found.map((path) => path.slice(root.length + 1)).sort()).toEqual([
       "AyanamiTaskManager.lnk",
+      "Ayanami\\ATM 修复.lnk",
       "Ayanami\\AyanamiTaskManager Desktop.lnk",
     ]);
+  });
+
+  // W8 关口在 CI 上：修复入口的名字里没有产品名，查找要认它；名字与 atm-setup 写的是同一个。
+  it("修复入口的名字与 atm-setup 写的一致，应用入口的名字里有产品名", () => {
+    const env = readFileSync(
+      join(process.cwd(), "apps", "desktop", "native", "setup", "src", "env.rs"),
+      "utf8",
+    );
+    const constant = (name: string) =>
+      new RegExp(`pub const ${name}: &str = "([^"]+)";`, "u").exec(env)?.[1];
+    expect(constant("REPAIR_SHORTCUT_NAME")).toBe(REPAIR_SHORTCUT_NAME);
+    expect(constant("SHORTCUT_NAME")?.toLowerCase()).toContain("ayanamitaskmanager");
+    // 阳性对照：读不到常量时不会空转成相等。
+    expect(constant("NO_SUCH_SHORTCUT")).toBeUndefined();
   });
 
   // 快捷方式归 atm-setup 按目标核对归属后删；发布清场只看不删（同名的可能属于便携版）。
@@ -95,6 +113,7 @@ describe("产品安装位置", () => {
 
     expect(found.map((path) => path.slice(root.length + 1)).sort()).toEqual([
       "AyanamiTaskManager.lnk",
+      "Ayanami\\ATM 修复.lnk",
       "Ayanami\\AyanamiTaskManager Desktop.lnk",
     ]);
   });
