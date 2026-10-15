@@ -89,14 +89,22 @@ export function readRunEntries(): Record<string, string> {
   );
 }
 
+/** reg.exe 指定值名的参数：空名字是键的默认值，要写 `/ve`（`/v ""` 指不到它）。 */
+export function valueNameArgs(name: string): string[] {
+  return name === "" ? ["/ve"] : ["/v", name];
+}
+
 export function applyRunRestore(steps: readonly RunRestoreStep[]): void {
   for (const step of steps) {
     if (step.action === "set")
       execFileSync(
         "reg.exe",
-        ["add", RUN_KEY, "/v", step.name, "/t", step.type, "/d", step.data, "/f"],
+        ["add", RUN_KEY, ...valueNameArgs(step.name), "/t", step.type, "/d", step.data, "/f"],
         { windowsHide: true },
       );
-    else execFileSync("reg.exe", ["delete", RUN_KEY, "/v", step.name, "/f"], { windowsHide: true });
+    else
+      execFileSync("reg.exe", ["delete", RUN_KEY, ...valueNameArgs(step.name), "/f"], {
+        windowsHide: true,
+      });
   }
 }

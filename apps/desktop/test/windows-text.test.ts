@@ -6,8 +6,14 @@ import {
   powershellArgs,
   powershellText,
   readShortcut,
+  REGISTRY_FUNCTIONS,
+  REGISTRY_MAIN,
+  registryReply,
   registryValues,
   scheduledTaskXml,
+  TASK_FUNCTIONS,
+  TASK_MAIN,
+  taskReply,
   UTF8_OUTPUT,
   writeShortcut,
 } from "../../../scripts/windows-text.js";
@@ -50,7 +56,8 @@ describe("脚本读 Windows 的文字一律走 Unicode", () => {
     expect(UTF8_OUTPUT).toBe("[Console]::OutputEncoding = [Text.Encoding]::UTF8; ");
     // 计划任务只读：经 Schedule.Service 的 GetTask，不登记、不删除、不经 WMI（ScheduledTasks 模块）。
     const text = readFileSync(join(scriptsDir, "windows-text.ts"), "utf8");
-    expect(text).toContain(".GetTask($env:ATM_TEXT_TASK)");
+    expect(text).toContain(".GetTask($name)");
+    expect(text).toContain("Read-AtmTaskXml $env:ATM_TEXT_TASK");
     expect(text).not.toMatch(/RegisterTask|DeleteTask|Get-ScheduledTask|Export-ScheduledTask/u);
   });
 
@@ -88,8 +95,82 @@ describe("脚本读 Windows 的文字一律走 Unicode", () => {
       c: { type: "REG_DWORD", data: "0xa" },
       d: { type: "REG_NONE", data: "" },
     });
-    expect(parseRegistryJson("")).toEqual({});
+    expect(parseRegistryJson("{}")).toEqual({});
+    // peer r17 P1-02：空输出、不是对象、值的形状不对都不算读到——半份快照会让还原删掉用户原来的值。
+    for (const bad of ["", "[]", "null", '{"a":{"type":"String","data":{}}}', '{"a":"x"}'])
+      expect(() => parseRegistryJson(bad), bad).toThrow();
   });
+
+  // peer r17 P1-02、P2-01、P2-03：换掉读注册表 / 读任务的函数，造出读失败、转换失败，看主体怎么收场。
+  // 不碰真实注册表与计划任务。
+  const FAKE_KEY = `
+function New-AtmFakeKey($values, $kinds, [switch]$failRead) {
+  $k = [pscustomobject]@{ Values = $values; Kinds = $kinds; Fail = [bool]$failRead }
+  $k | Add-Member ScriptMethod GetValueNames { @($this.Values.Keys) }
+  $k | Add-Member ScriptMethod GetValueKind { param($n) $this.Kinds[$n] }
+  $k | Add-Member ScriptMethod GetValue { param($n, $d, $o) if ($this.Fail) { throw 'synthetic read failure' }; ,$this.Values[$n] }
+  return $k
+}
+`;
+  const registryWith = (override: string) =>
+    registryReply(
+      powershellText(`${REGISTRY_FUNCTIONS}${FAKE_KEY}${override}\n${REGISTRY_MAIN}`),
+      "synthetic",
+    );
+  const taskWith = (override: string) =>
+    taskReply(powershellText(`${TASK_FUNCTIONS}\n${override}\n${TASK_MAIN}`), "synthetic");
+
+  it.runIf(process.platform === "win32")(
+    "读失败一律抛出、不出半份快照；值按 reg.exe 的写法保真；只有确定的不在是 null",
+    () => {
+      // 打不开（拒绝访问之类）、读值失败、转换失败：抛出，不是「不在」也不是空快照。
+      expect(() =>
+        registryWith("function Open-AtmKey($key) { throw 'synthetic access denied' }"),
+      ).toThrow(/synthetic access denied/u);
+      expect(() =>
+        registryWith(
+          "function Open-AtmKey($key) { New-AtmFakeKey @{ a = 'x' } @{ a = 'String' } -failRead }",
+        ),
+      ).toThrow(/synthetic read failure/u);
+      expect(() =>
+        registryWith(
+          "function Open-AtmKey($key) { New-AtmFakeKey @{ a = 'x'; b = 'y' } @{ a = 'String'; b = 'String' } }; " +
+            "function Convert-AtmValue($kind, $v) { if ($v -eq 'y') { throw 'synthetic conversion failure' }; [string]$v }",
+        ),
+      ).toThrow(/synthetic conversion failure/u);
+      // 确定不在：null。
+      expect(registryWith("function Open-AtmKey($key) { $null }")).toBeNull();
+      // 高位整数按位、REG_NONE 与二进制是十六进制、多字符串用 \0、默认值（空名字）照样在。
+      expect(
+        registryWith(
+          "function Open-AtmKey($key) { New-AtmFakeKey " +
+            "@{ dword = [int32]-1; ten = [int32]10; qword = [int64]-1; none = [byte[]](0, 255, 128); bin = [byte[]](1); multi = [string[]]('a', 'b'); expand = '%X%'; '' = 'default' } " +
+            "@{ dword = 'DWord'; ten = 'DWord'; qword = 'QWord'; none = 'None'; bin = 'Binary'; multi = 'MultiString'; expand = 'ExpandString'; '' = 'String' } }",
+        ),
+      ).toEqual({
+        dword: { type: "REG_DWORD", data: "0xffffffff" },
+        ten: { type: "REG_DWORD", data: "0xa" },
+        qword: { type: "REG_QWORD", data: "0xffffffffffffffff" },
+        none: { type: "REG_NONE", data: "00FF80" },
+        bin: { type: "REG_BINARY", data: "01" },
+        multi: { type: "REG_MULTI_SZ", data: "a\\0b" },
+        expand: { type: "REG_EXPAND_SZ", data: "%X%" },
+        "": { type: "REG_SZ", data: "default" },
+      });
+
+      // 任务：读 Xml 失败、读出空的或不是任务 XML 都抛出；只有确定没有登记是 null。
+      expect(() =>
+        taskWith("function Read-AtmTaskXml($name) { throw 'synthetic Xml getter failure' }"),
+      ).toThrow(/synthetic Xml getter failure/u);
+      expect(() => taskWith("function Read-AtmTaskXml($name) { '' }")).toThrow();
+      expect(() => taskWith("function Read-AtmTaskXml($name) { 'not xml' }")).toThrow();
+      expect(taskWith("function Read-AtmTaskXml($name) { $null }")).toBeNull();
+      expect(
+        taskWith("function Read-AtmTaskXml($name) { '<?xml version=\"1.0\"?><Task></Task>' }"),
+      ).toBe('<?xml version="1.0"?><Task></Task>');
+    },
+    120_000,
+  );
 
   // 动态：系统代码页（936 或 1252）都表示不了的字符原样往返。
   const unicode = "ő Ω 😀 中文";

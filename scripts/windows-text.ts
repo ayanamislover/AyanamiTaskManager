@@ -47,7 +47,7 @@ export function powershellText(
   });
 }
 
-/** 键不在、任务不在：脚本以这个码退出。 */
+/** 键不在、任务不在：脚本以这个码退出。别的失败退出 2，stdout 什么都不写。 */
 const ABSENT = 3;
 
 export type RegistryValue = { type: string; data: string };
@@ -59,63 +59,130 @@ const REGISTRY_TYPES: Record<string, string> = {
   DWord: "REG_DWORD",
   QWord: "REG_QWORD",
   MultiString: "REG_MULTI_SZ",
+  None: "REG_NONE",
 };
 
-// 值的写法与 reg.exe query 一样：二进制是连续的大写十六进制，DWORD / QWORD 是 0x 加小写十六进制，
-// 多字符串用 `\0` 隔开；REG_EXPAND_SZ 不展开。
-const REGISTRY_SCRIPT =
-  "$p = 'Registry::' + $env:ATM_TEXT_KEY; " +
-  `if (-not (Test-Path -LiteralPath $p)) { exit ${ABSENT} }; ` +
-  "$k = Get-Item -LiteralPath $p; $o = [ordered]@{}; " +
+/**
+ * 读注册表的两个函数（W8 关口 peer r17 P1-02、P2-01）。主体（{@link REGISTRY_MAIN}）只经它们碰注册表，
+ * 用例换掉它们来造出读失败、转换失败。
+ * - `Open-AtmKey`：只读打开；根照 reg.exe 的写法（`HKCU`、`HKEY_CURRENT_USER` 等）。键不在是 `$null`
+ *   （`OpenSubKey` 的约定），没有权限等一律抛出——不用 `Test-Path`，它把拒绝访问也当成「不在」。
+ * - `Convert-AtmValue`：值写成 reg.exe query 的样子：二进制（含 REG_NONE 与未知类型）是连续的大写十六进制；
+ *   DWORD / QWORD 按位取十六进制（-1 是 `0xffffffff`；`[uint32]` 转换遇到负数会出错，值就成了空对象）；
+ *   多字符串用 `\0` 隔开；REG_EXPAND_SZ 不展开。
+ */
+export const REGISTRY_FUNCTIONS =
+  "function Open-AtmKey([string]$key) { " +
+  "$i = $key.IndexOf([char]92); " +
+  "$hive = if ($i -lt 0) { $key } else { $key.Substring(0, $i) }; " +
+  "$sub = if ($i -lt 0) { '' } else { $key.Substring($i + 1) }; " +
+  "$root = switch ($hive.ToUpperInvariant()) { " +
+  "{ $_ -in 'HKCU', 'HKEY_CURRENT_USER' } { [Microsoft.Win32.Registry]::CurrentUser } " +
+  "{ $_ -in 'HKLM', 'HKEY_LOCAL_MACHINE' } { [Microsoft.Win32.Registry]::LocalMachine } " +
+  "{ $_ -in 'HKCR', 'HKEY_CLASSES_ROOT' } { [Microsoft.Win32.Registry]::ClassesRoot } " +
+  "{ $_ -in 'HKU', 'HKEY_USERS' } { [Microsoft.Win32.Registry]::Users } " +
+  "{ $_ -in 'HKCC', 'HKEY_CURRENT_CONFIG' } { [Microsoft.Win32.Registry]::CurrentConfig } " +
+  "default { throw ('unknown registry hive: ' + $hive) } }; " +
+  "if ($sub -eq '') { return $root }; return $root.OpenSubKey($sub, $false) }; " +
+  "function Convert-AtmValue([string]$kind, $v) { " +
+  "switch ($kind) { " +
+  "{ $_ -in 'DWord', 'QWord' } { return '0x' + $v.ToString('x') } " +
+  "'MultiString' { return [string]::Join('\\0', [string[]]$v) } " +
+  "{ $_ -in 'String', 'ExpandString' } { return [string]$v } " +
+  "default { return -join ([byte[]]$v | ForEach-Object { $_.ToString('X2') }) } } }; ";
+
+/**
+ * 读注册表的主体：任何一步出错（打开、列名字、读值、转换、序列化）都以 2 退出，stdout 什么都不写——
+ * 结果攒齐了才一次写出，不会有半份快照。只有确定的「键不在」以 {@link ABSENT} 退出。
+ */
+export const REGISTRY_MAIN =
+  "$ErrorActionPreference = 'Stop'; " +
+  "try { " +
+  "$k = Open-AtmKey $env:ATM_TEXT_KEY; " +
+  `if ($null -eq $k) { exit ${ABSENT} }; ` +
+  "$o = [ordered]@{}; " +
   "foreach ($n in $k.GetValueNames()) { " +
   "$kind = $k.GetValueKind($n).ToString(); " +
-  "$v = $k.GetValue($n, $null, 'DoNotExpandEnvironmentNames'); " +
-  "$d = switch ($kind) { " +
-  "'Binary' { -join ($v | ForEach-Object { $_.ToString('X2') }) } " +
-  "'DWord' { '0x' + ([uint32]$v).ToString('x') } " +
-  "'QWord' { '0x' + ([uint64]$v).ToString('x') } " +
-  "'MultiString' { $v -join '\\0' } " +
-  "default { [string]$v } }; " +
-  "$o[$n] = [ordered]@{ type = $kind; data = $d } }; " +
-  "ConvertTo-Json -InputObject $o -Compress -Depth 3";
+  "$o[$n] = [ordered]@{ type = $kind; data = (Convert-AtmValue $kind $k.GetValue($n, $null, 'DoNotExpandEnvironmentNames')) } }; " +
+  "$json = ConvertTo-Json -InputObject $o -Compress -Depth 3 " +
+  "} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 2 }; " +
+  "[Console]::Out.Write($json)";
 
-/** 注册表 JSON（{@link registryValues} 的脚本的输出）换成 reg.exe 的类型名。 */
+/**
+ * 注册表 JSON（{@link REGISTRY_MAIN} 的输出）换成 reg.exe 的类型名。形状不对（不是对象、某个值没有字符串
+ * 的 type / data、空输出）一律抛出：半份或坏掉的快照会让还原把用户原来的值当成本轮新加的删掉（peer r17 P1-02）。
+ */
 export function parseRegistryJson(json: string): Record<string, RegistryValue> {
-  const parsed = JSON.parse(json || "{}") as Record<string, { type: string; data: string }>;
+  const parsed: unknown = JSON.parse(json);
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
+    throw new Error(`注册表读出的不是对象：${json.slice(0, 200)}`);
   return Object.fromEntries(
-    Object.entries(parsed).map(([name, value]) => [
-      name,
-      { type: REGISTRY_TYPES[value.type] ?? "REG_NONE", data: value.data },
-    ]),
+    Object.entries(parsed as Record<string, unknown>).map(([name, value]) => {
+      const entry = value as { type?: unknown; data?: unknown } | null;
+      if (!entry || typeof entry.type !== "string" || typeof entry.data !== "string")
+        throw new Error(`注册表值「${name}」的形状不对：${JSON.stringify(value)}`);
+      return [name, { type: REGISTRY_TYPES[entry.type] ?? "REG_NONE", data: entry.data }];
+    }),
   );
 }
 
-/** 一个注册表键（如 `HKCU\Software\…`）的全部值；键不在是 null，读失败抛出。只读。 */
-export function registryValues(key: string): Record<string, RegistryValue> | null {
-  const result = powershellText(REGISTRY_SCRIPT, { vars: { ATM_TEXT_KEY: key } });
+/** 读注册表脚本的结果：退出 {@link ABSENT} 是键不在（null）；0 且输出完整才算读到；别的一律抛出。 */
+export function registryReply(
+  result: SpawnSyncReturns<string>,
+  key: string,
+): Record<string, RegistryValue> | null {
   if (result.error) throw result.error;
   if (result.status === ABSENT) return null;
   if (result.status !== 0)
     throw new Error(`读注册表 ${key} 失败（${result.status}）：${result.stderr}`);
-  return parseRegistryJson(result.stdout.trim());
+  return parseRegistryJson(result.stdout);
 }
 
-// 经 Schedule.Service（COM），不经 ScheduledTasks 模块（它走 WMI）。0x80070002 是「没有这个任务」。
-const TASK_SCRIPT =
+/** 一个注册表键（如 `HKCU\Software\…`）的全部值；键不在是 null，读失败抛出。只读。 */
+export function registryValues(key: string): Record<string, RegistryValue> | null {
+  return registryReply(
+    powershellText(REGISTRY_FUNCTIONS + REGISTRY_MAIN, { vars: { ATM_TEXT_KEY: key } }),
+    key,
+  );
+}
+
+/**
+ * 读计划任务定义的函数（W8 关口 peer r17 P2-03）。经 Schedule.Service（COM），不经 ScheduledTasks 模块
+ * （它走 WMI）。只有 0x80070002（没有这个任务）返回 `$null`；连接、取任务、读 Xml 的别的失败都抛出。
+ */
+export const TASK_FUNCTIONS =
+  "function Read-AtmTaskXml([string]$name) { " +
   "$s = New-Object -ComObject Schedule.Service; $s.Connect(); " +
-  "try { $t = $s.GetFolder('\\').GetTask($env:ATM_TEXT_TASK) } catch { " +
+  "try { $t = $s.GetFolder([string][char]92).GetTask($name) } catch { " +
   "$e = $_.Exception; while ($e.InnerException) { $e = $e.InnerException }; " +
-  `if ($e.HResult -eq -2147024894) { exit ${ABSENT} }; exit 2 }; ` +
-  "[Console]::Out.Write($t.Xml)";
+  "if ($e.HResult -eq -2147024894) { return $null }; throw }; " +
+  "return [string]$t.Xml }; ";
+
+/** 读任务定义的主体：出错或读出来的不是任务 XML 都以 2 退出，stdout 什么都不写。 */
+export const TASK_MAIN =
+  "$ErrorActionPreference = 'Stop'; " +
+  "try { " +
+  "$x = Read-AtmTaskXml $env:ATM_TEXT_TASK; " +
+  `if ($null -eq $x) { exit ${ABSENT} }; ` +
+  "if (-not $x.Contains('<Task')) { throw 'the task definition read back is not task XML' } " +
+  "} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 2 }; " +
+  "[Console]::Out.Write($x)";
+
+/** 读任务脚本的结果：退出 {@link ABSENT} 是没有登记（null）；0 且是任务 XML 才算读到；别的一律抛出。 */
+export function taskReply(result: SpawnSyncReturns<string>, name: string): string | null {
+  if (result.error) throw result.error;
+  if (result.status === ABSENT) return null;
+  if (result.status !== 0 || !result.stdout.includes("<Task"))
+    throw new Error(`读计划任务「${name}」失败（${result.status}）：${result.stderr}`);
+  return result.stdout;
+}
 
 /** 计划任务根目录下这个名字的任务定义（XML）；没有登记是 null，读失败抛出。只读，不改计划任务。 */
 export function scheduledTaskXml(name: string): string | null {
-  const result = powershellText(TASK_SCRIPT, { vars: { ATM_TEXT_TASK: name } });
-  if (result.error) throw result.error;
-  if (result.status === ABSENT) return null;
-  if (result.status !== 0)
-    throw new Error(`读计划任务「${name}」失败（${result.status}）：${result.stderr}`);
-  return result.stdout;
+  return taskReply(
+    powershellText(TASK_FUNCTIONS + TASK_MAIN, { vars: { ATM_TEXT_TASK: name } }),
+    name,
+  );
 }
 
 /** Shell.Application 的一个快捷方式条目上跑 `select`，返回它的 JSON。 */

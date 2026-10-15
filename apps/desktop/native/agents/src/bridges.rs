@@ -93,10 +93,9 @@ fn key(path: &str) -> String {
     let ends_in_separator = path.ends_with(['\\', '/']);
     let mut out: Vec<&str> = parts[..root].to_vec();
     for (i, part) in parts.iter().enumerate().skip(root) {
+        // 按字面：重复的分隔符也是路径的一部分（peer r17 P2-02），`\\?\C:\x\\a` 打不开，不是 `C:\x\a`。
         if verbatim {
-            if !part.is_empty() {
-                out.push(part);
-            }
+            out.push(part);
             continue;
         }
         match win32_segment(part, i == last && !ends_in_separator) {
@@ -583,6 +582,9 @@ mod tests {
             (r"\\?\C:\x\..\y", r"c:\x\..\y"),
             (r"\\?\C:\x\.\y", r"c:\x\.\y"),
             (r"\\?\C:\x/y", r"c:\x/y"),
+            (r"\\?\C:\x\\atm-mcp.exe", r"c:\x\\atm-mcp.exe"),
+            (r"\\?\C:\x\atm-mcp.exe\", r"c:\x\atm-mcp.exe\"),
+            (r"\\?\C:\", r"c:\"),
         ] {
             assert_eq!(key(path), want, "{path}");
         }
@@ -597,6 +599,7 @@ mod tests {
         }
         for command in [
             r"\\?\C:\synthetic\atm-mcp.exe.",
+            r"\\?\C:\synthetic\\atm-mcp.exe",
             r"C:\synthetic\atm-mcp.ex.",
             r"C:\synthetic.x\atm-mcp.exe",
         ] {

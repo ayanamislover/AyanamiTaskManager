@@ -6,6 +6,7 @@ import {
   loginItemRestorePlan,
   RUN_VALUE,
   type RunSnapshot,
+  valueNameArgs,
 } from "../../../scripts/login-item-guard.js";
 import { parseRegistryJson } from "../../../scripts/windows-text.js";
 
@@ -60,6 +61,15 @@ describe("smokes must not damage the real autostart entry", () => {
       loginItemRestorePlan({ [NAME]: sz(production) }, { [NAME]: sz(changed) }, owned),
     ).toEqual([]);
     expect(loginItemRestorePlan({}, { [NAME]: sz(production) }, owned)).toEqual([]);
+  });
+
+  // peer r17：快照里空名字是键的默认值，reg.exe 要写 /ve 才指得到它（/v "" 不行）。
+  it("restores a default value with /ve", () => {
+    expect(valueNameArgs("")).toEqual(["/ve"]);
+    expect(valueNameArgs(NAME)).toEqual(["/v", NAME]);
+    const source = readFileSync(join(process.cwd(), "scripts/login-item-guard.ts"), "utf8");
+    expect(source).not.toMatch(/"\/v", step\.name/u);
+    expect(source.match(/\.\.\.valueNameArgs\(step\.name\)/gu)).toHaveLength(2);
   });
 
   it("keeps the registry type on restore", () => {
