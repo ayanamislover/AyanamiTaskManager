@@ -59,6 +59,9 @@ fn root_len(parts: &[&str]) -> usize {
 ///
 /// 盘符相对路径（`C:a`、`C:`）相对于那个盘的当前目录，不是 `C:\a`（W8 关口 peer r15 P2-02）：键写成 `c:`
 /// 紧跟相对部分的键，与 `c:\…` 区分开。
+///
+/// 名字结尾的 `.` 与空格照 Win32 的做法去掉（[`win32_segment`]，W8 关口 peer r16 P2-02）：`atm-mcp.exe.` 打开的
+/// 就是 `atm-mcp.exe`。`\\?\` 开头的路径按字面：不消 `.`、`..`，不去结尾，`/` 也不是分隔符。
 fn key(path: &str) -> String {
     if let Some(rest) = drive_relative(path) {
         let rest = if rest.is_empty() {
@@ -68,7 +71,12 @@ fn key(path: &str) -> String {
         };
         return format!("{}{rest}", &path[..2]).to_lowercase();
     }
-    let mut parts: Vec<&str> = path.split(['\\', '/']).collect();
+    let verbatim = path.starts_with(r"\\?\");
+    let mut parts: Vec<&str> = if verbatim {
+        path.split('\\').collect()
+    } else {
+        path.split(['\\', '/']).collect()
+    };
     if let ["", "", "?" | ".", rest @ ..] = parts.as_slice() {
         parts = match rest {
             [unc, server, share, tail @ ..] if unc.eq_ignore_ascii_case("unc") => {
@@ -81,9 +89,17 @@ fn key(path: &str) -> String {
         };
     }
     let root = root_len(&parts);
+    let last = parts.len() - 1;
+    let ends_in_separator = path.ends_with(['\\', '/']);
     let mut out: Vec<&str> = parts[..root].to_vec();
-    for part in &parts[root..] {
-        match *part {
+    for (i, part) in parts.iter().enumerate().skip(root) {
+        if verbatim {
+            if !part.is_empty() {
+                out.push(part);
+            }
+            continue;
+        }
+        match win32_segment(part, i == last && !ends_in_separator) {
             "" | "." => {}
             ".." if out.len() > root && out.last() != Some(&"..") => {
                 out.pop();
@@ -101,6 +117,24 @@ fn key(path: &str) -> String {
         joined
     };
     joined.to_lowercase()
+}
+
+/// Win32 路径（不是 `\\?\`）里一段名字照 Windows 规范化之后的样子（.NET「File path formats」的
+/// 规则）：一段以单个 `.` 结尾就去掉那个 `.`；最后一段（路径不以分隔符结尾时）去掉结尾所有的 `.` 与空格。
+/// `.`、`..` 本身不动；去完什么都不剩的照原样留着。
+fn win32_segment(part: &str, last: bool) -> &str {
+    if part == "." || part == ".." {
+        return part;
+    }
+    let trimmed = if last {
+        part.trim_end_matches(['.', ' '])
+    } else {
+        match part.strip_suffix('.') {
+            Some(rest) if !rest.ends_with('.') => rest,
+            _ => part,
+        }
+    };
+    if trimmed.is_empty() { part } else { trimmed }
 }
 
 /// 盘符相对路径（盘符与冒号后面不是分隔符）去掉盘符之后的部分；别的路径是 `None`。
@@ -527,6 +561,48 @@ mod tests {
         let same = |_: &str| Some((7, 0));
         let v = observe_from(&procs, &["C:renamed.exe".to_string()], 0, &same);
         assert_eq!(v["totalPrivateBytes"], 0);
+    }
+
+    /// W8 关口 peer r16 P2-02：Win32 路径名字结尾的 `.` 与空格由 Windows 去掉，`atm-mcp.exe.` 打开的就是
+    /// `atm-mcp.exe`；`\\?\` 路径按字面，结尾的 `.` 是名字的一部分，不消 `.`、`..`。
+    #[test]
+    fn a_name_ending_in_dots_or_spaces_is_the_name_without_them() {
+        for (path, want) in [
+            (r"C:\x\atm-mcp.exe.", r"c:\x\atm-mcp.exe"),
+            (r"C:\x\atm-mcp.exe. . ", r"c:\x\atm-mcp.exe"),
+            (r"C:\x.\atm-mcp.exe", r"c:\x\atm-mcp.exe"),
+            (r"C:\x..\atm-mcp.exe", r"c:\x..\atm-mcp.exe"),
+            (r"C:\x \atm-mcp.exe", r"c:\x \atm-mcp.exe"),
+            (r"C:\x\a.\", r"c:\x\a"),
+            (r"C:\x\...", r"c:\x\..."),
+            ("atm-mcp.exe.", "atm-mcp.exe"),
+            ("C:atm-mcp.exe.", "c:atm-mcp.exe"),
+            (r"\\.\C:\x\atm-mcp.exe.", r"c:\x\atm-mcp.exe"),
+            // `\\?\` 按字面。
+            (r"\\?\C:\x\atm-mcp.exe.", r"c:\x\atm-mcp.exe."),
+            (r"\\?\C:\x\..\y", r"c:\x\..\y"),
+            (r"\\?\C:\x\.\y", r"c:\x\.\y"),
+            (r"\\?\C:\x/y", r"c:\x/y"),
+        ] {
+            assert_eq!(key(path), want, "{path}");
+        }
+        let image = r"C:\synthetic\atm-mcp.exe";
+        let procs = vec![
+            p(10, 1, "codex", None, 1),
+            p(20, 10, "atm-mcp", Some(image), 100),
+        ];
+        for command in [r"C:\synthetic\atm-mcp.exe.", r"C:\synthetic\atm-mcp.exe  "] {
+            let v = observe_from(&procs, &[command.to_string()], 0, &no_id);
+            assert_eq!(v["totalPrivateBytes"], 100, "same file: {command}");
+        }
+        for command in [
+            r"\\?\C:\synthetic\atm-mcp.exe.",
+            r"C:\synthetic\atm-mcp.ex.",
+            r"C:\synthetic.x\atm-mcp.exe",
+        ] {
+            let v = observe_from(&procs, &[command.to_string()], 0, &no_id);
+            assert_eq!(v["totalPrivateBytes"], 0, "another file: {command}");
+        }
     }
 
     /// W8 关口 peer r14 P2-02：桥命令写的是 `L\current\…`（目录链接），进程映像是链接指向的物理目录里的文件。

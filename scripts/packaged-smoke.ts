@@ -31,6 +31,7 @@ import {
 } from "../apps/desktop/src/mcp-launch.js";
 import { rendererRequest } from "./renderer-user-request.js";
 import { reclaimSmokeWorkspaces } from "./smoke-workspace.js";
+import { powershellArgs } from "./windows-text.js";
 
 type Runtime = {
   endpoint: string;
@@ -436,13 +437,7 @@ const windowsPowerShell = join(
 function clipboard(script: string, input?: string): string {
   const result = spawnSync(
     windowsPowerShell,
-    [
-      "-NoProfile",
-      "-NonInteractive",
-      "-STA",
-      "-Command",
-      `Add-Type -AssemblyName System.Windows.Forms; ${script}`,
-    ],
+    powershellArgs(`Add-Type -AssemblyName System.Windows.Forms; ${script}`, ["-STA"]),
     { encoding: "utf8", windowsHide: true, ...(input === undefined ? {} : { input }) },
   );
   if (result.status !== 0) throw new Error(`CLIPBOARD_${String(result.status)}: ${result.stderr}`);

@@ -57,6 +57,7 @@ import {
   type SmokeRenderer,
 } from "./smoke-host.js";
 import { withPowerShellScratch } from "./powershell-scratch.js";
+import { powershellArgs } from "./windows-text.js";
 
 const ENTRY = "https://atm.localhost/index.html";
 const RESOLVE_PREFIX = "window.__atmBridge&&window.__atmBridge.resolve(";
@@ -206,7 +207,7 @@ public static class AtmSmokeTree {
 [AtmSmokeTree]::List()
 `;
   const result = withPowerShellScratch((env) =>
-    spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+    spawnSync("powershell.exe", powershellArgs(script), {
       encoding: "utf8",
       windowsHide: true,
       timeout: 30_000,

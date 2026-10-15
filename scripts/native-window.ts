@@ -2,6 +2,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { powershellScratch } from "./powershell-scratch.js";
+import { powershellArgs } from "./windows-text.js";
 
 export type ScreenBox = { x: number; y: number; width: number; height: number };
 
@@ -76,15 +77,10 @@ export class NativeWindowProbe {
     try {
       this.child = spawn(
         windowsPowerShell,
-        [
-          "-NoLogo",
-          "-NoProfile",
-          "-NonInteractive",
-          "-ExecutionPolicy",
-          "Bypass",
-          "-Command",
+        powershellArgs(
           `& ([scriptblock]::Create([IO.File]::ReadAllText('${literal}', [Text.Encoding]::UTF8)))`,
-        ],
+          ["-NoLogo", "-ExecutionPolicy", "Bypass"],
+        ),
         { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: scratch.env },
       );
     } catch (error) {

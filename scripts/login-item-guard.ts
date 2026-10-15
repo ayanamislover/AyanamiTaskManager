@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { registryValues } from "./windows-text.js";
 
 /**
  * The "start at login" switch writes the AppUserModelId value under HKCU Run, and that
@@ -70,25 +71,15 @@ export const RUN_VALUE = "com.squirrel.AyanamiTaskManagerDesktop.AyanamiTaskMana
 
 const RUN_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 
-export function parseRunQuery(output: string): RunSnapshot {
-  const entries: RunSnapshot = {};
-  for (const line of output.split(/\r?\n/u)) {
-    // "    <name>    REG_SZ    <data>" — data itself may contain runs of spaces.
-    const match = /^ {4}(.+?) {4}(REG_[A-Z_]+) {4}(.*)$/u.exec(line);
-    if (match) entries[match[1]!] = { type: match[2]!, data: match[3]! };
-  }
-  return entries;
-}
-
 /**
- * The Run key as it is now. A failed query throws: an empty snapshot would make the
- * restore believe every entry was added by this run, or that none existed before.
+ * The Run key as it is now, read through .NET (see windows-text.ts: reg.exe prints in the system
+ * code page, so a value naming a path outside it would not compare). A failed read throws: an empty
+ * snapshot would make the restore believe every entry was added by this run, or that none existed
+ * before. A missing key has no entries.
  */
 export function readRunSnapshot(): RunSnapshot {
   if (process.platform !== "win32") return {};
-  return parseRunQuery(
-    execFileSync("reg.exe", ["query", RUN_KEY], { encoding: "utf8", windowsHide: true }),
-  );
+  return registryValues(RUN_KEY) ?? {};
 }
 
 /** Values only, for assertions. */

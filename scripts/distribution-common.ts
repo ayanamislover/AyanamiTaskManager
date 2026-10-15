@@ -15,6 +15,7 @@ import { agentFetch } from "./agent-fetch.js";
 import { parseTasklistCsv, type AppProcess } from "./app-processes.js";
 import type { BinarySet } from "./candidate-binaries.js";
 import { withPowerShellScratch } from "./powershell-scratch.js";
+import { powershellArgs } from "./windows-text.js";
 
 export type Check = { name: string; passed: boolean; detail?: string };
 export type Runtime = { endpoint: string; token: string; pid: number; version: string };
@@ -166,11 +167,11 @@ export function probeValue(
 /** 跑 `[AtmWindows]::<call>`，返回它打印的数（见 {@link probeValue}）。 */
 function windowProbe(call: string): number {
   const result = withPowerShellScratch((env) =>
-    spawnSync(
-      "powershell.exe",
-      ["-NoProfile", "-NonInteractive", "-Command", `${WINDOW_PROBE}[AtmWindows]::${call}`],
-      { encoding: "utf8", windowsHide: true, env },
-    ),
+    spawnSync("powershell.exe", powershellArgs(`${WINDOW_PROBE}[AtmWindows]::${call}`), {
+      encoding: "utf8",
+      windowsHide: true,
+      env,
+    }),
   );
   return probeValue(call, result);
 }

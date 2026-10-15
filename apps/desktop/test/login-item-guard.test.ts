@@ -4,10 +4,14 @@ import { describe, expect, it } from "vitest";
 import {
   findRunEntry,
   loginItemRestorePlan,
-  parseRunQuery,
   RUN_VALUE,
   type RunSnapshot,
 } from "../../../scripts/login-item-guard.js";
+import { parseRegistryJson } from "../../../scripts/windows-text.js";
+
+/** readRunSnapshot 读到的形状：windows-text.ts 的注册表脚本输出（.NET 的类型名）。 */
+const runKey = (values: Record<string, { type: string; data: string }>) =>
+  parseRegistryJson(JSON.stringify(values));
 
 const productionExe =
   "C:\\Users\\x\\AppData\\Local\\AyanamiTaskManagerDesktop\\AyanamiTaskManager.exe";
@@ -66,11 +70,9 @@ describe("smokes must not damage the real autostart entry", () => {
     expect(loginItemRestorePlan({ [NAME]: expand }, { [NAME]: sz(smoke) }, owned)).toEqual([
       { action: "set", name: NAME, type: "REG_EXPAND_SZ", data: expand.data },
     ]);
-    expect(
-      parseRunQuery(
-        `\r\nHKEY_CURRENT_USER\\...\\Run\r\n    ${NAME}    REG_EXPAND_SZ    ${expand.data}\r\n`,
-      ),
-    ).toEqual({ [NAME]: expand });
+    expect(runKey({ [NAME]: { type: "ExpandString", data: expand.data } })).toEqual({
+      [NAME]: expand,
+    });
   });
 
   it("does nothing when the key is as it was", () => {
@@ -134,9 +136,9 @@ describe("smokes must not damage the real autostart entry", () => {
   // 也是同一个值。安装会改写它、卸载会删它。
   it("treats value names that differ only in case as the same value", () => {
     const upper = NAME.toUpperCase();
-    const query = `\r\nHKEY_CURRENT_USER\\...\\Run\r\n    ${upper}    REG_SZ    ${production}\r\n`;
-    expect(findRunEntry(parseRunQuery(query), RUN_VALUE)).toEqual(sz(production));
-    expect(findRunEntry(parseRunQuery(query), "SomethingElse")).toBeUndefined();
+    const snapshot = runKey({ [upper]: { type: "String", data: production } });
+    expect(findRunEntry(snapshot, RUN_VALUE)).toEqual(sz(production));
+    expect(findRunEntry(snapshot, "SomethingElse")).toBeUndefined();
     // 本轮把同一个值改写成了自己的：放回用户原来的，而不是当成本轮新加的删掉。
     expect(loginItemRestorePlan({ [upper]: sz(production) }, { [NAME]: sz(smoke) }, owned)).toEqual(
       [{ action: "set", name: upper, type: "REG_SZ", data: production }],

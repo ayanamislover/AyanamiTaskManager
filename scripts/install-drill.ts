@@ -54,6 +54,15 @@ import {
   packageNative,
 } from "./package-native.js";
 import { resolveSystemTool } from "./system-tar.js";
+import {
+  powershellArgs,
+  powershellText,
+  readShortcut,
+  readShortcutIdentity,
+  registryValues,
+  writeShortcut,
+  type ShortcutFields,
+} from "./windows-text.js";
 
 const root = resolve(process.cwd());
 const drillRoot = resolve(root, "output", "drill");
@@ -202,16 +211,8 @@ class Sandbox {
 }
 
 function processes(prefix: string): Array<{ pid: number; path: string }> {
-  const script =
-    "Get-Process | Where-Object { $_.Path } | ForEach-Object { [pscustomobject]@{ pid = $_.Id; path = $_.Path } } | ConvertTo-Json -Compress";
-  const result = spawnSync(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-Command", script],
-    {
-      encoding: "utf8",
-      windowsHide: true,
-      maxBuffer: 16 * 1024 * 1024,
-    },
+  const result = powershellText(
+    "Get-Process | Where-Object { $_.Path } | ForEach-Object { [pscustomobject]@{ pid = $_.Id; path = $_.Path } } | ConvertTo-Json -Compress",
   );
   const parsed = JSON.parse(result.stdout.trim() || "[]") as unknown;
   const list = (Array.isArray(parsed) ? parsed : [parsed]) as Array<{ pid: number; path: string }>;
@@ -263,72 +264,27 @@ function reg(args: string[]): SpawnSyncReturns<string> {
   return spawnSync("reg.exe", args, { encoding: "utf8", windowsHide: true });
 }
 
+/** 值名不分大小写，与注册表一样。 */
 function regValue(key: string, name: string): string | null {
-  const result = reg(["query", key, "/v", name]);
-  if (result.status !== 0) return null;
-  const line = result.stdout.split(/\r?\n/u).find((row) => row.trim().startsWith(name));
-  return line
-    ? line
-        .trim()
-        .split(/\s{4,}/u)
-        .slice(2)
-        .join("    ")
-    : null;
+  const values = registryValues(key) ?? {};
+  const found = Object.keys(values).find(
+    (candidate) => candidate.toLowerCase() === name.toLowerCase(),
+  );
+  return found === undefined ? null : values[found]!.data;
 }
 
-/**
- * Shell.Application for one shortcut file: the path goes in through an environment variable
- * (never spliced into the script) and the reply comes back as UTF-8.
- *
- * Not WScript.Shell: its shortcut object is bound to the ANSI code page. On an English system
- * (the CI runner, code page 1252) it cannot open `ATM 修复.lnk` and reads back nothing — the
- * repair-shortcut check failed there while it passed on a Chinese system (W8 gate, third CI run).
- */
-function shellItem(path: string, select: string): string {
-  const script =
-    "$p = $env:ATM_DRILL_SHORTCUT; " +
-    "$item = (New-Object -ComObject Shell.Application).Namespace([IO.Path]::GetDirectoryName($p)).ParseName([IO.Path]::GetFileName($p)); " +
-    "[Console]::OutputEncoding = [Text.Encoding]::UTF8; " +
-    `${select} | ConvertTo-Json -Compress`;
-  const result = spawnSync(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-Command", script],
-    {
-      encoding: "utf8",
-      windowsHide: true,
-      env: { ...process.env, ATM_DRILL_SHORTCUT: path },
-    },
-  );
-  return result.stdout.trim();
-}
-
-function shortcut(path: string): Record<string, string> | null {
-  if (!existsSync(path)) return null;
-  const reply = shellItem(
-    path,
-    "$l = $item.GetLink; [pscustomobject]@{ target = $l.Path; args = $l.Arguments; workdir = $l.WorkingDirectory }",
-  );
-  return JSON.parse(reply || "null") as Record<string, string> | null;
+/** The shortcut's target, arguments and working directory (Shell.Application, see windows-text.ts). */
+function shortcut(path: string): ShortcutFields | null {
+  return existsSync(path) ? readShortcut(path) : null;
 }
 
 /** AppUserModel.ID and ToastActivatorCLSID via the Shell property system. */
-function shortcutIdentity(path: string): { aumid: string; toast: string } {
-  const reply = shellItem(
-    path,
-    "[pscustomobject]@{ aumid = [string]$item.ExtendedProperty('System.AppUserModel.ID'); toast = [string]$item.ExtendedProperty('System.AppUserModel.ToastActivatorCLSID') }",
-  );
-  return JSON.parse(reply || '{"aumid":"","toast":""}') as {
-    aumid: string;
-    toast: string;
-  };
-}
+const shortcutIdentity = readShortcutIdentity;
 
 function junctionTarget(link: string): string | null {
-  const script = `$i = Get-Item '${link.replaceAll("'", "''")}' -Force -ErrorAction SilentlyContinue; if ($i -and $i.LinkType) { [string]$i.Target }`;
-  const result = spawnSync(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-Command", script],
-    { encoding: "utf8", windowsHide: true },
+  const result = powershellText(
+    "$i = Get-Item -LiteralPath $env:ATM_DRILL_LINK -Force -ErrorAction SilentlyContinue; if ($i -and $i.LinkType) { [string]$i.Target }",
+    { vars: { ATM_DRILL_LINK: link } },
   );
   return result.stdout.trim() || null;
 }
@@ -555,13 +511,10 @@ function holdInstallLock(sandbox: Sandbox): ReturnType<typeof spawn> {
   const lock = join(sandbox.install, "state", "install.lock");
   return spawn(
     "powershell.exe",
-    [
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      `$f = [IO.File]::Open('${lock.replaceAll("'", "''")}', 'OpenOrCreate', 'ReadWrite', 'None'); Start-Sleep -Seconds 120; $f.Close()`,
-    ],
-    { stdio: "ignore", windowsHide: true },
+    powershellArgs(
+      "$f = [IO.File]::Open($env:ATM_DRILL_HELD, 'OpenOrCreate', 'ReadWrite', 'None'); Start-Sleep -Seconds 120; $f.Close()",
+    ),
+    { stdio: "ignore", windowsHide: true, env: { ...process.env, ATM_DRILL_HELD: lock } },
   );
 }
 
@@ -1112,16 +1065,7 @@ async function scenarioUpdate(pkg: Packages): Promise<void> {
     proc.path.endsWith("AyanamiTaskManager.exe"),
   );
   const window = host
-    ? spawnSync(
-        "powershell.exe",
-        [
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          `(Get-Process -Id ${host.pid}).MainWindowHandle`,
-        ],
-        { encoding: "utf8", windowsHide: true },
-      ).stdout.trim()
+    ? powershellText(`(Get-Process -Id ${host.pid}).MainWindowHandle`).stdout.trim()
     : "";
   check("--show: the new version opened its window", window !== "" && window !== "0", {
     host,
@@ -1401,13 +1345,10 @@ async function scenarioUninstallBusy(pkg: Packages): Promise<void> {
   const busy = join(sandbox.install, `app-${VERSION_A}`, "renderer", "index.html");
   const holder = spawn(
     "powershell.exe",
-    [
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      `$f = [IO.File]::Open('${busy.replaceAll("'", "''")}', 'Open', 'Read', 'None'); Start-Sleep -Seconds 120; $f.Close()`,
-    ],
-    { stdio: "ignore", windowsHide: true },
+    powershellArgs(
+      "$f = [IO.File]::Open($env:ATM_DRILL_HELD, 'Open', 'Read', 'None'); Start-Sleep -Seconds 120; $f.Close()",
+    ),
+    { stdio: "ignore", windowsHide: true, env: { ...process.env, ATM_DRILL_HELD: busy } },
   );
   await sleep(1500);
   runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--uninstall", "--quiet"]);
@@ -1636,26 +1577,13 @@ async function squirrelLayout(sandbox: Sandbox): Promise<void> {
   ]);
   for (const dir of [join(sandbox.dir, "start-menu", "ayanami"), join(sandbox.dir, "desktop")]) {
     mkdirSync(dir, { recursive: true });
-    // Creating takes WScript.Shell (Shell.Application only reads links); its ANSI limit is fine
-    // for this ASCII name. The paths go in through the environment, not the script text.
-    spawnSync(
-      "powershell.exe",
-      [
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:ATM_DRILL_SHORTCUT); $s.TargetPath = $env:ATM_DRILL_TARGET; $s.WorkingDirectory = $env:ATM_DRILL_WORKDIR; $s.Save()",
-      ],
-      {
-        windowsHide: true,
-        env: {
-          ...process.env,
-          ATM_DRILL_SHORTCUT: join(dir, "AyanamiTaskManager.lnk"),
-          ATM_DRILL_TARGET: join(sandbox.install, "AyanamiTaskManager.exe"),
-          ATM_DRILL_WORKDIR: app,
-        },
-      },
-    );
+    // IShellLinkW, not WScript.Shell: the file name is ASCII, but the parent directories come
+    // from the repository root and may not fit the ANSI code page (W8 gate, peer r16 P2-01).
+    writeShortcut(join(dir, "AyanamiTaskManager.lnk"), {
+      target: join(sandbox.install, "AyanamiTaskManager.exe"),
+      workdir: app,
+      args: "",
+    });
   }
   spawn(join(app, "AyanamiTaskManager.exe"), ["--background"], {
     env: sandbox.env(),

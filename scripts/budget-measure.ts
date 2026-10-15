@@ -81,6 +81,7 @@ import {
   type ProcessTree,
   type RawProcessTree,
 } from "./budget-probe.js";
+import { powershellArgs } from "./windows-text.js";
 
 const MIB = 1024 * 1024;
 const jsonPath = resolve(
@@ -193,11 +194,11 @@ function resetHome(keepWebview: boolean): void {
 class ProcessProbe {
   // Add-Type 的编译目录不落 %TEMP%（见 powershell-scratch.ts），进程退出就删。
   private readonly scratch = powershellScratch(repoRoot);
-  private readonly child = spawn(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-Command", PROBE],
-    { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: this.scratch.env },
-  );
+  private readonly child = spawn("powershell.exe", powershellArgs(PROBE), {
+    windowsHide: true,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: this.scratch.env,
+  });
   private readonly waiting: Array<(line: string) => void> = [];
   private queue: Promise<unknown> = Promise.resolve();
   readonly ready: Promise<void>;

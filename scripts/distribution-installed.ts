@@ -8,7 +8,6 @@
  * 调用方先要 ATM_DISTRIBUTION_CLEAN_MACHINE=1 的声明，这里再逐项核对机器确实干净，有任何一样
  * 产品痕迹（两个数据根、安装根、卸载项、自启值、保活任务、运行中的进程、快捷方式）就拒绝。
  */
-import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -38,6 +37,7 @@ import {
   readRunSnapshot,
   RUN_VALUE,
 } from "./login-item-guard.js";
+import { registryValues, scheduledTaskXml } from "./windows-text.js";
 import {
   assertSafeInstallRoot as assertInstallRootIsProduct,
   findProductShortcuts,
@@ -49,26 +49,15 @@ const uninstallRegistryKey =
 export const KEEPALIVE_TASK = "AyanamiTaskManager 保活";
 
 function uninstallRegistrationExists(): boolean {
-  const result = spawnSync("reg.exe", ["query", uninstallRegistryKey], {
-    encoding: "utf8",
-    windowsHide: true,
-  });
-  if (result.error) throw result.error;
-  if (result.status === 0) return true;
-  if (result.status === 1) return false;
-  throw new Error(`reg.exe query 退出码 ${result.status}`);
+  return registryValues(uninstallRegistryKey) !== null;
 }
 
-/** 保活任务的定义（XML）；没有登记是 null。只读查询，不改计划任务。 */
+/**
+ * 保活任务的定义（XML）；没有登记是 null。只读查询，不改计划任务。经 Schedule.Service 读，
+ * 不解析 schtasks.exe 的输出：任务名是中文，它的输出按系统代码页（见 windows-text.ts）。
+ */
 function keepaliveTask(): string | null {
-  const result = spawnSync("schtasks.exe", ["/query", "/tn", KEEPALIVE_TASK, "/xml"], {
-    encoding: "utf8",
-    windowsHide: true,
-  });
-  if (result.error) throw result.error;
-  if (result.status === 0) return result.stdout;
-  if (result.status === 1) return null;
-  throw new Error(`schtasks.exe /query 退出码 ${result.status}`);
+  return scheduledTaskXml(KEEPALIVE_TASK);
 }
 
 export async function installed(): Promise<"verified"> {

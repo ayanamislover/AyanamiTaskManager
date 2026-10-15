@@ -24,6 +24,7 @@ import {
   exited,
 } from "./smoke-host.js";
 import { withPowerShellScratch } from "./powershell-scratch.js";
+import { powershellArgs } from "./windows-text.js";
 
 const run = promisify(execFile);
 
@@ -190,12 +191,7 @@ async function measure(pids: number[]): Promise<Sample[]> {
   const { stdout } = await withPowerShellScratch((env) =>
     run(
       "powershell.exe",
-      [
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        `${PROCESS_TREE_PROBE}[AtmProcessTree]::Measure(@(${pids.join(",")}))`,
-      ],
+      powershellArgs(`${PROCESS_TREE_PROBE}[AtmProcessTree]::Measure(@(${pids.join(",")}))`),
       { maxBuffer: 8 * 1024 * 1024, windowsHide: true, env },
     ),
   );
