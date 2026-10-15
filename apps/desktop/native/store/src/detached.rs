@@ -43,6 +43,8 @@
 //! - 删副本（自己的和清扫到的）只删副本里会有的那几个普通文件、再删空目录，不递归删；
 //! - 源库所在的目录与库文件本身按卷号 + 文件号认出来，清扫与删副本时碰到就不删（哪怕它在读的过程中被挪进暂存目录）；
 //! - 只删这次新建的上级目录；调用方原有的暂存目录（哪怕是 junction）不碰。
+//! - 几个读（几个进程）可以同时用同一个暂存目录：共用的那几级握着时谁都不要删除权，彼此打得开；这次新建的那几级
+//!   丢掉时另行打开、核对身份再删，别的读还握着就留给它（W8 关口在 CI 上，见 `Scratch`）。
 
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File};
@@ -312,13 +314,33 @@ impl Source {
     }
 }
 
-/// 调用方给的暂存目录，绑在句柄上（见模块说明）：丢掉时按相反的次序删掉这次新建的各级（空了才删得掉），
-/// 原来就有的只放手。
+/// 调用方给的暂存目录，绑在句柄上（见模块说明）：丢掉时按相反的次序删掉这次新建的各级（空了、也没有别的读握着
+/// 才删得掉），原来就有的只放手。
+///
+/// 几个读（几个进程）可以同时用同一个暂存目录（W8 关口在 CI 上：两个 `doctor --offline` 同时读）。所以这几级
+/// 握着时都不要删除权、也都不共享删除：彼此打得开，别人改不了名、删不掉。这次新建的那几级，丢掉时先放手，再相对
+/// 仍握着的上一级不跟进地重新打开它、核对还是我们建的那一个（卷号 + 文件号）才删；别的读正握着它就打不开，留给它。
 struct Scratch {
-    /// 由浅到深握住的各级：先是最近的已存在的那一级，然后是这次新建或打开的；`true` 是这次新建的。
-    held: Vec<(os::Handle, bool)>,
+    /// 由浅到深握住的各级：先是最近的已存在的那一级，然后是这次新建或打开的；这次新建的带着名字与身份。
+    held: Vec<(os::Handle, Option<(OsString, os::Id)>)>,
     /// 还缺的各级，由浅到深。
     missing: Vec<OsString>,
+}
+
+/// 共享冲突（`ERROR_SHARING_VIOLATION`）。另一个读正要删它这次新建、刚放手的那一级时，会短暂地出现。
+fn sharing_violation(e: &io::Error) -> bool {
+    e.raw_os_error() == Some(32)
+}
+
+/// 碰上共享冲突就等一会儿再试（最多约 1 s）：那一级要么很快删掉了（POSIX 语义，名字立即消失），要么放开了。
+fn patiently<T>(mut f: impl FnMut() -> io::Result<T>) -> io::Result<T> {
+    for _ in 0..40 {
+        match f() {
+            Err(e) if sharing_violation(&e) => std::thread::sleep(Duration::from_millis(25)),
+            other => return other,
+        }
+    }
+    f()
 }
 
 impl Scratch {
@@ -329,7 +351,7 @@ impl Scratch {
         let mut missing = Vec::new();
         let mut at = full.as_path();
         let base = loop {
-            match os::hold_dir(at) {
+            match patiently(|| os::hold_dir(at)) {
                 Ok(h) => break h,
                 Err(e) if absent(&e) => match (at.parent(), at.file_name()) {
                     (Some(parent), Some(name)) => {
@@ -343,7 +365,7 @@ impl Scratch {
         };
         missing.reverse();
         Ok(Scratch {
-            held: vec![(base, false)],
+            held: vec![(base, None)],
             missing,
         })
     }
@@ -368,9 +390,15 @@ impl Scratch {
         while !self.missing.is_empty() {
             let name = self.missing.remove(0);
             let at = self.real()?.join(&name);
-            let (h, made) = os::create_dir_in(self.deepest(), &name, false)
-                .map_err(|e| format!("{}: {e}", at.display()))?;
-            self.held.push((h, made));
+            let fail = |e: io::Error| format!("{}: {e}", at.display());
+            let (h, made) = patiently(|| os::create_dir_in(self.deepest(), &name, false, false))
+                .map_err(fail)?;
+            let mine = if made {
+                Some((name, os::id(&h).map_err(fail)?))
+            } else {
+                None
+            };
+            self.held.push((h, mine));
         }
         Ok(self.deepest())
     }
@@ -378,11 +406,20 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
-        while let Some((h, made)) = self.held.pop() {
-            if made {
-                delete_dir_patiently(&h);
-            }
+        while let Some((h, mine)) = self.held.pop() {
             drop(h);
+            let (Some((name, id)), Some((parent, _))) = (mine, self.held.last()) else {
+                continue;
+            };
+            #[cfg(test)]
+            if let Some(hook) = tests::BEFORE_SHARED_DELETE.with(|h| h.borrow_mut().take()) {
+                hook();
+            }
+            if let Ok(d) = os::open_child_to_delete(parent, &name)
+                && os::id(&d).is_ok_and(|now| now == id)
+            {
+                delete_dir_patiently(&d);
+            }
         }
     }
 }
@@ -434,7 +471,7 @@ impl Copy {
                 std::process::id(),
                 SEQ.fetch_add(1, Ordering::Relaxed)
             );
-            match os::create_dir_in(parent, OsStr::new(&name), true) {
+            match os::create_dir_in(parent, OsStr::new(&name), true, true) {
                 Ok((h, _)) => break h,
                 Err(e) if e.kind() == io::ErrorKind::AlreadyExists && attempts < 1000 => {
                     attempts += 1;
@@ -763,16 +800,56 @@ mod os {
     /// 在握着的 `parent` 里建名为 `name` 的目录并握住（`NtCreateFile` 相对 `parent`：建出来的同时就握住，中间没有
     /// 可被换掉的空档）。`exclusive` 时已有同名的就报 AlreadyExists；否则打开已有的那个，但它不能是链接。
     /// 返回的 `bool` 是不是这次新建的。
+    ///
+    /// `delete`：握住时连删除权一起要，好在丢掉时按这个句柄删。只有这次读独有的目录（副本目录）才要：几个读共用的
+    /// 那几级（暂存目录本身和它缺的上级）谁握着删除权，别的读按 `NO_DELETE` 就打不开它（W8 关口在 CI 上：两个
+    /// `doctor --offline` 同时读，后来的那个报共享冲突）。共用的那几级在丢掉时另按 [`open_child_to_delete`] 删。
     pub fn create_dir_in(
         parent: &File,
         name: &std::ffi::OsStr,
         exclusive: bool,
+        delete: bool,
+    ) -> io::Result<(File, bool)> {
+        use windows_sys::Wdk::Storage::FileSystem::{FILE_CREATE, FILE_OPEN_IF};
+        let access = if delete { HOLD | DELETE } else { HOLD };
+        let disposition = if exclusive { FILE_CREATE } else { FILE_OPEN_IF };
+        let (f, made) = open_in(parent, name, access, NO_DELETE, disposition)?;
+        if !made && info(&f)?.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(not("a link"));
+        }
+        Ok((f, made))
+    }
+
+    /// 为了删除，相对握着的 `parent` 不跟进地打开名为 `name` 的目录：是链接、不是目录都报错。只要删除与读属性，
+    /// 共享一切；但别人正握着它（握的时候不共享删除）就打不开，报共享冲突，这时它不归我们删。
+    pub fn open_child_to_delete(parent: &File, name: &std::ffi::OsStr) -> io::Result<File> {
+        use windows_sys::Wdk::Storage::FileSystem::FILE_OPEN;
+        let (f, _) = open_in(
+            parent,
+            name,
+            DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            FILE_OPEN,
+        )?;
+        if info(&f)?.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+            return Err(not("a link"));
+        }
+        Ok(f)
+    }
+
+    /// `NtCreateFile` 相对 `parent` 打开（或建）名为 `name` 的目录，不跟进链接。返回句柄和是不是这次新建的。
+    fn open_in(
+        parent: &File,
+        name: &std::ffi::OsStr,
+        access: u32,
+        share: u32,
+        disposition: u32,
     ) -> io::Result<(File, bool)> {
         use std::os::windows::ffi::OsStrExt;
         use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
         use windows_sys::Wdk::Storage::FileSystem::{
-            FILE_CREATE, FILE_DIRECTORY_FILE, FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT,
-            FILE_SYNCHRONOUS_IO_NONALERT, NtCreateFile,
+            FILE_DIRECTORY_FILE, FILE_OPEN_REPARSE_POINT, FILE_SYNCHRONOUS_IO_NONALERT,
+            NtCreateFile,
         };
         use windows_sys::Win32::Foundation::{
             HANDLE, OBJ_CASE_INSENSITIVE, RtlNtStatusToDosError, UNICODE_STRING,
@@ -801,13 +878,13 @@ mod os {
         let status = unsafe {
             NtCreateFile(
                 &mut h,
-                HOLD | DELETE,
+                access,
                 &oa,
                 &mut iosb,
                 std::ptr::null(),
                 FILE_ATTRIBUTE_NORMAL,
-                NO_DELETE,
-                if exclusive { FILE_CREATE } else { FILE_OPEN_IF },
+                share,
+                disposition,
                 FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT,
                 std::ptr::null(),
                 0,
@@ -820,11 +897,7 @@ mod os {
         }
         // SAFETY: 成功时 `h` 是新打开的句柄，交给 `File` 关闭。
         let f = unsafe { File::from_raw_handle(h) };
-        let made = iosb.Information == FILE_CREATED;
-        if !made && info(&f)?.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
-            return Err(not("a link"));
-        }
-        Ok((f, made))
+        Ok((f, iosb.Information == FILE_CREATED))
     }
 
     /// 握着的东西的真实路径（`\\?\` 形式，链接都已解开）。
@@ -958,10 +1031,15 @@ mod os {
         Ok(Handle(path.to_path_buf()))
     }
 
+    pub fn open_child_to_delete(parent: &Handle, name: &std::ffi::OsStr) -> io::Result<Handle> {
+        open_entry(&parent.0.join(name), true)
+    }
+
     pub fn create_dir_in(
         parent: &Handle,
         name: &std::ffi::OsStr,
         exclusive: bool,
+        _delete: bool,
     ) -> io::Result<(Handle, bool)> {
         let path = parent.0.join(name);
         match std::fs::create_dir(&path) {
@@ -1002,6 +1080,9 @@ mod tests {
         pub(super) static BEFORE_REMOVE: RefCell<Option<RemoveHook>> = const { RefCell::new(None) };
         /// 复制完库文件、还没复制 `-wal` 时调一次（只在单元测试里有）。
         pub(super) static AFTER_DATABASE_COPY: RefCell<Option<Box<dyn FnOnce()>>> =
+            const { RefCell::new(None) };
+        /// 放开这次新建的一级、重新打开它来删之前调一次（只在单元测试里有）。
+        pub(super) static BEFORE_SHARED_DELETE: RefCell<Option<Box<dyn FnOnce()>>> =
             const { RefCell::new(None) };
     }
 
@@ -1139,6 +1220,120 @@ mod tests {
         // 那个连接关闭时没能 checkpoint：`-wal` 还在，下一次读照样读到它。
         assert!(wal_has_frames(&db));
         assert_eq!(read(&db, &d.join("scratch"), q).unwrap(), (1, 0));
+    }
+
+    /// 一个 WAL 库，`-wal` 里有帧（读它要复制）；连接留着，帧就一直在。
+    fn wal_source(d: &Path, name: &str, x: i64) -> (PathBuf, Connection) {
+        let src = d.join(name);
+        fs::create_dir_all(&src).unwrap();
+        let db = src.join("source.sqlite");
+        let live = Connection::open(&db).unwrap();
+        live.execute_batch(&format!(
+            "PRAGMA journal_mode = WAL; PRAGMA wal_autocheckpoint = 0;
+             CREATE TABLE t(x); INSERT INTO t VALUES ({x});"
+        ))
+        .unwrap();
+        assert!(wal_has_frames(&db));
+        (db, live)
+    }
+
+    fn value(c: &Connection) -> rusqlite::Result<i64> {
+        c.query_row("SELECT x FROM t", [], |r| r.get(0))
+    }
+
+    /// W8 关口在 CI 上：两个读同时用同一个还不存在的暂存目录。先到的那个建出它；以前它连删除权一起握着，后到的那个
+    /// 按不共享删除就打不开，报共享冲突（`doctor --offline` 并行时的 os error 32）。现在两个都读得出，
+    /// 读完后这次新建的各级照样删掉。
+    #[test]
+    fn two_reads_share_a_scratch_directory_that_one_of_them_creates() {
+        let d = dir("shared-scratch");
+        let (outer, outer_live) = wal_source(&d, "outer", 1);
+        let (inner, inner_live) = wal_source(&d, "inner", 2);
+        let scratch = d.join("scratch").join("shared");
+        let at = scratch.clone();
+        let got = std::rc::Rc::new(RefCell::new(None));
+        let slot = got.clone();
+        AFTER_DATABASE_COPY.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                // 这时外面那个读握着它新建的两级，副本也在里面。
+                assert!(at.is_dir());
+                *slot.borrow_mut() = Some(read(&inner, &at, value).map_err(|e| format!("{e:?}")));
+            }));
+        });
+        assert_eq!(read(&outer, &scratch, value).unwrap(), 1);
+        assert_eq!(got.borrow_mut().take(), Some(Ok(2)));
+        assert!(
+            !d.join("scratch").exists(),
+            "the levels this read made are removed"
+        );
+        drop((outer_live, inner_live));
+    }
+
+    /// 读完要删这次新建的暂存目录时，别人还握着它（另一个读正在用）：打不开、不删，留给它；读照样成功。
+    #[test]
+    fn a_scratch_directory_another_read_still_holds_is_left_to_it() {
+        let d = dir("held-scratch");
+        let (db, live) = wal_source(&d, "src", 7);
+        let scratch = d.join("scratch");
+        let at = scratch.clone();
+        let other = std::rc::Rc::new(RefCell::new(None));
+        let slot = other.clone();
+        AFTER_DATABASE_COPY.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                *slot.borrow_mut() = Some(os::hold_dir(&at).unwrap());
+            }));
+        });
+        assert_eq!(read(&db, &scratch, value).unwrap(), 7);
+        assert!(other.borrow().is_some(), "the other holder opened it");
+        assert!(scratch.is_dir(), "left to the read that still holds it");
+        drop(other.borrow_mut().take());
+        // 下一次读照样用它；它不是这次新建的，读完不删。
+        assert_eq!(read(&db, &scratch, value).unwrap(), 7);
+        assert!(scratch.is_dir());
+        drop(live);
+    }
+
+    /// 放开这次新建的暂存目录、还没重新打开它来删的空档里，它被改了名、原处又建了一个同名的目录：那不是我们建的
+    /// （身份对不上），不删。挪走的那个也不按名字找回来删，留着。
+    #[test]
+    fn a_scratch_directory_swapped_before_the_delete_is_not_ours_to_delete() {
+        let d = dir("swapped-scratch");
+        let (db, live) = wal_source(&d, "src", 3);
+        let scratch = d.join("scratch");
+        let (at, moved) = (scratch.clone(), d.join("moved"));
+        let swapped = std::rc::Rc::new(std::cell::Cell::new(false));
+        let seen = swapped.clone();
+        BEFORE_SHARED_DELETE.with(|h| {
+            *h.borrow_mut() = Some(Box::new(move || {
+                fs::rename(&at, &moved).unwrap();
+                fs::create_dir(&at).unwrap();
+                seen.set(true);
+            }));
+        });
+        assert_eq!(read(&db, &scratch, value).unwrap(), 3);
+        assert!(swapped.get(), "the hook ran");
+        assert!(scratch.is_dir(), "the directory now under that name is not ours");
+        assert!(d.join("moved").is_dir());
+        drop(live);
+    }
+
+    /// 另一个读正带着删除权打开暂存目录（它正要删自己新建的那一级）时，这次读按不共享删除打不开它：等一会儿再试，
+    /// 不报错。
+    #[test]
+    fn a_scratch_directory_another_read_is_deleting_is_waited_for() {
+        let d = dir("deleting-scratch");
+        let (db, live) = wal_source(&d, "src", 5);
+        let scratch = d.join("scratch");
+        fs::create_dir_all(&scratch).unwrap();
+        let parent = os::hold_dir(&d).unwrap();
+        let deleting = os::open_child_to_delete(&parent, OsStr::new("scratch")).unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(300));
+            drop(deleting);
+        });
+        assert_eq!(read(&db, &scratch, value).unwrap(), 5);
+        release.join().unwrap();
+        drop((parent, live));
     }
 
     /// peer r5 P1-01：检查时暂存目录还不存在，检查完、清扫前它被建成指向源库上级的 junction。清扫要重新看一次：
