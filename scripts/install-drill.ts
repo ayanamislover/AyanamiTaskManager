@@ -276,31 +276,48 @@ function regValue(key: string, name: string): string | null {
     : null;
 }
 
-function shortcut(path: string): Record<string, string> | null {
-  if (!existsSync(path)) return null;
-  const literal = path.replaceAll("'", "''");
-  const script = `$s = (New-Object -ComObject WScript.Shell).CreateShortcut('${literal}'); [pscustomobject]@{ target = $s.TargetPath; args = $s.Arguments; workdir = $s.WorkingDirectory } | ConvertTo-Json -Compress`;
+/**
+ * Shell.Application for one shortcut file: the path goes in through an environment variable
+ * (never spliced into the script) and the reply comes back as UTF-8.
+ *
+ * Not WScript.Shell: its shortcut object is bound to the ANSI code page. On an English system
+ * (the CI runner, code page 1252) it cannot open `ATM 修复.lnk` and reads back nothing — the
+ * repair-shortcut check failed there while it passed on a Chinese system (W8 gate, third CI run).
+ */
+function shellItem(path: string, select: string): string {
+  const script =
+    "$p = $env:ATM_DRILL_SHORTCUT; " +
+    "$item = (New-Object -ComObject Shell.Application).Namespace([IO.Path]::GetDirectoryName($p)).ParseName([IO.Path]::GetFileName($p)); " +
+    "[Console]::OutputEncoding = [Text.Encoding]::UTF8; " +
+    `${select} | ConvertTo-Json -Compress`;
   const result = spawnSync(
     "powershell.exe",
     ["-NoProfile", "-NonInteractive", "-Command", script],
-    { encoding: "utf8", windowsHide: true },
+    {
+      encoding: "utf8",
+      windowsHide: true,
+      env: { ...process.env, ATM_DRILL_SHORTCUT: path },
+    },
   );
-  return JSON.parse(result.stdout.trim() || "null") as Record<string, string> | null;
+  return result.stdout.trim();
+}
+
+function shortcut(path: string): Record<string, string> | null {
+  if (!existsSync(path)) return null;
+  const reply = shellItem(
+    path,
+    "$l = $item.GetLink; [pscustomobject]@{ target = $l.Path; args = $l.Arguments; workdir = $l.WorkingDirectory }",
+  );
+  return JSON.parse(reply || "null") as Record<string, string> | null;
 }
 
 /** AppUserModel.ID and ToastActivatorCLSID via the Shell property system. */
 function shortcutIdentity(path: string): { aumid: string; toast: string } {
-  const literal = path.replaceAll("'", "''");
-  const script =
-    `$shell = New-Object -ComObject Shell.Application; $folder = $shell.Namespace((Split-Path '${literal}')); ` +
-    `$item = $folder.ParseName((Split-Path '${literal}' -Leaf)); ` +
-    `[pscustomobject]@{ aumid = [string]$item.ExtendedProperty('System.AppUserModel.ID'); toast = [string]$item.ExtendedProperty('System.AppUserModel.ToastActivatorCLSID') } | ConvertTo-Json -Compress`;
-  const result = spawnSync(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-Command", script],
-    { encoding: "utf8", windowsHide: true },
+  const reply = shellItem(
+    path,
+    "[pscustomobject]@{ aumid = [string]$item.ExtendedProperty('System.AppUserModel.ID'); toast = [string]$item.ExtendedProperty('System.AppUserModel.ToastActivatorCLSID') }",
   );
-  return JSON.parse(result.stdout.trim() || '{"aumid":"","toast":""}') as {
+  return JSON.parse(reply || '{"aumid":"","toast":""}') as {
     aumid: string;
     toast: string;
   };
@@ -864,10 +881,8 @@ async function scenarioLifecycle(pkg: Packages): Promise<void> {
     "first install creates a desktop shortcut",
     existsSync(join(sandbox.dir, "desktop", "AyanamiTaskManager.lnk")),
   );
-  check(
-    "repair shortcut → atm-setup --repair",
-    shortcut(join(sandbox.dir, "start-menu", "ayanami", "ATM 修复.lnk"))?.args === "--repair",
-  );
+  const repair = shortcut(join(sandbox.dir, "start-menu", "ayanami", "ATM 修复.lnk"));
+  check("repair shortcut → atm-setup --repair", repair?.args === "--repair", repair);
   const uninstallKey = `${sandbox.registry}\\Uninstall\\AyanamiTaskManagerDesktop`;
   check(
     "Uninstall key points at atm-setup",
@@ -1621,17 +1636,25 @@ async function squirrelLayout(sandbox: Sandbox): Promise<void> {
   ]);
   for (const dir of [join(sandbox.dir, "start-menu", "ayanami"), join(sandbox.dir, "desktop")]) {
     mkdirSync(dir, { recursive: true });
-    const lnk = join(dir, "AyanamiTaskManager.lnk").replaceAll("'", "''");
-    const target = join(sandbox.install, "AyanamiTaskManager.exe").replaceAll("'", "''");
+    // Creating takes WScript.Shell (Shell.Application only reads links); its ANSI limit is fine
+    // for this ASCII name. The paths go in through the environment, not the script text.
     spawnSync(
       "powershell.exe",
       [
         "-NoProfile",
         "-NonInteractive",
         "-Command",
-        `$s = (New-Object -ComObject WScript.Shell).CreateShortcut('${lnk}'); $s.TargetPath = '${target}'; $s.WorkingDirectory = '${app.replaceAll("'", "''")}'; $s.Save()`,
+        "$s = (New-Object -ComObject WScript.Shell).CreateShortcut($env:ATM_DRILL_SHORTCUT); $s.TargetPath = $env:ATM_DRILL_TARGET; $s.WorkingDirectory = $env:ATM_DRILL_WORKDIR; $s.Save()",
       ],
-      { windowsHide: true },
+      {
+        windowsHide: true,
+        env: {
+          ...process.env,
+          ATM_DRILL_SHORTCUT: join(dir, "AyanamiTaskManager.lnk"),
+          ATM_DRILL_TARGET: join(sandbox.install, "AyanamiTaskManager.exe"),
+          ATM_DRILL_WORKDIR: app,
+        },
+      },
     );
   }
   spawn(join(app, "AyanamiTaskManager.exe"), ["--background"], {
