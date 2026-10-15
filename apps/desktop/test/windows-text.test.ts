@@ -101,6 +101,25 @@ describe("脚本读 Windows 的文字一律走 Unicode", () => {
       expect(() => parseRegistryJson(bad), bad).toThrow();
   });
 
+  // 两层各自守住（脚本主体以 2 退出，TS 一侧也拒绝不完整的回复），一层被改坏另一层不会替它遮住。
+  it("TS 一侧拒绝不完整的回复", () => {
+    const reply = (status: number, stdout: string) => ({
+      pid: 0,
+      output: [],
+      stdout,
+      stderr: "",
+      status,
+      signal: null,
+    });
+    expect(() => registryReply(reply(0, ""), "synthetic")).toThrow();
+    expect(() => registryReply(reply(2, ""), "synthetic")).toThrow();
+    expect(registryReply(reply(3, ""), "synthetic")).toBeNull();
+    expect(() => taskReply(reply(0, ""), "synthetic")).toThrow();
+    expect(() => taskReply(reply(0, "not xml"), "synthetic")).toThrow();
+    expect(() => taskReply(reply(2, ""), "synthetic")).toThrow();
+    expect(taskReply(reply(3, ""), "synthetic")).toBeNull();
+  });
+
   // peer r17 P1-02、P2-01、P2-03：换掉读注册表 / 读任务的函数，造出读失败、转换失败，看主体怎么收场。
   // 不碰真实注册表与计划任务。
   const FAKE_KEY = `
@@ -138,6 +157,11 @@ function New-AtmFakeKey($values, $kinds, [switch]$failRead) {
             "function Convert-AtmValue($kind, $v) { if ($v -eq 'y') { throw 'synthetic conversion failure' }; [string]$v }",
         ),
       ).toThrow(/synthetic conversion failure/u);
+      // 脚本主体自己：失败以 2 退出，stdout 什么都没有。
+      const denied = powershellText(
+        `${REGISTRY_FUNCTIONS}function Open-AtmKey($key) { throw 'synthetic access denied' }\n${REGISTRY_MAIN}`,
+      );
+      expect([denied.status, denied.stdout]).toEqual([2, ""]);
       // 确定不在：null。
       expect(registryWith("function Open-AtmKey($key) { $null }")).toBeNull();
       // 高位整数按位、REG_NONE 与二进制是十六进制、多字符串用 \0、默认值（空名字）照样在。
@@ -164,6 +188,10 @@ function New-AtmFakeKey($values, $kinds, [switch]$failRead) {
       ).toThrow(/synthetic Xml getter failure/u);
       expect(() => taskWith("function Read-AtmTaskXml($name) { '' }")).toThrow();
       expect(() => taskWith("function Read-AtmTaskXml($name) { 'not xml' }")).toThrow();
+      const notXml = powershellText(
+        `${TASK_FUNCTIONS}\nfunction Read-AtmTaskXml($name) { 'not xml' }\n${TASK_MAIN}`,
+      );
+      expect([notXml.status, notXml.stdout]).toEqual([2, ""]);
       expect(taskWith("function Read-AtmTaskXml($name) { $null }")).toBeNull();
       expect(
         taskWith("function Read-AtmTaskXml($name) { '<?xml version=\"1.0\"?><Task></Task>' }"),
