@@ -1312,7 +1312,10 @@ mod tests {
         });
         assert_eq!(read(&db, &scratch, value).unwrap(), 3);
         assert!(swapped.get(), "the hook ran");
-        assert!(scratch.is_dir(), "the directory now under that name is not ours");
+        assert!(
+            scratch.is_dir(),
+            "the directory now under that name is not ours"
+        );
         assert!(d.join("moved").is_dir());
         drop(live);
     }
