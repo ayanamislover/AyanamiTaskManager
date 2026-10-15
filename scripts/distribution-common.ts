@@ -209,22 +209,51 @@ export function hostEnvironment(roots: HostRoots): NodeJS.ProcessEnv {
   };
 }
 
+/** 注入的两个 WebView2 变量，生产宿主必须在建任何进程前清掉。 */
+export const DECOY_VARIABLES = [
+  "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
+  "WEBVIEW2_USER_DATA_FOLDER",
+] as const;
+
+/**
+ * 宿主环境之外故意塞 WebView2 的调试参数和另一个用户数据目录。安装半要把它交给 `atm-setup install`：
+ * 事务 START 拉起的宿主继承 setup 的环境，productionChecks 之后只是直接用它（W8 关口 peer r15 P2-01）。
+ */
+export function decoyEnvironment(
+  label: "portable" | "installed",
+  roots: HostRoots,
+): { env: NodeJS.ProcessEnv; decoy: string } {
+  const decoy = join(outputRoot, `${label}-webview2-decoy`);
+  return {
+    env: {
+      ...hostEnvironment(roots),
+      WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=0",
+      WEBVIEW2_USER_DATA_FOLDER: decoy,
+    },
+    decoy,
+  };
+}
+
+/** host.log 里这个宿主进程记下的「清掉了哪些变量」（只有名字）。 */
+export function scrubbedVariables(log: string, pid: number): string[] {
+  const line = log
+    .split(/\r?\n/u)
+    .find((entry) => entry.includes(` pid=${pid} scrubbed from the environment: `));
+  return line ? line.split("scrubbed from the environment: ")[1]!.split(", ") : [];
+}
+
 /**
  * 生产二进制的运行检查。宿主已在运行（安装事务 START 拉起的）就直接用；否则后台启动。
- * 环境里故意塞 WebView2 的调试参数和另一个用户数据目录：生产宿主必须在建任何进程前把它们
- * 清掉，于是既不会出现调试端口，也不会在那个目录里写东西。
+ * 两种情况宿主的环境里都带着 decoyEnvironment 的诱饵：生产宿主必须在建任何进程前把它们
+ * 清掉，于是既不会出现调试端口，也不会在那个目录里写东西。host.log 里宿主自己记下清掉的
+ * 变量名，证明诱饵确实送到了被测的宿主。
  */
 export async function productionChecks(
   label: "portable" | "installed",
   executable: string,
   roots: HostRoots,
 ): Promise<{ child: ChildProcess | null; runtime: Runtime; hostPid: number }> {
-  const decoy = join(outputRoot, `${label}-webview2-decoy`);
-  const env = {
-    ...hostEnvironment(roots),
-    WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS: "--remote-debugging-port=0",
-    WEBVIEW2_USER_DATA_FOLDER: decoy,
-  };
+  const { env, decoy } = decoyEnvironment(label, roots);
   const runtimePath = join(roots.n, "runtime", "daemon.json");
   const child = existsSync(runtimePath)
     ? null
@@ -243,6 +272,15 @@ export async function productionChecks(
   const hostRecord = JSON.parse(readFileSync(join(roots.n, "runtime", "host.json"), "utf8")) as {
     pid: number;
   };
+  const scrubbed = scrubbedVariables(
+    await readFile(join(roots.n, "logs", "host.log"), "utf8").catch(() => ""),
+    hostRecord.pid,
+  );
+  check(
+    `${label}：注入的 WebView2 变量送到了宿主（宿主记下已清掉）`,
+    DECOY_VARIABLES.every((name) => scrubbed.includes(name)),
+    `pid ${hostRecord.pid}: [${scrubbed.join(", ")}]`,
+  );
   check(`${label}：后台启动不建窗口`, !appWindowVisible(hostRecord.pid), String(hostRecord.pid));
   run(executable, [], env);
   const shown = await waitUntil(

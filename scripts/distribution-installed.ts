@@ -23,6 +23,7 @@ import {
   localAppDataRoot,
   packageDir,
   packageVersion,
+  decoyEnvironment,
   productionChecks,
   realL,
   realN,
@@ -100,7 +101,13 @@ export async function installed(): Promise<"verified"> {
   // 产品默认的根：干净机器上就是这次安装自己建的。
   const env = hostEnvironment({ l: null, n: realN });
   try {
-    check("atm-setup 静默安装", run(setup, ["install", manifest, "--quiet"], env) === 0, manifest);
+    // 事务 START 拉起的宿主继承 setup 的环境：注入的 WebView2 变量在这里交给它（W8 关口 peer r15 P2-01）。
+    const installEnv = decoyEnvironment("installed", { l: null, n: realN }).env;
+    check(
+      "atm-setup 静默安装",
+      run(setup, ["install", manifest, "--quiet"], installEnv) === 0,
+      manifest,
+    );
     const pointer = JSON.parse(await readFile(join(installRoot, "app.json"), "utf8")) as {
       current: string;
     };

@@ -56,7 +56,18 @@ fn root_len(parts: &[&str]) -> usize {
 /// 根不受 `..` 影响（W8 关口 peer r14 P2-01）：绝对路径根处的 `..` 照 Windows 的做法丢掉（`C:\..\a` 就是
 /// `C:\a`），UNC 的服务器与共享名不会被 `..` 弹出、跨到别的共享去。`\\?\C:\…` 与 `\\?\UNC\server\share\…`
 /// 换成普通写法再比较。不解析链接与短名：那些由文件身份比较（见模块说明）。
+///
+/// 盘符相对路径（`C:a`、`C:`）相对于那个盘的当前目录，不是 `C:\a`（W8 关口 peer r15 P2-02）：键写成 `c:`
+/// 紧跟相对部分的键，与 `c:\…` 区分开。
 fn key(path: &str) -> String {
+    if let Some(rest) = drive_relative(path) {
+        let rest = if rest.is_empty() {
+            String::new()
+        } else {
+            key(rest)
+        };
+        return format!("{}{rest}", &path[..2]).to_lowercase();
+    }
     let mut parts: Vec<&str> = path.split(['\\', '/']).collect();
     if let ["", "", "?" | ".", rest @ ..] = parts.as_slice() {
         parts = match rest {
@@ -92,8 +103,19 @@ fn key(path: &str) -> String {
     joined.to_lowercase()
 }
 
-/// 键的最后一段：文件名。
+/// 盘符相对路径（盘符与冒号后面不是分隔符）去掉盘符之后的部分；别的路径是 `None`。
+fn drive_relative(path: &str) -> Option<&str> {
+    let b = path.as_bytes();
+    (b.len() >= 2
+        && b[0].is_ascii_alphabetic()
+        && b[1] == b':'
+        && !matches!(b.get(2), Some(b'\\' | b'/')))
+    .then(|| &path[2..])
+}
+
+/// 键的最后一段：文件名。盘符相对路径的盘符不算在文件名里。
 fn file_name(key: &str) -> &str {
+    let key = drive_relative(key).unwrap_or(key);
     key.rsplit('\\').next().unwrap_or(key)
 }
 
@@ -454,6 +476,57 @@ mod tests {
             &no_id,
         );
         assert_eq!(v["totalPrivateBytes"], 100);
+    }
+
+    /// W8 关口 peer r15 P2-02：盘符相对路径（`C:a`）相对于那个盘的当前目录，与 `C:\a` 不是同一个键；文件名照样是
+    /// 最后一段。于是普通相对、盘符相对、盘符绝对三种写法的命令，身份与映像相同就算，不同就不算。
+    #[test]
+    fn a_drive_relative_command_is_relative_to_that_drive() {
+        for (path, want) in [
+            ("C:atm-mcp.exe", "c:atm-mcp.exe"),
+            (r"C:a\..\atm-mcp.exe", "c:atm-mcp.exe"),
+            (r"C:..\x", r"c:..\x"),
+            ("C:", "c:"),
+            (r"C:a\..", "c:"),
+            (r"C:\a", r"c:\a"),
+        ] {
+            assert_eq!(key(path), want, "{path}");
+        }
+        assert_ne!(key("C:atm-mcp.exe"), key(r"C:\atm-mcp.exe"));
+        assert_ne!(key("C:atm-mcp.exe"), key("atm-mcp.exe"));
+        for path in [
+            "C:atm-mcp.exe",
+            r"C:sub\atm-mcp.exe",
+            "atm-mcp.exe",
+            r"C:\x\atm-mcp.exe",
+        ] {
+            assert_eq!(file_name(&key(path)), "atm-mcp.exe", "{path}");
+        }
+        let image = r"C:\synthetic\atm-mcp.exe";
+        let procs = vec![
+            p(10, 1, "codex", None, 1),
+            p(20, 10, "atm-mcp", Some(image), 100),
+        ];
+        for command in [
+            "C:atm-mcp.exe",
+            r"C:sub\atm-mcp.exe",
+            "atm-mcp.exe",
+            r"C:\elsewhere\atm-mcp.exe",
+        ] {
+            let same = |path: &str| {
+                let k = key(path);
+                Some((7, u64::from(k != key(image) && k != key(command))))
+            };
+            let v = observe_from(&procs, &[command.to_string()], 0, &same);
+            assert_eq!(v["totalPrivateBytes"], 100, "same file: {command}");
+            let other = |path: &str| Some((7, u64::from(key(path) != key(image))));
+            let v = observe_from(&procs, &[command.to_string()], 0, &other);
+            assert_eq!(v["totalPrivateBytes"], 0, "another file: {command}");
+        }
+        // 名字不同的，身份相同也不算（同名才查身份）。
+        let same = |_: &str| Some((7, 0));
+        let v = observe_from(&procs, &["C:renamed.exe".to_string()], 0, &same);
+        assert_eq!(v["totalPrivateBytes"], 0);
     }
 
     /// W8 关口 peer r14 P2-02：桥命令写的是 `L\current\…`（目录链接），进程映像是链接指向的物理目录里的文件。

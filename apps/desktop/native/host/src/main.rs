@@ -90,8 +90,8 @@ fn message_box(text: &str) {
 
 /// WebView2 and Node read these from the environment and would override what the host
 /// configures (debug ports, browser args, user data folders). Remove them before any
-/// thread or child exists.
-fn scrub_own_environment() {
+/// thread or child exists. Returns the names it removed (never the values), for host.log.
+fn scrub_own_environment() -> Vec<String> {
     let keys: Vec<_> = std::env::vars_os()
         .filter_map(|(key, _)| key.into_string().ok())
         .filter(|key| {
@@ -99,10 +99,11 @@ fn scrub_own_environment() {
             upper.starts_with("WEBVIEW2_") || upper == "NODE_OPTIONS"
         })
         .collect();
-    for key in keys {
+    for key in &keys {
         // SAFETY: single-threaded at this point, nothing else reads the environment.
         unsafe { std::env::remove_var(key) };
     }
+    keys
 }
 
 fn relaunch_through(launcher: &Path, argv: &[String], headless: bool) -> i32 {
@@ -277,7 +278,7 @@ fn keepalive_user_started(v3_root: &Path, lifecycle: &lifecycle::Lifecycle) {
 }
 
 fn real_main() -> i32 {
-    scrub_own_environment();
+    let scrubbed = scrub_own_environment();
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let electron_as_node =
         std::env::var_os("ELECTRON_RUN_AS_NODE").is_some_and(|value| value == "1");
@@ -340,6 +341,14 @@ fn real_main() -> i32 {
         return 0;
     };
     publish_host_record(&layout.v3_root);
+    // 主实例记下清掉了哪些变量（只记名字）：安装态的验收凭它确认注入的 WebView2 参数真送到了宿主
+    // （W8 关口 peer r15 P2-01）。
+    if !scrubbed.is_empty() {
+        log(
+            &layout.v3_root,
+            &format!("scrubbed from the environment: {}", scrubbed.join(", ")),
+        );
+    }
     notify::set_process_identity();
     let version =
         atm_install_state::product_version(&layout.app_dir).unwrap_or_else(|| "dev".into());

@@ -1,7 +1,13 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { hostEnvironment, probeValue } from "../../../scripts/distribution-common.js";
+import {
+  DECOY_VARIABLES,
+  decoyEnvironment,
+  hostEnvironment,
+  probeValue,
+  scrubbedVariables,
+} from "../../../scripts/distribution-common.js";
 import { KEEPALIVE_TASK } from "../../../scripts/distribution-installed.js";
 
 // ATM-R-475：distribution-smoke 的安装那一半写真实的卸载项、开始菜单与任务计划程序。
@@ -93,6 +99,35 @@ describe("distribution-smoke 的两半", () => {
     ]) {
       expect(() => probeValue("Activated(1)", failed)).toThrow(/窗口探测 Activated\(1\) 失败/u);
     }
+  });
+
+  // W8 关口 peer r15 P2-01：安装态的宿主由 setup 的事务 START 拉起，productionChecks 只是直接用它。
+  // 诱饵必须在 setup 拉起之前交给它，并由宿主自己记下已清掉，否则「注入无效」两条可以在没注入时变绿。
+  it("安装半把注入的 WebView2 变量交给 atm-setup install，并凭 host.log 确认送到了宿主", () => {
+    const installed = read("distribution-installed.ts");
+    expect(installed).toContain(
+      'const installEnv = decoyEnvironment("installed", { l: null, n: realN }).env;',
+    );
+    expect(installed).toContain('run(setup, ["install", manifest, "--quiet"], installEnv)');
+    const common = read("distribution-common.ts");
+    expect(common).toContain("const { env, decoy } = decoyEnvironment(label, roots);");
+    expect(common).toContain("DECOY_VARIABLES.every((name) => scrubbed.includes(name))");
+
+    const { env, decoy } = decoyEnvironment("installed", { l: null, n: "C:\\real\\N" });
+    for (const name of DECOY_VARIABLES) expect(env[name], name).toBeTruthy();
+    expect(env.WEBVIEW2_USER_DATA_FOLDER).toBe(decoy);
+    expect(env.ATM3_DATA_DIR).toBeUndefined();
+
+    // 宿主写的行：`<秒> pid=<pid> scrubbed from the environment: <名字>, …`（host/src/main.rs）。
+    const host = readFileSync(join(process.cwd(), "apps/desktop/native/host/src/main.rs"), "utf8");
+    expect(host).toContain('"{secs} pid={} {}\\n"');
+    expect(host).toContain('&format!("scrubbed from the environment: {}", scrubbed.join(", ")),');
+    const log =
+      "1 pid=7 scrubbed from the environment: WEBVIEW2_USER_DATA_FOLDER\r\n" +
+      "2 pid=9 scrubbed from the environment: WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS, WEBVIEW2_USER_DATA_FOLDER\n";
+    expect(scrubbedVariables(log, 9)).toEqual([...DECOY_VARIABLES]);
+    expect(scrubbedVariables(log, 7)).toEqual(["WEBVIEW2_USER_DATA_FOLDER"]);
+    expect(scrubbedVariables(log, 77)).toEqual([]);
   });
 
   it("保活任务名与 install-state 的 TASK_NAME 一致", () => {
