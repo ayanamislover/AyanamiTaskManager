@@ -131,10 +131,23 @@ fn bridges_are_found_natively_by_the_atm_mcp_image_and_their_owner() {
     // 数据根故意写成不规范的样子（W8 关口在 CI 上：没设 CARGO_TARGET_DIR 时 target 是 `agents\..\target`）：
     // 桥命令由它拼出来，进程的映像路径却总是规范的，观测要认得出是同一个文件。
     let l = root.join("x").join("..").join("L");
-    let shim = l.join("current").join("resources").join("atm-mcp.exe");
-    fs::create_dir_all(shim.parent().unwrap()).unwrap();
+    // 照真实安装的样子（W8 关口 peer r14 P2-02）：shim 在版本目录里，`L\current` 是指向它的目录链接，客户端经
+    // 链接起桥；进程映像是物理目录里的那个文件，观测要按文件身份认出来。
+    let app = l.join("app-1");
+    let physical = app.join("resources").join("atm-mcp.exe");
+    fs::create_dir_all(physical.parent().unwrap()).unwrap();
     let me = std::env::current_exe().unwrap();
-    fs::copy(&me, &shim).unwrap();
+    fs::copy(&me, &physical).unwrap();
+    let link = Command::new("cmd")
+        .arg("/c")
+        .arg("mklink")
+        .arg("/J")
+        .arg(std::path::absolute(l.join("current")).unwrap())
+        .arg(std::path::absolute(&app).unwrap())
+        .output()
+        .unwrap();
+    assert!(link.status.success(), "{link:?}");
+    let shim = l.join("current").join("resources").join("atm-mcp.exe");
     let codex = root.join("codex.exe");
     fs::copy(&me, &codex).unwrap();
     let stop = root.join("stop");
@@ -178,15 +191,22 @@ fn bridges_are_found_natively_by_the_atm_mcp_image_and_their_owner() {
         }
         std::thread::sleep(Duration::from_millis(100));
     };
-    // 先确认那份不算的副本确实在跑（否则「不算」是空转）。映像路径是系统给的规范写法。
-    let shim_image = std::path::absolute(&shim).unwrap();
+    // 先确认那份不算的副本确实在跑（否则「不算」是空转）：它的映像就是那个文件（系统给的是物理路径）。
+    let shim_id = atm_agents::bridges::file_id(&shim.to_string_lossy()).expect("the shim");
     let snapshot = atm_agents::bridges::snapshot();
     let stray_seen = snapshot.iter().any(|p| {
         p.pid == stray.id()
             && p.path
                 .as_deref()
-                .is_some_and(|path| path.eq_ignore_ascii_case(&shim_image.to_string_lossy()))
+                .is_some_and(|path| atm_agents::bridges::file_id(path) == Some(shim_id))
     });
+    assert!(
+        snapshot.iter().filter(|p| p.pid == stray.id()).all(|p| p
+            .path
+            .as_deref()
+            .is_some_and(|path| !path.to_ascii_lowercase().contains(r"\current\"))),
+        "the image path is the physical one, not the link"
+    );
     fs::write(&stop, "").unwrap();
     let _ = owner.wait();
     let _ = stray.wait();

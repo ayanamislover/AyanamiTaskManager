@@ -1,9 +1,14 @@
 //! MCP 桥进程观测（2.0 `mcp-bridge-observation.ts`）：数 Agent 客户端直接拉起的那些桥各占多少私有内存。
 //!
 //! 2.0 起 PowerShell 与 typeperf 采样；3.0 用一次 Toolhelp32 快照拿进程树，再逐个读映像路径、创建时刻和
-//! `PrivateUsage`（只数私有页，共享页不加和）。判据照旧：映像路径与某个桥命令是同一个路径（不分大小写，
-//! 按字面规范化，见 `key`），并且直接父进程是 `codex` 或 `claude`；采样之间退出的、父进程认不出的一律不计。2.x 的宿主入口
-//! （`AyanamiTaskManager.exe --mcp-stdio`）后面挂着 `atm-core`，那一串按固定两层汇总，到 `atm-core` 为止。
+//! `PrivateUsage`（只数私有页，共享页不加和）。判据：映像与某个桥命令是同一个文件，并且直接父进程是 `codex` 或
+//! `claude`；采样之间退出的、父进程认不出的一律不计。2.x 的宿主入口（`AyanamiTaskManager.exe --mcp-stdio`）后面
+//! 挂着 `atm-core`，那一串按固定两层汇总，到 `atm-core` 为止。
+//!
+//! 「同一个文件」：路径按字面规范化后相同（[`key`]），或者文件名相同、文件身份（卷号 + 文件号，打开时跟进链接）
+//! 也相同。后一条是为了 `L\current` 这个目录链接（W8 关口 peer r14 P2-02）：桥命令写的是
+//! `L\current\resources\atm-mcp.exe`，进程映像却是链接指向的物理目录里的那个文件。身份在每次观测时现查，
+//! 链接换到新版本后，下一次观测就跟着新目标走；从旧版本目录起的桥（客户端还没重启）不再算。
 
 use serde_json::{Value, json};
 
@@ -33,26 +38,103 @@ fn supported_owner(name: &str) -> bool {
     matches!(stem(name).as_str(), "codex" | "claude")
 }
 
+/// 路径的根占几段（按 `\` 与 `/` 切开之后）：盘符 `C:` 一段；UNC `\\server\share` 四段（两个空段、服务器、
+/// 共享）；以 `\` 开头的一段（那个空段）；相对路径没有根。`\\?\` 与 `\\.\` 开头的设备路径先由 [`key`] 换成普通写法。
+fn root_len(parts: &[&str]) -> usize {
+    match parts {
+        ["", "", server, share, ..] if !server.is_empty() && !share.is_empty() => 4,
+        [drive, ..] if drive.len() == 2 && drive.ends_with(':') => 1,
+        ["", ..] => 1,
+        _ => 0,
+    }
+}
+
 /// 比较用的路径键：分隔符统一成 `\`，去掉 `.` 与多余的分隔符，按字面消掉 `..`，不分大小写。进程的映像
 /// 路径（`QueryFullProcessImageNameW`）总是规范的，桥命令不一定：它由数据根拼出来，数据根里带 `..` 或 `/`
-/// 时同一个文件也会对不上（W8 关口在 CI 上：`target` 是 `agents\..\target`）。不解析链接与短名。
+/// 时同一个文件也会对不上（W8 关口在 CI 上：`target` 是 `agents\..\target`）。
+///
+/// 根不受 `..` 影响（W8 关口 peer r14 P2-01）：绝对路径根处的 `..` 照 Windows 的做法丢掉（`C:\..\a` 就是
+/// `C:\a`），UNC 的服务器与共享名不会被 `..` 弹出、跨到别的共享去。`\\?\C:\…` 与 `\\?\UNC\server\share\…`
+/// 换成普通写法再比较。不解析链接与短名：那些由文件身份比较（见模块说明）。
 fn key(path: &str) -> String {
-    let mut parts: Vec<&str> = Vec::new();
-    for part in path.split(['\\', '/']) {
-        match part {
-            // 开头的空段是 UNC 的 `\\`，留着；中间的是多余的分隔符。
-            "" if parts.iter().all(|p| p.is_empty()) => parts.push(part),
-            "" | "." => {}
-            ".." if parts
-                .last()
-                .is_some_and(|p| !p.is_empty() && *p != ".." && !p.ends_with(':')) =>
-            {
-                parts.pop();
+    let mut parts: Vec<&str> = path.split(['\\', '/']).collect();
+    if let ["", "", "?" | ".", rest @ ..] = parts.as_slice() {
+        parts = match rest {
+            [unc, server, share, tail @ ..] if unc.eq_ignore_ascii_case("unc") => {
+                [&["", "", *server, *share][..], tail].concat()
             }
-            _ => parts.push(part),
+            [drive, tail @ ..] if drive.len() == 2 && drive.ends_with(':') => {
+                [&[*drive][..], tail].concat()
+            }
+            _ => parts,
+        };
+    }
+    let root = root_len(&parts);
+    let mut out: Vec<&str> = parts[..root].to_vec();
+    for part in &parts[root..] {
+        match *part {
+            "" | "." => {}
+            ".." if out.len() > root && out.last() != Some(&"..") => {
+                out.pop();
+            }
+            // 绝对路径到了根就停在根上；相对路径留着它。
+            ".." if root > 0 => {}
+            p => out.push(p),
         }
     }
-    parts.join("\\").to_lowercase()
+    let joined = out.join("\\");
+    // 只有根的绝对路径（`C:`、`\`）补上分隔符，与 `C:\`、`\` 写法一致。
+    let joined = if out.len() == root && root == 1 && !joined.ends_with('\\') {
+        format!("{joined}\\")
+    } else {
+        joined
+    };
+    joined.to_lowercase()
+}
+
+/// 键的最后一段：文件名。
+fn file_name(key: &str) -> &str {
+    key.rsplit('\\').next().unwrap_or(key)
+}
+
+/// 文件身份：卷序列号与文件号。
+pub type FileId = (u32, u64);
+
+/// 按路径打开（跟进链接）、读文件身份。打不开就是 `None`。只读属性，不读内容，什么都不改。
+#[cfg(windows)]
+pub fn file_id(path: &str) -> Option<FileId> {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::{
+        BY_HANDLE_FILE_INFORMATION, FILE_FLAG_BACKUP_SEMANTICS, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, GetFileInformationByHandle,
+    };
+    let f = std::fs::OpenOptions::new()
+        .access_mode(FILE_READ_ATTRIBUTES)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(path)
+        .ok()?;
+    // SAFETY: 全零是合法的初值；句柄在 `f` 活着时有效。
+    let mut i: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    if unsafe { GetFileInformationByHandle(f.as_raw_handle(), &mut i) } == 0 {
+        return None;
+    }
+    Some((
+        i.dwVolumeSerialNumber,
+        ((i.nFileIndexHigh as u64) << 32) | i.nFileIndexLow as u64,
+    ))
+}
+
+#[cfg(not(windows))]
+pub fn file_id(_path: &str) -> Option<FileId> {
+    None
+}
+
+/// 一个桥命令：路径键，与它现在指向的文件的身份（查不到就只按路径比）。
+struct Wanted {
+    key: String,
+    id: Option<FileId>,
 }
 
 fn chain_private_bytes(root: u32, procs: &[Proc]) -> u64 {
@@ -84,20 +166,44 @@ fn iso(ms: i64) -> String {
     atm_domain::time::Timestamp::from_millis(ms).to_string()
 }
 
-/// 从一份快照算出 2.0 `McpBridgeObservation` 的形状。同一路径只算一次。
-pub fn observe_from(procs: &[Proc], commands: &[String], now_ms: i64) -> Value {
-    let mut wanted: Vec<String> = Vec::new();
+/// 从一份快照算出 2.0 `McpBridgeObservation` 的形状。同一路径只算一次。`id_of` 读文件身份（[`file_id`]；
+/// 用例给假的）：只对与某个桥命令同名、路径却不同的映像才查。
+pub fn observe_from(
+    procs: &[Proc],
+    commands: &[String],
+    now_ms: i64,
+    id_of: &dyn Fn(&str) -> Option<FileId>,
+) -> Value {
+    let mut wanted: Vec<Wanted> = Vec::new();
     for c in commands {
         let k = key(c);
-        if !wanted.contains(&k) {
-            wanted.push(k);
+        if !wanted.iter().any(|w| w.key == k) {
+            wanted.push(Wanted {
+                id: id_of(c),
+                key: k,
+            });
         }
     }
+    let is_bridge = |path: &str| {
+        let k = key(path);
+        let same_name: Vec<&Wanted> = wanted
+            .iter()
+            .filter(|w| file_name(&w.key) == file_name(&k))
+            .collect();
+        if same_name.iter().any(|w| w.key == k) {
+            return true;
+        }
+        if !same_name.iter().any(|w| w.id.is_some()) {
+            return false;
+        }
+        let id = id_of(path);
+        id.is_some() && same_name.iter().any(|w| w.id == id)
+    };
     let mut bridges = Vec::new();
     let mut total: u64 = 0;
     for p in procs {
         let Some(path) = &p.path else { continue };
-        if !wanted.contains(&key(path)) {
+        if !is_bridge(path) {
             continue;
         }
         let (Some(started), Some(private)) = (p.started_ms, p.private_bytes) else {
@@ -228,7 +334,7 @@ pub fn observe(commands: &[String]) -> Value {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64);
-    observe_from(&snapshot(), commands, now)
+    observe_from(&snapshot(), commands, now, &file_id)
 }
 
 #[cfg(test)]
@@ -246,6 +352,11 @@ mod tests {
         }
     }
 
+    /// 查不到文件身份：只按路径比。
+    fn no_id(_: &str) -> Option<FileId> {
+        None
+    }
+
     #[test]
     fn only_direct_children_of_codex_or_claude_count() {
         let shim = r"C:\L\current\resources\atm-mcp.exe";
@@ -257,7 +368,7 @@ mod tests {
             p(22, 99, "atm-mcp", Some(shim), 300),
             p(23, 10, "atm-mcp", Some(r"C:\other\atm-mcp.exe"), 400),
         ];
-        let v = observe_from(&procs, &[shim.to_uppercase()], 0);
+        let v = observe_from(&procs, &[shim.to_uppercase()], 0, &no_id);
         assert_eq!(v["totalPrivateBytes"], 100);
         assert_eq!(v["bridges"].as_array().unwrap().len(), 1);
         assert_eq!(v["bridges"][0]["ownerName"], "codex");
@@ -278,7 +389,7 @@ mod tests {
             "C:/L/current/resources/atm-mcp.exe",
             r"c:\l\CURRENT\x\y\..\..\resources\atm-mcp.exe",
         ] {
-            let v = observe_from(&procs, &[command.to_string()], 0);
+            let v = observe_from(&procs, &[command.to_string()], 0, &no_id);
             assert_eq!(v["totalPrivateBytes"], 100, "{command}");
         }
         // Both sides go through the same key: an image path written another way matches too.
@@ -292,7 +403,7 @@ mod tests {
                 100,
             ),
         ];
-        let v = observe_from(&other_image, &[image.to_string()], 0);
+        let v = observe_from(&other_image, &[image.to_string()], 0, &no_id);
         assert_eq!(v["totalPrivateBytes"], 100);
         // Another file is still another file, however it is written.
         for command in [
@@ -300,11 +411,88 @@ mod tests {
             r"C:\L\current\atm-mcp.exe\..\resources\x.exe",
             r"\\server\L\current\resources\atm-mcp.exe",
         ] {
-            let v = observe_from(&procs, &[command.to_string()], 0);
+            let v = observe_from(&procs, &[command.to_string()], 0, &no_id);
             assert_eq!(v["totalPrivateBytes"], 0, "{command}");
         }
         assert_eq!(key(r"\\server\share\.\a\..\b"), r"\\server\share\b");
-        assert_eq!(key(r"C:\..\a"), r"c:\..\a");
+    }
+
+    /// W8 关口 peer r14 P2-01：根不受 `..` 影响。绝对路径根处的 `..` 照 Windows 的做法丢掉；UNC 的服务器与共享名
+    /// 不会被弹出、跨到别的共享去；设备路径写法与普通写法是同一个。
+    #[test]
+    fn the_root_of_a_path_is_never_crossed() {
+        for (path, want) in [
+            (r"\\server\share\..\other\x", r"\\server\share\other\x"),
+            (r"\\server\share\..\..\x", r"\\server\share\x"),
+            (r"C:\..\a", r"c:\a"),
+            (r"C:\a\..\..\b", r"c:\b"),
+            (r"C:\..", r"c:\"),
+            (r"\a\..\..\b", r"\b"),
+            (r"\\?\C:\L\x", r"c:\l\x"),
+            (r"\\?\UNC\Server\Share\x", r"\\server\share\x"),
+            (r"\\.\C:\x\..\y", r"c:\y"),
+            // 相对路径没有根，开头的 `..` 留着。
+            (r"..\a", r"..\a"),
+            (r"a\..\..\b", r"..\b"),
+        ] {
+            assert_eq!(key(path), want, "{path}");
+        }
+        assert_ne!(key(r"\\server\share\..\other\x"), key(r"\\server\other\x"));
+        let procs = |image: &str| {
+            vec![
+                p(10, 1, "codex", None, 1),
+                p(20, 10, "atm-mcp", Some(image), 100),
+            ]
+        };
+        let command = [r"\\server\share\..\other\atm-mcp.exe".to_string()];
+        let v = observe_from(&procs(r"\\server\other\atm-mcp.exe"), &command, 0, &no_id);
+        assert_eq!(v["totalPrivateBytes"], 0, "another share is another file");
+        let v = observe_from(
+            &procs(r"\\server\share\other\atm-mcp.exe"),
+            &command,
+            0,
+            &no_id,
+        );
+        assert_eq!(v["totalPrivateBytes"], 100);
+    }
+
+    /// W8 关口 peer r14 P2-02：桥命令写的是 `L\current\…`（目录链接），进程映像是链接指向的物理目录里的文件。
+    /// 同名、文件身份相同就是同一个；从旧版本目录起的、只是身份碰巧相同但名字不同的，都不算。
+    #[test]
+    fn a_command_through_a_directory_link_is_the_file_it_points_to() {
+        let command = [r"C:\L\current\resources\atm-mcp.exe".to_string()];
+        let ids = |path: &str| match key(path).as_str() {
+            r"c:\l\current\resources\atm-mcp.exe" | r"c:\l\app-3.0.1\resources\atm-mcp.exe" => {
+                Some((7, 1))
+            }
+            r"c:\l\app-3.0.0\resources\atm-mcp.exe" => Some((7, 2)),
+            r"c:\elsewhere\renamed.exe" => Some((7, 1)),
+            _ => None,
+        };
+        let procs = vec![
+            p(10, 1, "codex", None, 1),
+            p(
+                20,
+                10,
+                "atm-mcp",
+                Some(r"C:\L\app-3.0.1\resources\atm-mcp.exe"),
+                100,
+            ),
+            p(
+                21,
+                10,
+                "atm-mcp",
+                Some(r"C:\L\app-3.0.0\resources\atm-mcp.exe"),
+                200,
+            ),
+            p(22, 10, "renamed", Some(r"C:\elsewhere\renamed.exe"), 400),
+        ];
+        let v = observe_from(&procs, &command, 0, &ids);
+        assert_eq!(v["totalPrivateBytes"], 100, "{v}");
+        assert_eq!(v["bridges"][0]["pid"], 20, "{v}");
+        // 查不到身份（链接不在）时只按路径比：物理目录里的不算。
+        let v = observe_from(&procs, &command, 0, &no_id);
+        assert_eq!(v["totalPrivateBytes"], 0, "{v}");
     }
 
     #[test]
@@ -324,7 +512,7 @@ mod tests {
             // atm-core 下面被唤醒的桌面不算。
             p(50, 40, "AyanamiTaskManager", None, 1000),
         ];
-        let v = observe_from(&procs, &[host.into()], 0);
+        let v = observe_from(&procs, &[host.into()], 0, &no_id);
         assert_eq!(v["totalPrivateBytes"], 70);
     }
 }
