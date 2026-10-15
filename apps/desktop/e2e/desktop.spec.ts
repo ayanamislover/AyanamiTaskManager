@@ -577,6 +577,53 @@ test("在缓存新鲜期内切回项目，任务列表立刻还在", async ({ pa
   }
 });
 
+type Reveal = {
+  opacity: number;
+  transitionProperty: string;
+  transitions: Array<{ property: string; duration: number }>;
+  focusVisible: boolean;
+};
+
+/**
+ * 折叠内容一显示（`hidden` 去掉的那一刻，同一个任务里）就记下它的动效，{@link revealed} 取回。
+ * 事后在另一次 evaluate 里读会赶上过渡已经播完：token 时长 0.14 s，CI 的 runner 上 click 返回到
+ * evaluate 执行就超过了它（W8 关口第四次 CI，读到 opacity 1）。在这里读，样式在这一刻才算出来，
+ * @starting-style 的过渡从起点开始，与机器快慢无关。
+ */
+async function recordReveal(page: Page, selector: string): Promise<void> {
+  await page.evaluate((selector) => {
+    const body = document.querySelector(selector);
+    if (!body) throw new Error(`缺少折叠内容 ${selector}`);
+    if (!body.hasAttribute("hidden")) throw new Error(`折叠内容 ${selector} 已经是展开的`);
+    const store = window as unknown as { __reveal?: Reveal };
+    delete store.__reveal;
+    const observer = new MutationObserver(() => {
+      if (body.hasAttribute("hidden")) return;
+      observer.disconnect();
+      const style = getComputedStyle(body);
+      store.__reveal = {
+        opacity: Number(style.opacity),
+        transitionProperty: style.transitionProperty,
+        transitions: body.getAnimations().map((animation) => ({
+          property:
+            (animation as unknown as { transitionProperty?: string }).transitionProperty ?? "",
+          duration: Number(animation.effect?.getComputedTiming().duration ?? 0),
+        })),
+        // 焦点所在的元素（触发器）是不是键盘焦点态。
+        focusVisible: Boolean(document.activeElement?.matches(":focus-visible")),
+      };
+    });
+    observer.observe(body, { attributes: true, attributeFilter: ["hidden"] });
+  }, selector);
+}
+
+async function revealed(page: Page): Promise<Reveal> {
+  const handle = await page.waitForFunction(
+    () => (window as unknown as { __reveal?: Reveal }).__reveal ?? null,
+  );
+  return (await handle.jsonValue()) as Reveal;
+}
+
 test("折叠区展开有入场过渡，项目页不因分批返回而抖动", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.addInitScript(() => {
@@ -600,32 +647,23 @@ test("折叠区展开有入场过渡，项目页不因分批返回而抖动", as
 
   // 折叠区展开：以前是硬切，现在与弹层同一套 token 时长的淡入。
   const diagnostics = page.getByRole("region", { name: "项目诊断" });
+  await recordReveal(page, "#project-diagnostics-content");
   await diagnostics.getByRole("button", { name: "展开项目诊断" }).click();
-  const motion = await page.evaluate(() => {
-    const body = document.querySelector("#project-diagnostics-content");
-    if (!body) return null;
-    return {
-      // 时长取设计 token，不写死毫秒数：token 调了，用例跟着 token 走。
-      tokenDuration: Number.parseFloat(
-        getComputedStyle(document.documentElement).getPropertyValue("--atm-duration-hover"),
-      ),
-      opacity: Number(getComputedStyle(body).opacity),
-      transitions: body.getAnimations().map((animation) => ({
-        property:
-          (animation as unknown as { transitionProperty?: string }).transitionProperty ?? "",
-        duration: Number(animation.effect?.getComputedTiming().duration ?? 0),
-      })),
-    };
-  });
-  expect(motion).not.toBeNull();
-  expect(motion!.opacity).toBeLessThan(1);
-  expect(motion!.transitions.map((transition) => transition.property).sort()).toEqual([
+  const motion = await revealed(page);
+  // 时长取设计 token，不写死毫秒数：token 调了，用例跟着 token 走。
+  const tokenDuration = await page.evaluate(() =>
+    Number.parseFloat(
+      getComputedStyle(document.documentElement).getPropertyValue("--atm-duration-hover"),
+    ),
+  );
+  expect(motion.opacity).toBeLessThan(1);
+  expect(motion.transitions.map((transition) => transition.property).sort()).toEqual([
     "opacity",
     "transform",
   ]);
-  expect(motion!.tokenDuration).toBeGreaterThan(0);
-  expect(new Set(motion!.transitions.map((transition) => transition.duration))).toEqual(
-    new Set([motion!.tokenDuration]),
+  expect(tokenDuration).toBeGreaterThan(0);
+  expect(new Set(motion.transitions.map((transition) => transition.duration))).toEqual(
+    new Set([tokenDuration]),
   );
   await expect(page.getByRole("region", { name: "工程统计" })).toBeVisible();
 });
@@ -639,26 +677,18 @@ test("键盘展开折叠区即时呈现，鼠标展开仍有过渡", async ({ pa
       await expect(workspace).toHaveAttribute("aria-expanded", "false");
     }
   };
-  const bodyMotion = () =>
-    page.evaluate(() => {
-      const body = document.querySelector("#atm-workspace-navigation");
-      if (!body) throw new Error("缺少工作区折叠内容");
-      return {
-        animations: body.getAnimations().length,
-        transitionProperty: getComputedStyle(body).transitionProperty,
-        opacity: Number(getComputedStyle(body).opacity),
-        focusVisible: Boolean(document.querySelector(".atm-nav-disclosure:focus-visible")),
-      };
-    });
+  // 展开那一刻的动效（recordReveal）；之后再读会赶上过渡已经播完。
+  const body = "#atm-workspace-navigation";
 
   // 鼠标展开：页面刚打开、没有任何键盘交互，:focus-visible 不成立，过渡照旧。
   await page.goto("/#overview");
   await collapse();
+  await recordReveal(page, body);
   await workspace.click();
   await expect(workspace).toHaveAttribute("aria-expanded", "true");
-  const mouse = await bodyMotion();
+  const mouse = await revealed(page);
   expect(mouse.focusVisible, "鼠标点击不进入键盘焦点态").toBe(false);
-  expect(mouse.animations, "鼠标展开保留过渡").toBeGreaterThan(0);
+  expect(mouse.transitions.length, "鼠标展开保留过渡").toBeGreaterThan(0);
 
   // 键盘展开：必须是真键盘，程序 focus() 不一定成立 :focus-visible。
   await page.reload();
@@ -672,11 +702,12 @@ test("键盘展开折叠区即时呈现，鼠标展开仍有过渡", async ({ pa
     );
   }
   expect(reached, "键盘能走到工作区折叠按钮").toBe(true);
+  await recordReveal(page, body);
   await page.keyboard.press("Enter");
   await expect(workspace).toHaveAttribute("aria-expanded", "true");
-  const keyboard = await bodyMotion();
+  const keyboard = await revealed(page);
   expect(keyboard.focusVisible, "触发器处于键盘焦点").toBe(true);
-  expect(keyboard.animations, "键盘展开不播动效").toBe(0);
+  expect(keyboard.transitions.length, "键盘展开不播动效").toBe(0);
   expect(keyboard.transitionProperty).toBe("none");
   expect(keyboard.opacity, "内容立刻就位").toBe(1);
 });
