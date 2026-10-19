@@ -11,9 +11,11 @@
  * 数据根固定在 output/window-smoke-data，报告写 output/window-smoke-report.json，
  * 截图写 output/playwright/。
  */
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { computeReleaseFingerprint } from "./release-fingerprint.js";
+import { sha256, treeDigest } from "./tree-digest.js";
 import type { Page } from "@playwright/test";
 import { rendererPost, rendererRequest } from "./renderer-user-request.js";
 import {
@@ -67,6 +69,24 @@ const loginItems = snapshotLoginItems();
 const probe = NativeWindowProbe.start();
 await mkdir(screenshotDir, { recursive: true });
 const sandbox = await prepareSandbox("window-smoke");
+
+/**
+ * 报告绑定的候选（W8 关口 peer r18 P2-02）：源码（gitHead、工作树是否干净、源码指纹，与发布链同一个
+ * computeReleaseFingerprint）和实际运行的 smoke 包（宿主 exe 与整个包目录的 SHA-256）。开跑前记下；
+ * 跑完再算一次包目录，对不上就不算通过。截图也记哈希。
+ */
+const startedAt = new Date();
+const source = await computeReleaseFingerprint(process.cwd());
+const packageRoot = dirname(executable);
+const candidate = {
+  gitHead: source.gitHead,
+  dirty: source.dirty,
+  dirtyStateHash: source.dirtyStateHash,
+  sourceHash: source.sourceHash,
+  lockfileHash: source.lockfileHash,
+  executableSha256: sha256(await readFile(executable)),
+  package: { root: packageRoot, ...(await treeDigest(packageRoot)) },
+};
 
 /** 宿主唯一的应用窗口；没有就是 null（后台运行或窗口已关）。 */
 const appWindow = (host: SmokeHost) => probe.appWindow(host.pid);
@@ -727,12 +747,27 @@ try {
 } finally {
   probe.close();
 }
+const packageAfter = await treeDigest(packageRoot);
+log.record(
+  "跑完之后 smoke 包的内容与开跑前一致",
+  packageAfter.sha256 === candidate.package.sha256,
+  JSON.stringify(packageAfter),
+);
+const screenshots: Record<string, string> = {};
+for (const name of (await readdir(screenshotDir)).sort()) {
+  const path = join(screenshotDir, name);
+  if (name.endsWith(".png") && (await stat(path)).mtimeMs >= startedAt.getTime())
+    screenshots[name] = sha256(await readFile(path));
+}
 const passed = error === undefined && log.failed.length === 0;
 const report = {
   passed,
   executable,
+  candidate,
   dataDir: sandbox.dataDir,
+  startedAt: startedAt.toISOString(),
   completedAt: new Date().toISOString(),
+  screenshots,
   ...details,
   checks: log.checks,
   ...(error === undefined
