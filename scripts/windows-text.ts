@@ -11,7 +11,8 @@ import { withPowerShellScratch } from "./powershell-scratch.js";
  *
  * 所以：
  * - PowerShell 的 `-Command` 一律经 {@link powershellArgs}，先把输出设成 UTF-8；
- * - 注册表的值、计划任务的定义经 .NET / COM 读出来，不解析 reg.exe、schtasks.exe 的输出；
+ * - 注册表经 advapi32 读写（{@link REGISTRY_SOURCE}），计划任务的定义经 COM 读，不解析 reg.exe、
+ *   schtasks.exe 的输出；
  * - 快捷方式经 IShellLinkW 写、经 Shell.Application 读；
  * - 路径、键名、任务名都经环境变量传，不拼进脚本文本。
  *
@@ -50,67 +51,268 @@ export function powershellText(
 /** 键不在、任务不在：脚本以这个码退出。别的失败退出 2，stdout 什么都不写。 */
 const ABSENT = 3;
 
-export type RegistryValue = { type: string; data: string };
-
-const REGISTRY_TYPES: Record<string, string> = {
-  String: "REG_SZ",
-  ExpandString: "REG_EXPAND_SZ",
-  Binary: "REG_BINARY",
-  DWord: "REG_DWORD",
-  QWord: "REG_QWORD",
-  MultiString: "REG_MULTI_SZ",
-  None: "REG_NONE",
-};
-
 /**
- * 读注册表的两个函数（W8 关口 peer r17 P1-02、P2-01）。主体（{@link REGISTRY_MAIN}）只经它们碰注册表，
- * 用例换掉它们来造出读失败、转换失败。
- * - `Open-AtmKey`：只读打开；根照 reg.exe 的写法（`HKCU`、`HKEY_CURRENT_USER` 等）。键不在是 `$null`
- *   （`OpenSubKey` 的约定），没有权限等一律抛出——不用 `Test-Path`，它把拒绝访问也当成「不在」。
- * - `Convert-AtmValue`：值写成 reg.exe query 的样子：二进制（含 REG_NONE 与未知类型）是连续的大写十六进制；
- *   DWORD / QWORD 按位取十六进制（-1 是 `0xffffffff`；`[uint32]` 转换遇到负数会出错，值就成了空对象）；
- *   多字符串用 `\0` 隔开；REG_EXPAND_SZ 不展开。
+ * 一个注册表值。`type` 是 reg.exe 的类型名，`data` 是 reg.exe query 的写法（给断言看）；`code` 与 `raw`
+ * （原始字节，连续的大写十六进制）是还原用的，按它们写回就和原来一字节不差（W8 关口 peer r18 P2-01：
+ * 多字符串用 `\0` 拼成文字不是一一对应的，含字面 `\0` 的元素还原不回来）。
  */
-export const REGISTRY_FUNCTIONS =
-  "function Open-AtmKey([string]$key) { " +
-  "$i = $key.IndexOf([char]92); " +
-  "$hive = if ($i -lt 0) { $key } else { $key.Substring(0, $i) }; " +
-  "$sub = if ($i -lt 0) { '' } else { $key.Substring($i + 1) }; " +
-  "$root = switch ($hive.ToUpperInvariant()) { " +
-  "{ $_ -in 'HKCU', 'HKEY_CURRENT_USER' } { [Microsoft.Win32.Registry]::CurrentUser } " +
-  "{ $_ -in 'HKLM', 'HKEY_LOCAL_MACHINE' } { [Microsoft.Win32.Registry]::LocalMachine } " +
-  "{ $_ -in 'HKCR', 'HKEY_CLASSES_ROOT' } { [Microsoft.Win32.Registry]::ClassesRoot } " +
-  "{ $_ -in 'HKU', 'HKEY_USERS' } { [Microsoft.Win32.Registry]::Users } " +
-  "{ $_ -in 'HKCC', 'HKEY_CURRENT_CONFIG' } { [Microsoft.Win32.Registry]::CurrentConfig } " +
-  "default { throw ('unknown registry hive: ' + $hive) } }; " +
-  "if ($sub -eq '') { return $root }; return $root.OpenSubKey($sub, $false) }; " +
-  "function Convert-AtmValue([string]$kind, $v) { " +
-  "switch ($kind) { " +
-  "{ $_ -in 'DWord', 'QWord' } { return '0x' + $v.ToString('x') } " +
-  "'MultiString' { return [string]::Join('\\0', [string[]]$v) } " +
-  "{ $_ -in 'String', 'ExpandString' } { return [string]$v } " +
-  "default { return -join ([byte[]]$v | ForEach-Object { $_.ToString('X2') }) } } }; ";
+export type RegistryValue = { type: string; code: number; data: string; raw: string };
 
 /**
- * 读注册表的主体：任何一步出错（打开、列名字、读值、转换、序列化）都以 2 退出，stdout 什么都不写——
+ * 读写注册表的 C#（W8 关口 peer r18 P1-01）。直接调 advapi32，每一步的返回码都留着：
+ * - `RegOpenKeyExW` 只有 ERROR_FILE_NOT_FOUND（2）是「键不在」，别的返回码一律抛出。.NET 的
+ *   `RegistryKey.OpenSubKey` 只对拒绝访问抛出，KEY_DELETED、内存不足之类直接返回 null，和「不在」分不开；
+ *   `GetValue` 读值失败时返回默认值。所以不用 `Microsoft.Win32.Registry`。
+ * - 值经 `RegEnumValueW` 一次连名字、类型、字节一起读出；ERROR_NO_MORE_ITEMS 之外的返回码一律抛出。
+ *   读的过程中键变了（值变长、个数对不上）就整份重读；连着两次读到的一样才算数，读 5 次还不稳定就抛出。
+ * - 写回经 `RegSetValueExW`，类型码与字节照快照原样。
+ * 系统调用都经 `AtmRegApi`：用例换上假的实现，造出各种返回码，走的仍是这里的判断。
+ * 源码里不写反斜杠（这段文字放在 TS 模板串里）。
+ */
+export const REGISTRY_SOURCE = `using System;
+using System.Collections.Generic;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using System.Text;
+
+public abstract class AtmRegApi {
+  public abstract int Open(UIntPtr root, string sub, int access, out IntPtr key);
+  public abstract int Create(UIntPtr root, string sub, int access, out IntPtr key);
+  public abstract int QueryInfo(IntPtr key, out int values, out int maxName, out int maxData);
+  public abstract int EnumValue(IntPtr key, int index, StringBuilder name, ref int nameLength, out int type, byte[] data, ref int dataLength);
+  public abstract int SetValue(IntPtr key, string name, int type, byte[] data, int length);
+  public abstract int DeleteValue(IntPtr key, string name);
+  public abstract void Close(IntPtr key);
+}
+
+public sealed class AtmRegNative : AtmRegApi {
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+  static extern int RegOpenKeyExW(UIntPtr key, string sub, int options, int access, out IntPtr result);
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+  static extern int RegCreateKeyExW(UIntPtr key, string sub, int reserved, string cls, int options, int access, IntPtr security, out IntPtr result, out int disposition);
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+  static extern int RegQueryInfoKeyW(IntPtr key, IntPtr cls, IntPtr clsLength, IntPtr reserved, IntPtr subKeys, IntPtr maxSubKey, IntPtr maxClass, out int values, out int maxName, out int maxData, IntPtr security, IntPtr lastWrite);
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+  static extern int RegEnumValueW(IntPtr key, int index, StringBuilder name, ref int nameLength, IntPtr reserved, out int type, byte[] data, ref int dataLength);
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+  static extern int RegSetValueExW(IntPtr key, string name, int reserved, int type, byte[] data, int length);
+  [DllImport("advapi32.dll", CharSet = CharSet.Unicode)]
+  static extern int RegDeleteValueW(IntPtr key, string name);
+  [DllImport("advapi32.dll")]
+  static extern int RegCloseKey(IntPtr key);
+
+  public override int Open(UIntPtr root, string sub, int access, out IntPtr key) { return RegOpenKeyExW(root, sub, 0, access, out key); }
+  public override int Create(UIntPtr root, string sub, int access, out IntPtr key) { int disposition; return RegCreateKeyExW(root, sub, 0, null, 0, access, IntPtr.Zero, out key, out disposition); }
+  public override int QueryInfo(IntPtr key, out int values, out int maxName, out int maxData) { return RegQueryInfoKeyW(key, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero, out values, out maxName, out maxData, IntPtr.Zero, IntPtr.Zero); }
+  public override int EnumValue(IntPtr key, int index, StringBuilder name, ref int nameLength, out int type, byte[] data, ref int dataLength) { return RegEnumValueW(key, index, name, ref nameLength, IntPtr.Zero, out type, data, ref dataLength); }
+  public override int SetValue(IntPtr key, string name, int type, byte[] data, int length) { return RegSetValueExW(key, name, 0, type, data, length); }
+  public override int DeleteValue(IntPtr key, string name) { return RegDeleteValueW(key, name); }
+  public override void Close(IntPtr key) { RegCloseKey(key); }
+}
+
+public sealed class AtmRegValue {
+  public string Name; public int Code; public string Type; public string Data; public string Raw;
+}
+
+public static class AtmRegistry {
+  const int NotFound = 2, MoreData = 234, NoMoreItems = 259;
+  const int KeyRead = 0x20019, KeySetValue = 0x2;
+  const int Attempts = 5;
+
+  static void Split(string key, out UIntPtr root, out string sub) {
+    int i = key.IndexOf((char)92);
+    string hive = (i < 0 ? key : key.Substring(0, i)).ToUpperInvariant();
+    sub = i < 0 ? "" : key.Substring(i + 1);
+    switch (hive) {
+      case "HKCR": case "HKEY_CLASSES_ROOT": root = new UIntPtr(0x80000000u); break;
+      case "HKCU": case "HKEY_CURRENT_USER": root = new UIntPtr(0x80000001u); break;
+      case "HKLM": case "HKEY_LOCAL_MACHINE": root = new UIntPtr(0x80000002u); break;
+      case "HKU": case "HKEY_USERS": root = new UIntPtr(0x80000003u); break;
+      case "HKCC": case "HKEY_CURRENT_CONFIG": root = new UIntPtr(0x80000005u); break;
+      default: throw new ArgumentException("unknown registry hive: " + hive);
+    }
+  }
+
+  static Exception Fail(string call, int status, string key) {
+    return new Win32Exception(status, call + " on " + key + " returned " + status + ": " + new Win32Exception(status).Message);
+  }
+
+  /** 键的全部值；只有键确实不在是 null。 */
+  public static AtmRegValue[] Read(AtmRegApi api, string key) {
+    UIntPtr root; string sub; Split(key, out root, out sub);
+    IntPtr handle;
+    int status = api.Open(root, sub, KeyRead, out handle);
+    if (status == NotFound) return null;
+    if (status != 0) throw Fail("RegOpenKeyEx", status, key);
+    try {
+      AtmRegValue[] previous = null;
+      for (int attempt = 0; attempt < Attempts; attempt++) {
+        AtmRegValue[] current = ReadOnce(api, handle, key);
+        if (current != null && previous != null && Same(previous, current)) return current;
+        previous = current;
+      }
+      throw new InvalidOperationException("the values of " + key + " kept changing while they were read");
+    } finally {
+      api.Close(handle);
+    }
+  }
+
+  /** 读一遍；读的过程中键变了（值比 RegQueryInfoKey 说的长、个数对不上）是 null，由调用方重读。 */
+  static AtmRegValue[] ReadOnce(AtmRegApi api, IntPtr handle, string key) {
+    int count, maxName, maxData;
+    int status = api.QueryInfo(handle, out count, out maxName, out maxData);
+    if (status != 0) throw Fail("RegQueryInfoKey", status, key);
+    List<AtmRegValue> values = new List<AtmRegValue>();
+    for (int index = 0; ; index++) {
+      StringBuilder name = new StringBuilder(maxName + 1);
+      int nameLength = maxName + 1;
+      byte[] data = new byte[Math.Max(maxData, 1)];
+      int dataLength = data.Length;
+      int type;
+      status = api.EnumValue(handle, index, name, ref nameLength, out type, data, ref dataLength);
+      if (status == NoMoreItems) break;
+      if (status == MoreData) return null;
+      if (status != 0) throw Fail("RegEnumValue", status, key);
+      values.Add(Convert(name.ToString(0, nameLength), type, data, dataLength));
+    }
+    return values.Count == count ? values.ToArray() : null;
+  }
+
+  static bool Same(AtmRegValue[] left, AtmRegValue[] right) {
+    if (left.Length != right.Length) return false;
+    for (int i = 0; i < left.Length; i++)
+      if (left[i].Name != right[i].Name || left[i].Code != right[i].Code || left[i].Raw != right[i].Raw) return false;
+    return true;
+  }
+
+  static string TypeName(int code) {
+    switch (code) {
+      case 0: return "REG_NONE";
+      case 1: return "REG_SZ";
+      case 2: return "REG_EXPAND_SZ";
+      case 3: return "REG_BINARY";
+      case 4: return "REG_DWORD";
+      case 5: return "REG_DWORD_BIG_ENDIAN";
+      case 6: return "REG_LINK";
+      case 7: return "REG_MULTI_SZ";
+      case 8: return "REG_RESOURCE_LIST";
+      case 9: return "REG_FULL_RESOURCE_DESCRIPTOR";
+      case 10: return "REG_RESOURCE_REQUIREMENTS_LIST";
+      case 11: return "REG_QWORD";
+      default: return "REG_TYPE_" + code;
+    }
+  }
+
+  static string Hex(byte[] data, int length) {
+    StringBuilder hex = new StringBuilder(length * 2);
+    for (int i = 0; i < length; i++) hex.Append(data[i].ToString("X2"));
+    return hex.ToString();
+  }
+
+  static byte[] Unhex(string hex) {
+    if (hex.Length % 2 != 0) throw new ArgumentException("raw registry data has an odd number of hex digits");
+    byte[] data = new byte[hex.Length / 2];
+    for (int i = 0; i < data.Length; i++) data[i] = System.Convert.ToByte(hex.Substring(i * 2, 2), 16);
+    return data;
+  }
+
+  /** reg.exe query 的写法：字符串到第一个 NUL；多字符串用字面的反斜杠加 0 隔开；DWORD / QWORD 按位取十六进制；其余是十六进制。 */
+  public static AtmRegValue Convert(string name, int code, byte[] data, int length) {
+    AtmRegValue value = new AtmRegValue();
+    value.Name = name; value.Code = code; value.Type = TypeName(code); value.Raw = Hex(data, length);
+    string text = Encoding.Unicode.GetString(data, 0, length - length % 2);
+    switch (code) {
+      case 1: case 2: {
+        int end = text.IndexOf((char)0);
+        value.Data = end < 0 ? text : text.Substring(0, end);
+        break;
+      }
+      case 7: {
+        List<string> items = new List<string>(text.Split((char)0));
+        while (items.Count > 0 && items[items.Count - 1].Length == 0) items.RemoveAt(items.Count - 1);
+        value.Data = string.Join(new string((char)92, 1) + "0", items.ToArray());
+        break;
+      }
+      case 4: value.Data = length == 4 ? "0x" + BitConverter.ToUInt32(data, 0).ToString("x") : value.Raw; break;
+      case 11: value.Data = length == 8 ? "0x" + BitConverter.ToUInt64(data, 0).ToString("x") : value.Raw; break;
+      default: value.Data = value.Raw; break;
+    }
+    return value;
+  }
+
+  /** 照类型码与原始字节写回一个值；键不在就建出来。 */
+  public static void Set(AtmRegApi api, string key, string name, int code, string raw) {
+    byte[] data = Unhex(raw);
+    UIntPtr root; string sub; Split(key, out root, out sub);
+    IntPtr handle;
+    int status = api.Create(root, sub, KeySetValue, out handle);
+    if (status != 0) throw Fail("RegCreateKeyEx", status, key);
+    try {
+      status = api.SetValue(handle, name, code, data, data.Length);
+      if (status != 0) throw Fail("RegSetValueEx", status, key);
+    } finally {
+      api.Close(handle);
+    }
+  }
+
+  /** 删一个值；键或值本来就不在算删好了，别的返回码抛出。 */
+  public static void Delete(AtmRegApi api, string key, string name) {
+    UIntPtr root; string sub; Split(key, out root, out sub);
+    IntPtr handle;
+    int status = api.Open(root, sub, KeySetValue, out handle);
+    if (status == NotFound) return;
+    if (status != 0) throw Fail("RegOpenKeyEx", status, key);
+    try {
+      status = api.DeleteValue(handle, name);
+      if (status != 0 && status != NotFound) throw Fail("RegDeleteValue", status, key);
+    } finally {
+      api.Close(handle);
+    }
+  }
+}
+`;
+
+/**
+ * 编译 {@link REGISTRY_SOURCE}（再加上 `extra`，用例的假实现放这里），定义 `New-AtmRegistryApi`。
+ * 生产用真实的系统调用；用例传 `api` 换掉它。
+ */
+export function registryPrelude(extra = "", api = "[AtmRegNative]::new()"): string {
+  return `Add-Type -TypeDefinition @'\n${REGISTRY_SOURCE}\n${extra}\n'@\nfunction New-AtmRegistryApi { ${api} }\n`;
+}
+
+/**
+ * 读注册表的主体：任何一步出错（打开、列值、读值、序列化）都以 2 退出，stdout 什么都不写——
  * 结果攒齐了才一次写出，不会有半份快照。只有确定的「键不在」以 {@link ABSENT} 退出。
  */
 export const REGISTRY_MAIN =
   "$ErrorActionPreference = 'Stop'; " +
   "try { " +
-  "$k = Open-AtmKey $env:ATM_TEXT_KEY; " +
-  `if ($null -eq $k) { exit ${ABSENT} }; ` +
+  "$values = [AtmRegistry]::Read((New-AtmRegistryApi), [string]$env:ATM_TEXT_KEY); " +
+  `if ($null -eq $values) { exit ${ABSENT} }; ` +
   "$o = [ordered]@{}; " +
-  "foreach ($n in $k.GetValueNames()) { " +
-  "$kind = $k.GetValueKind($n).ToString(); " +
-  "$o[$n] = [ordered]@{ type = $kind; data = (Convert-AtmValue $kind $k.GetValue($n, $null, 'DoNotExpandEnvironmentNames')) } }; " +
+  "foreach ($v in $values) { $o[$v.Name] = [ordered]@{ type = $v.Type; code = $v.Code; data = $v.Data; raw = $v.Raw } }; " +
   "$json = ConvertTo-Json -InputObject $o -Compress -Depth 3 " +
   "} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 2 }; " +
   "[Console]::Out.Write($json)";
 
 /**
- * 注册表 JSON（{@link REGISTRY_MAIN} 的输出）换成 reg.exe 的类型名。形状不对（不是对象、某个值没有字符串
- * 的 type / data、空输出）一律抛出：半份或坏掉的快照会让还原把用户原来的值当成本轮新加的删掉（peer r17 P1-02）。
+ * 写回或删掉一个值的主体。值名经 `ATM_TEXT_NAME` 传，前面多一个 `=`：空名字（键的默认值）的环境变量
+ * 在 PowerShell 里读回来分不清是空串还是没设。成功时 stdout 是 `ok`，失败以 2 退出。
+ */
+export const REGISTRY_SET_MAIN =
+  "$ErrorActionPreference = 'Stop'; " +
+  "try { " +
+  "$name = ([string]$env:ATM_TEXT_NAME).Substring(1); " +
+  "if ($env:ATM_TEXT_ACTION -eq 'delete') { [AtmRegistry]::Delete((New-AtmRegistryApi), [string]$env:ATM_TEXT_KEY, $name) } " +
+  "else { [AtmRegistry]::Set((New-AtmRegistryApi), [string]$env:ATM_TEXT_KEY, $name, [int]$env:ATM_TEXT_CODE, [string]$env:ATM_TEXT_RAW) } " +
+  "} catch { [Console]::Error.WriteLine($_.Exception.Message); exit 2 }; " +
+  "[Console]::Out.Write('ok')";
+
+const RAW = /^(?:[0-9A-F]{2})*$/u;
+
+/**
+ * 注册表 JSON（{@link REGISTRY_MAIN} 的输出）。形状不对（不是对象、某个值缺了 type / code / data / raw、
+ * raw 不是十六进制、空输出）一律抛出：半份或坏掉的快照会让还原把用户原来的值当成本轮新加的删掉（peer r17 P1-02）。
  */
 export function parseRegistryJson(json: string): Record<string, RegistryValue> {
   const parsed: unknown = JSON.parse(json);
@@ -118,10 +320,21 @@ export function parseRegistryJson(json: string): Record<string, RegistryValue> {
     throw new Error(`注册表读出的不是对象：${json.slice(0, 200)}`);
   return Object.fromEntries(
     Object.entries(parsed as Record<string, unknown>).map(([name, value]) => {
-      const entry = value as { type?: unknown; data?: unknown } | null;
-      if (!entry || typeof entry.type !== "string" || typeof entry.data !== "string")
+      const entry = value as Partial<Record<keyof RegistryValue, unknown>> | null;
+      if (
+        !entry ||
+        typeof entry.type !== "string" ||
+        typeof entry.data !== "string" ||
+        !Number.isInteger(entry.code) ||
+        (entry.code as number) < 0 ||
+        typeof entry.raw !== "string" ||
+        !RAW.test(entry.raw)
+      )
         throw new Error(`注册表值「${name}」的形状不对：${JSON.stringify(value)}`);
-      return [name, { type: REGISTRY_TYPES[entry.type] ?? "REG_NONE", data: entry.data }];
+      return [
+        name,
+        { type: entry.type, code: entry.code as number, data: entry.data, raw: entry.raw },
+      ];
     }),
   );
 }
@@ -138,12 +351,50 @@ export function registryReply(
   return parseRegistryJson(result.stdout);
 }
 
+/** 写注册表脚本的结果：0 且 stdout 是 `ok` 才算写成；别的一律抛出。 */
+export function registryWriteReply(result: SpawnSyncReturns<string>, key: string): void {
+  if (result.error) throw result.error;
+  if (result.status !== 0 || result.stdout !== "ok")
+    throw new Error(`写注册表 ${key} 失败（${result.status}）：${result.stderr}`);
+}
+
+/** 跑一段要 Add-Type 的注册表脚本：编译目录落在 output/ 下的临时根，用完删掉（见 powershell-scratch.ts）。 */
+function registryScript(main: string, vars: Record<string, string>): SpawnSyncReturns<string> {
+  return withPowerShellScratch((env) =>
+    powershellText(registryPrelude() + main, { env, vars, timeout: 120_000 }),
+  );
+}
+
 /** 一个注册表键（如 `HKCU\Software\…`）的全部值；键不在是 null，读失败抛出。只读。 */
 export function registryValues(key: string): Record<string, RegistryValue> | null {
-  return registryReply(
-    powershellText(REGISTRY_FUNCTIONS + REGISTRY_MAIN, { vars: { ATM_TEXT_KEY: key } }),
-    key,
-  );
+  return registryReply(registryScript(REGISTRY_MAIN, { ATM_TEXT_KEY: key }), key);
+}
+
+/** {@link REGISTRY_SET_MAIN} 的变量：有 `value` 是照它写回，没有是删掉。 */
+export function registryWriteVars(
+  key: string,
+  name: string,
+  value?: RegistryValue,
+): Record<string, string> {
+  return value
+    ? {
+        ATM_TEXT_KEY: key,
+        ATM_TEXT_NAME: `=${name}`,
+        ATM_TEXT_ACTION: "set",
+        ATM_TEXT_CODE: String(value.code),
+        ATM_TEXT_RAW: value.raw,
+      }
+    : { ATM_TEXT_KEY: key, ATM_TEXT_NAME: `=${name}`, ATM_TEXT_ACTION: "delete" };
+}
+
+/** 照快照写回一个值（类型码与原始字节原样）。写不成抛出。 */
+export function registrySet(key: string, name: string, value: RegistryValue): void {
+  registryWriteReply(registryScript(REGISTRY_SET_MAIN, registryWriteVars(key, name, value)), key);
+}
+
+/** 删掉一个值；本来就不在算删好了。删不成抛出。 */
+export function registryDelete(key: string, name: string): void {
+  registryWriteReply(registryScript(REGISTRY_SET_MAIN, registryWriteVars(key, name)), key);
 }
 
 /**

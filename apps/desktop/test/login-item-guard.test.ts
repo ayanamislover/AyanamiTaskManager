@@ -6,13 +6,15 @@ import {
   loginItemRestorePlan,
   RUN_VALUE,
   type RunSnapshot,
-  valueNameArgs,
 } from "../../../scripts/login-item-guard.js";
 import { parseRegistryJson } from "../../../scripts/windows-text.js";
 
-/** readRunSnapshot 读到的形状：windows-text.ts 的注册表脚本输出（.NET 的类型名）。 */
-const runKey = (values: Record<string, { type: string; data: string }>) =>
-  parseRegistryJson(JSON.stringify(values));
+/** readRunSnapshot 读到的形状：windows-text.ts 的注册表脚本输出。 */
+const runKey = (
+  values: Record<string, { type: string; code: number; data: string; raw: string }>,
+) => parseRegistryJson(JSON.stringify(values));
+/** 字符串值的原始字节：UTF-16LE，带结尾的 NUL（多字符串的文字自己再带一个）。 */
+const utf16 = (text: string) => Buffer.from(`${text}\0`, "utf16le").toString("hex").toUpperCase();
 
 const productionExe =
   "C:\\Users\\x\\AppData\\Local\\AyanamiTaskManagerDesktop\\AyanamiTaskManager.exe";
@@ -20,7 +22,7 @@ const smokeExe = "R:\\repo\\output\\package-smoke\\app-9.9.9\\AyanamiTaskManager
 const production = `"${productionExe}" --background --random-startup-delay`;
 const smoke = `"${smokeExe}" --background --random-startup-delay`;
 const NAME = "com.squirrel.AyanamiTaskManagerDesktop.AyanamiTaskManager";
-const sz = (data: string) => ({ type: "REG_SZ", data });
+const sz = (data: string) => ({ type: "REG_SZ", code: 1, data, raw: utf16(data) });
 const owned = { executables: [smokeExe], deleted: [NAME] };
 
 describe("smokes must not damage the real autostart entry", () => {
@@ -31,10 +33,10 @@ describe("smokes must not damage the real autostart entry", () => {
    */
   it("puts back an entry this run overwrote, or the very name this run deleted", () => {
     expect(loginItemRestorePlan({ [NAME]: sz(production) }, { [NAME]: sz(smoke) }, owned)).toEqual([
-      { action: "set", name: NAME, type: "REG_SZ", data: production },
+      { action: "set", name: NAME, value: sz(production) },
     ]);
     expect(loginItemRestorePlan({ [NAME]: sz(production) }, {}, owned)).toEqual([
-      { action: "set", name: NAME, type: "REG_SZ", data: production },
+      { action: "set", name: NAME, value: sz(production) },
     ]);
     // Not yet at the step that deletes (an earlier check failed), or the user switched
     // autostart off meanwhile: the gap is not ours.
@@ -45,7 +47,7 @@ describe("smokes must not damage the real autostart entry", () => {
     const other = "AyanamiTaskManager-legacy";
     expect(
       loginItemRestorePlan({ [NAME]: sz(production), [other]: sz(production) }, {}, owned),
-    ).toEqual([{ action: "set", name: NAME, type: "REG_SZ", data: production }]);
+    ).toEqual([{ action: "set", name: NAME, value: sz(production) }]);
   });
 
   it("removes an entry this run added where the user had none", () => {
@@ -63,26 +65,33 @@ describe("smokes must not damage the real autostart entry", () => {
     expect(loginItemRestorePlan({}, { [NAME]: sz(production) }, owned)).toEqual([]);
   });
 
-  // peer r17：快照里空名字是键的默认值，reg.exe 要写 /ve 才指得到它（/v "" 不行）。
-  it("restores a default value with /ve", () => {
-    expect(valueNameArgs("")).toEqual(["/ve"]);
-    expect(valueNameArgs(NAME)).toEqual(["/v", NAME]);
+  // peer r18 P2-01：还原照快照的类型码与原始字节写回，不经 reg.exe 的文字（多字符串的文字不是一一对应的）。
+  it("restores the type code and bytes as snapshotted, not their text", () => {
+    // 两个不同的多字符串：一个元素里有字面的「\0」，一个是两个元素。reg.exe 的写法下它们是同一串文字。
+    const text = `${smokeExe}\\0x`;
+    const literal = { type: "REG_MULTI_SZ", code: 7, data: text, raw: utf16(`${smokeExe}\\0x\0`) };
+    const split = { type: "REG_MULTI_SZ", code: 7, data: text, raw: utf16(`${smokeExe}\0x\0`) };
+    expect(literal.raw).not.toBe(split.raw);
+    expect(loginItemRestorePlan({ [NAME]: literal }, { [NAME]: split }, owned)).toEqual([
+      { action: "set", name: NAME, value: literal },
+    ]);
+    // 默认值（空名字）也照样写回。
+    expect(loginItemRestorePlan({ "": sz(production) }, { "": sz(smoke) }, owned)).toEqual([
+      { action: "set", name: "", value: sz(production) },
+    ]);
     const source = readFileSync(join(process.cwd(), "scripts/login-item-guard.ts"), "utf8");
-    expect(source).not.toMatch(/"\/v", step\.name/u);
-    expect(source.match(/\.\.\.valueNameArgs\(step\.name\)/gu)).toHaveLength(2);
+    expect(source).not.toMatch(/reg\.exe"|execFileSync/u);
+    expect(source).toContain("registrySet(RUN_KEY, step.name, step.value)");
+    expect(source).toContain("registryDelete(RUN_KEY, step.name)");
   });
 
   it("keeps the registry type on restore", () => {
-    const expand = {
-      type: "REG_EXPAND_SZ",
-      data: "%LOCALAPPDATA%\\AyanamiTaskManagerDesktop\\x.exe",
-    };
+    const data = "%LOCALAPPDATA%\\AyanamiTaskManagerDesktop\\x.exe";
+    const expand = { type: "REG_EXPAND_SZ", code: 2, data, raw: utf16(data) };
     expect(loginItemRestorePlan({ [NAME]: expand }, { [NAME]: sz(smoke) }, owned)).toEqual([
-      { action: "set", name: NAME, type: "REG_EXPAND_SZ", data: expand.data },
+      { action: "set", name: NAME, value: expand },
     ]);
-    expect(runKey({ [NAME]: { type: "ExpandString", data: expand.data } })).toEqual({
-      [NAME]: expand,
-    });
+    expect(runKey({ [NAME]: expand })).toEqual({ [NAME]: expand });
   });
 
   it("does nothing when the key is as it was", () => {
@@ -99,7 +108,7 @@ describe("smokes must not damage the real autostart entry", () => {
     };
     const after: RunSnapshot = { Teams: sz("C:\\Teams.exe"), [NAME]: sz(smoke) };
     expect(loginItemRestorePlan(before, after, owned)).toEqual([
-      { action: "set", name: NAME, type: "REG_SZ", data: production },
+      { action: "set", name: NAME, value: sz(production) },
     ]);
   });
 
@@ -146,16 +155,16 @@ describe("smokes must not damage the real autostart entry", () => {
   // 也是同一个值。安装会改写它、卸载会删它。
   it("treats value names that differ only in case as the same value", () => {
     const upper = NAME.toUpperCase();
-    const snapshot = runKey({ [upper]: { type: "String", data: production } });
+    const snapshot = runKey({ [upper]: sz(production) });
     expect(findRunEntry(snapshot, RUN_VALUE)).toEqual(sz(production));
     expect(findRunEntry(snapshot, "SomethingElse")).toBeUndefined();
     // 本轮把同一个值改写成了自己的：放回用户原来的，而不是当成本轮新加的删掉。
     expect(loginItemRestorePlan({ [upper]: sz(production) }, { [NAME]: sz(smoke) }, owned)).toEqual(
-      [{ action: "set", name: upper, type: "REG_SZ", data: production }],
+      [{ action: "set", name: upper, value: sz(production) }],
     );
     // 本轮删的名字与快照里的大小写不同，仍是同一个值。
     expect(loginItemRestorePlan({ [upper]: sz(production) }, {}, owned)).toEqual([
-      { action: "set", name: upper, type: "REG_SZ", data: production },
+      { action: "set", name: upper, value: sz(production) },
     ]);
     // 没变就什么都不做。
     expect(
