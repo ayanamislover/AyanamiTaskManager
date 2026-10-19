@@ -20,6 +20,10 @@ pub enum Local {
     ToggleMaximizeWindow,
     IsWindowMaximized,
     CloseWindow,
+    /// 窗口外框归谁画："native"（系统的缩放边）或 "client"（Windows 10：界面贴边的把手发起缩放，frame.rs）。
+    GetWindowFrame,
+    /// 界面贴边的把手按下：交给系统的缩放循环。参数是固定的几个边名（frame::resize_direction）。
+    StartWindowResize,
     /// 服务处在哪一步，数据源冲突时带上原因（07 §7）。服务没开也答得了。
     GetDataSource,
     /// 用户对数据源冲突的选择（`KEEP_V3` / `RECONVERT`）。只有这个可信的 WebView 能发（B2）。
@@ -43,6 +47,8 @@ fn method(name: &str) -> Option<Method> {
         "toggleMaximizeWindow" => Method::Local(Local::ToggleMaximizeWindow),
         "isWindowMaximized" => Method::Local(Local::IsWindowMaximized),
         "closeWindow" => Method::Local(Local::CloseWindow),
+        "getWindowFrame" => Method::Local(Local::GetWindowFrame),
+        "startWindowResize" => Method::Local(Local::StartWindowResize),
         "getDataSource" => Method::Local(Local::GetDataSource),
         "chooseDataSource" => Method::Local(Local::ChooseDataSource),
         "runtimeRequest" => Method::Core("runtimeRequest"),
@@ -78,7 +84,12 @@ pub enum Rejected {
 
 fn arity(method: &Method) -> usize {
     match method {
-        Method::Local(Local::SetAutoLaunch | Local::CopyText | Local::ChooseDataSource) => 1,
+        Method::Local(
+            Local::SetAutoLaunch
+            | Local::CopyText
+            | Local::ChooseDataSource
+            | Local::StartWindowResize,
+        ) => 1,
         Method::Core("runtimeRequest" | "setMemoryProfile" | "installMcp") => 1,
         Method::Core("manageAgentIntegration") => 2,
         _ => 0,
@@ -98,6 +109,9 @@ fn arguments_valid(method: &Method, args: &[Value]) -> bool {
         Method::Local(Local::ChooseDataSource) => {
             matches!(args[0].as_str(), Some("KEEP_V3" | "RECONVERT"))
         }
+        Method::Local(Local::StartWindowResize) => args[0]
+            .as_str()
+            .is_some_and(|edge| crate::frame::resize_direction(edge).is_some()),
         Method::Core("runtimeRequest") => args[0].is_object(),
         Method::Core("setMemoryProfile") => args[0].is_boolean(),
         Method::Core("installMcp") => args[0].is_string(),
@@ -226,6 +240,8 @@ pub const INIT_SCRIPT: &str = r#"(() => {
     toggleMaximizeWindow: () => call("toggleMaximizeWindow", []),
     isWindowMaximized: () => call("isWindowMaximized", []),
     closeWindow: () => call("closeWindow", []),
+    getWindowFrame: () => call("getWindowFrame", []),
+    startWindowResize: (edge) => call("startWindowResize", [edge]),
     getDataSource: () => call("getDataSource", []),
     chooseDataSource: (choice) => call("chooseDataSource", [choice]),
     onDataSourceChange: subscribe(listeners.dataSource),
@@ -406,6 +422,50 @@ mod tests {
                 "{name}"
             );
         }
+    }
+
+    /// 缩放把手只收固定的几个边名；顶边、大小写不同、数组、数字一律在桥上被拒。
+    #[test]
+    fn window_resize_takes_one_of_the_handle_edges() {
+        for edge in [
+            "left",
+            "right",
+            "bottom",
+            "bottomLeft",
+            "bottomRight",
+            "topLeft",
+            "topRight",
+        ] {
+            let call = parse(
+                SOURCE,
+                &format!(r#"{{"id":6,"method":"startWindowResize","args":["{edge}"]}}"#),
+            )
+            .unwrap();
+            assert_eq!(call.method, Method::Local(Local::StartWindowResize));
+        }
+        for args in [
+            r#"["top"]"#,
+            r#"["Left"]"#,
+            r#"["bottom-left"]"#,
+            r#"[3]"#,
+            r#"[]"#,
+            r#"["left","right"]"#,
+        ] {
+            assert_eq!(
+                parse(
+                    SOURCE,
+                    &format!(r#"{{"id":6,"method":"startWindowResize","args":{args}}}"#)
+                ),
+                Err(Rejected::Arguments),
+                "{args}"
+            );
+        }
+        assert_eq!(
+            parse(SOURCE, r#"{"id":7,"method":"getWindowFrame","args":[]}"#)
+                .unwrap()
+                .method,
+            Method::Local(Local::GetWindowFrame)
+        );
     }
 
     #[test]

@@ -39,6 +39,8 @@ sha2 = "0.10"
 serde_json.workspace = true
 tao = "0.35"
 wry = "0.55"
+# 与 tao 同一份：只用来认 Windows 10 / 11（frame.rs）。
+windows-version = "0.1"
 tray-icon = "0.24"
 # 与 wry 0.55 同版本：直接挂 WebView2 的 frame 事件（webview_frames.rs）。
 webview2-com = "0.38"
@@ -46,6 +48,7 @@ webview2-com = "0.38"
 windows = { version = "0.61", features = ["Data_Xml_Dom", "UI_Notifications", "Win32_System_Com", "Win32_UI_Shell"] }
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
+  "Win32_Graphics_Dwm",
   "Win32_Security",
   "Win32_Security_Authorization",
   "Win32_Security_Cryptography",
@@ -61,6 +64,7 @@ windows-sys = { workspace = true, features = [
   "Win32_System_Threading",
   "Win32_System_IO",
   "Win32_System_LibraryLoader",
+  "Win32_UI_Controls",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }

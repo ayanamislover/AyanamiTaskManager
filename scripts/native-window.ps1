@@ -255,8 +255,78 @@ public static class AtmNativeWindow
         }, IntPtr.Zero);
         return "[" + string.Join(",", found.ToArray()) + "]";
     }
+
+    private static string Hex(System.Drawing.Color color)
+    {
+        return Str(string.Format(CultureInfo.InvariantCulture, "#{0:x2}{1:x2}{2:x2}", color.R, color.G, color.B));
+    }
+
+    [DllImport("dwmapi.dll")] private static extern int DwmGetWindowAttribute(IntPtr hwnd, int attribute, out Rect value, int size);
+    private const int DWMWA_EXTENDED_FRAME_BOUNDS = 9;
+    private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    private static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
+    private static readonly IntPtr HWND_BOTTOM = new IntPtr(1);
+    private const uint SWP_NOSIZE = 0x0001;
+
+    /// DWM 合成之后屏幕上的真实像素。PrintWindow 拍不到 DWM 画的边框线（它自己补一条经典边），
+    /// 只能从屏幕上拍。
+    ///
+    /// 不把整个窗口提到前台：把它挪到显示器的一个角上，只露出外框的一个 size×size 的角，置顶一瞬间
+    /// 从屏幕拍下这一角，再放回原位、压回最底层；全程不激活。corner = "bottom-left" 露出左下角
+    /// （看左边和下边），"bottom-right" 露出右下角（看右边和下边）。
+    /// 回的是从外框往里一行/一列的颜色：left/right 是角里水平居中那一行，bottom 是竖直那一列，
+    /// 都从拍下那一角的最外一像素数起（前 pad 个在外框外面，用来看阴影）；visible 是
+    /// DWMWA_EXTENDED_FRAME_BOUNDS：看得见的窗口从外框往里几像素（外面是透明的缩放边）。
+    public static string ScreenCorner(long handle, string corner, int size, int pad, string path)
+    {
+        PerMonitorAware();
+        IntPtr hwnd = new IntPtr(handle);
+        Rect window; GetWindowRect(hwnd, out window);
+        Rect frame;
+        if (DwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS, out frame, Marshal.SizeOf(typeof(Rect))) != 0) frame = window;
+        var info = new MonitorInfo { Size = Marshal.SizeOf(typeof(MonitorInfo)) };
+        GetMonitorInfo(MonitorFromWindow(hwnd, 2), ref info);
+        int width = window.Right - window.Left, height = window.Bottom - window.Top;
+        bool left = corner == "bottom-left";
+        if (!left && corner != "bottom-right") throw new ArgumentException("unknown corner: " + corner);
+        // 露出的那一角放在显示器上沿的另一侧：左下角放到右上，右下角放到左上。
+        // pad：外框外面也拍进 pad 个像素（看阴影、看外框外有没有残线）。
+        int x = left ? info.Monitor.Right - size + pad : info.Monitor.Left - (width - size + pad);
+        int y = info.Monitor.Top - (height - size + pad);
+        int shotX = left ? info.Monitor.Right - size : info.Monitor.Left;
+        int shotY = info.Monitor.Top;
+        var ring = new List<string>();
+        var column = new List<string>();
+        try
+        {
+            SetWindowPos(hwnd, HWND_TOPMOST, x, y, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+            System.Threading.Thread.Sleep(350);
+            using (var bitmap = new System.Drawing.Bitmap(size, size, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+            {
+                using (var graphics = System.Drawing.Graphics.FromImage(bitmap))
+                    graphics.CopyFromScreen(shotX, shotY, 0, 0, new System.Drawing.Size(size, size));
+                if (!string.IsNullOrEmpty(path)) bitmap.Save(path, System.Drawing.Imaging.ImageFormat.Png);
+                int row = size / 2;
+                for (int i = 0; i < size / 2; i++)
+                {
+                    ring.Add(Hex(bitmap.GetPixel(left ? i : size - 1 - i, row)));
+                    column.Add(Hex(bitmap.GetPixel(size / 2, size - 1 - i)));
+                }
+            }
+        }
+        finally
+        {
+            SetWindowPos(hwnd, HWND_NOTOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            SetWindowPos(hwnd, HWND_BOTTOM, window.Left, window.Top, 0, 0, SWP_NOSIZE | SWP_NOACTIVATE);
+        }
+        int visible = left ? frame.Left - window.Left : window.Right - frame.Right;
+        return "{\"corner\":" + Str(corner) + ",\"pad\":" + pad
+            + ",\"visible\":{\"side\":" + visible + ",\"edge\":" + (window.Bottom - frame.Bottom) + "}"
+            + ",\"" + (left ? "left" : "right") + "\":[" + string.Join(",", ring.ToArray()) + "]"
+            + ",\"bottom\":[" + string.Join(",", column.ToArray()) + "]}";
+    }
 }
-'@
+'@ -ReferencedAssemblies System.Drawing
 
 $stdout = [Console]::Out
 while ($null -ne ($line = [Console]::In.ReadLine())) {
@@ -275,6 +345,7 @@ while ($null -ne ($line = [Console]::In.ReadLine())) {
       "mintrack" { $response = [AtmNativeWindow]::MinTrackSize([long]$request.hwnd) }
       "syscommand" { $response = [AtmNativeWindow]::SysCommand([long]$request.hwnd, [string]$request.command) }
       "children" { $response = [AtmNativeWindow]::Children([long]$request.hwnd, [int]$request.x, [int]$request.y) }
+      "screencorner" { $response = [AtmNativeWindow]::ScreenCorner([long]$request.hwnd, [string]$request.corner, [int]$request.size, [int]$request.pad, [string]$request.path) }
       default { throw "unknown op: $($request.op)" }
     }
     $stdout.WriteLine('{"ok":true,"value":' + $response + '}')

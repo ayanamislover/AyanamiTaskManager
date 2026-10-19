@@ -8,6 +8,7 @@ mod args;
 mod assets;
 mod bridge;
 mod child_env;
+mod frame;
 mod headless;
 mod health;
 #[cfg(test)]

@@ -53,6 +53,7 @@ export function AppShell({
       />
       <main className="atm-main" aria-label={title}>
         <header className="atm-topbar">
+          <div className="atm-titlebar-edge" aria-hidden="true" />
           <div className="atm-titlebar-drag" aria-hidden="true" />
           <button className="atm-search-button" onClick={onSearch}>
             <MagnifyingGlass size={17} />

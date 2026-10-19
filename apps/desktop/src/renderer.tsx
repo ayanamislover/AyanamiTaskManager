@@ -107,12 +107,28 @@ type DesktopBridge = {
   toggleMaximizeWindow(): Promise<boolean>;
   isWindowMaximized(): Promise<boolean>;
   closeWindow(): Promise<void>;
+  /** 可选：老宿主与 e2e 的桩没有它，没有就当系统外框（不渲染缩放把手）。 */
+  getWindowFrame?(): Promise<WindowFrame>;
+  startWindowResize?(edge: WindowEdge): Promise<boolean>;
   onWindowMaximizedChange(listener: (maximized: boolean) => void): () => void;
   onNavigate(listener: (route: string) => void): () => void;
   getDataSource(): Promise<DataSourceState>;
   chooseDataSource(choice: "KEEP_V3" | "RECONVERT"): Promise<DataSourceState>;
   onDataSourceChange(listener: (state: DataSourceState) => void): () => void;
 };
+
+/** 窗口外框归谁画：系统（缩放边在外框里），或界面（Windows 10：贴边的把手发起缩放，见 frame.rs）。 */
+type WindowFrame = "native" | "client";
+const windowEdges = [
+  "left",
+  "right",
+  "bottom",
+  "bottomLeft",
+  "bottomRight",
+  "topLeft",
+  "topRight",
+] as const;
+type WindowEdge = (typeof windowEdges)[number];
 
 function RendererReadySignal({ desktop }: { desktop: DesktopBridge }) {
   useEffect(() => {
@@ -157,7 +173,7 @@ declare global {
   }
 }
 
-function DesktopWindowChrome({ desktop }: { desktop: DesktopBridge }) {
+function useWindowMaximized(desktop: DesktopBridge) {
   const [maximized, setMaximized] = useState(false);
 
   useEffect(() => {
@@ -171,6 +187,54 @@ function DesktopWindowChrome({ desktop }: { desktop: DesktopBridge }) {
       unsubscribe();
     };
   }, [desktop]);
+
+  return [maximized, setMaximized] as const;
+}
+
+/**
+ * Windows 10 的缩放把手：窗口没有系统的缩放边（那会让 DWM 画一圈边框线），贴边的几条把手接住
+ * 按下，交给宿主走系统的缩放循环。最大化时不渲染。必须排在整个界面后面：WebView2 按文档顺序判
+ * 拖动区，排在前面会被外壳的拖动区盖掉（window-chrome.css）。
+ */
+function DesktopWindowEdges({ desktop }: { desktop: DesktopBridge }) {
+  const [maximized] = useWindowMaximized(desktop);
+  const [frame, setFrame] = useState<WindowFrame>("native");
+
+  useEffect(() => {
+    let mounted = true;
+    void desktop
+      .getWindowFrame?.()
+      .then((value) => {
+        if (mounted) setFrame(value);
+      })
+      .catch(() => undefined);
+    return () => {
+      mounted = false;
+    };
+  }, [desktop]);
+
+  if (frame !== "client" || maximized || !desktop.startWindowResize) return null;
+  const startResize = desktop.startWindowResize.bind(desktop);
+  return (
+    <div className="atm-window-edges" aria-hidden="true">
+      {windowEdges.map((edge) => (
+        <div
+          key={edge}
+          className="atm-window-edge"
+          data-edge={edge}
+          onPointerDown={(event) => {
+            if (event.button !== 0) return;
+            event.preventDefault();
+            void startResize(edge);
+          }}
+        />
+      ))}
+    </div>
+  );
+}
+
+function DesktopWindowChrome({ desktop }: { desktop: DesktopBridge }) {
+  const [maximized, setMaximized] = useWindowMaximized(desktop);
 
   return (
     <div className="atm-window-chrome" role="toolbar" aria-label="窗口控制">
@@ -256,6 +320,7 @@ createRoot(root).render(
       brandLogoSrc={brandLogoUrl}
       {...(desktop === undefined ? {} : { desktop })}
     />
+    {desktop ? <DesktopWindowEdges desktop={desktop} /> : null}
     {desktop ? <RendererReadySignal desktop={desktop} /> : null}
   </StrictMode>,
 );

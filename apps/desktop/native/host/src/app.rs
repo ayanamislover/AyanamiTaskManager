@@ -1522,6 +1522,25 @@ impl App {
             Local::IsWindowMaximized => {
                 json!(self.window.as_ref().is_some_and(Window::is_maximized))
             }
+            Local::GetWindowFrame => {
+                json!(if crate::frame::client_frame() {
+                    "client"
+                } else {
+                    "native"
+                })
+            }
+            Local::StartWindowResize => {
+                let direction = args[0].as_str().and_then(crate::frame::resize_direction);
+                let started = match (&self.window, direction) {
+                    (Some(window), Some(direction))
+                        if crate::frame::client_frame() && !window.is_maximized() =>
+                    {
+                        window.drag_resize_window(direction).is_ok()
+                    }
+                    _ => false,
+                };
+                json!(started)
+            }
             Local::CloseWindow => {
                 self.deliver(&bridge::ok(id, Value::Null));
                 self.close_window();
@@ -1748,7 +1767,8 @@ impl App {
         let mut builder = WindowBuilder::new()
             .with_title("AyanamiTaskManager")
             .with_decorations(false)
-            .with_undecorated_shadow(true)
+            // Windows 10 上阴影模式的非客户区会让 DWM 在左、右、下画一圈边框线（frame.rs）。
+            .with_undecorated_shadow(!crate::frame::client_frame())
             .with_visible(false)
             // First shown with SW_SHOWNOACTIVATE instead of SW_SHOW (tao's MARKER_DONT_FOCUS).
             .with_focused(!background_window())
@@ -1776,6 +1796,8 @@ impl App {
                 return;
             }
         };
+        // Windows 10 没有非客户区，阴影由 DWM 框架找回来（frame.rs）。
+        crate::frame::install(window.hwnd());
         self.generation += 1;
         self.epoch += 1;
         self.page_loaded = false;

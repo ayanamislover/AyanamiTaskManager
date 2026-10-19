@@ -29,6 +29,20 @@ export type NativeHitTest = {
   chain: Array<{ className: string; hit: number }>;
 };
 
+export type ScreenCornerName = "bottom-left" | "bottom-right";
+
+/** 屏幕上拍下的一角：从最外一像素往里一行（left 或 right）和一列（bottom）的颜色。 */
+export type NativeScreenCorner = {
+  corner: ScreenCornerName;
+  /** 拍下的那一角里，前 pad 个像素在外框外面。 */
+  pad: number;
+  /** DWMWA_EXTENDED_FRAME_BOUNDS：看得见的窗口从外框往里几像素（外面是透明的缩放边）。 */
+  visible: { side: number; edge: number };
+  left?: string[];
+  right?: string[];
+  bottom: string[];
+};
+
 export const HTCLIENT = 1;
 export const HTCAPTION = 2;
 
@@ -182,6 +196,19 @@ export class NativeWindowProbe {
   /** 诊断：应用窗口下每个子窗口对这个点的 WM_NCHITTEST，断言失败时写进报错。 */
   children(hwnd: number, point: { x: number; y: number }): Promise<unknown[]> {
     return this.request({ op: "children", hwnd, x: point.x, y: point.y });
+  }
+
+  /**
+   * DWM 合成后屏幕上的真实边缘像素（PrintWindow 看不到 DWM 画的边框线）。窗口挪到显示器角上、只露出
+   * 外框的一个 size×size 的角，置顶一瞬间拍下，再放回原位、压回底层，不激活。
+   */
+  screenCorner(
+    hwnd: number,
+    corner: ScreenCornerName,
+    path: string,
+    { size = 48, pad = 0 }: { size?: number; pad?: number } = {},
+  ): Promise<NativeScreenCorner> {
+    return this.request({ op: "screencorner", hwnd, corner, size, pad, path });
   }
 
   close(): void {

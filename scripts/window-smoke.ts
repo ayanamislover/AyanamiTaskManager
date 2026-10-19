@@ -27,6 +27,7 @@ import {
 import {
   CheckLog,
   connectRenderer,
+  delay,
   openProjectFromSidebar,
   outputRoot,
   prepareSandbox,
@@ -122,6 +123,100 @@ async function expectNativeRegion(
         : { children: await probe.children(nativeWindow.hwnd, point) }),
     }),
   );
+}
+
+/** WebView2 在拖动区最上面 SM_CYFRAME 那几像素自己答的缩放码（改窗口高度）。 */
+const HTTOP = 12;
+
+/**
+ * 顶沿整条都能用：侧栏上方的气口、顶栏上内边距、搜索框上方，从窗口最上面一像素起往下，
+ * 先是 WebView2 自己答的 HTTOP（缩放边，不超过 10 个逻辑像素），紧接着就是 HTCAPTION。
+ * 以前这一截是 HTCLIENT：既拖不动窗口也缩放不了，鼠标得往下挪一点才拖得动。
+ */
+async function expectTopEdge(page: Page, nativeWindow: NativeWindowState): Promise<void> {
+  const devicePixelRatio = await page.evaluate(() => globalThis.devicePixelRatio);
+  const current = await probe.state(nativeWindow.hwnd);
+  // 顶栏上内边距 18px：再往下就是搜索框、按钮本身了。
+  const rows = Math.floor(18 * devicePixelRatio);
+  for (const selector of [".atm-sidebar", ".atm-titlebar-drag", ".atm-search-button"]) {
+    const box = await page.locator(selector).first().boundingBox();
+    check(`${selector} 可见`, box !== null);
+    const { x } = cssPointToScreen(
+      current.client,
+      { x: box.x + box.width / 2, y: 0 },
+      devicePixelRatio,
+    );
+    const hits: number[] = [];
+    for (let row = 0; row < rows; row++)
+      hits.push((await probe.hitTest(nativeWindow.hwnd, { x, y: current.client.y + row })).hit);
+    const resize = hits.findIndex((hit) => hit !== HTTOP);
+    check(
+      `${selector} 上方从顶沿起是缩放边接拖动区，没有拖不动的一截`,
+      resize >= 0 &&
+        resize <= 10 * devicePixelRatio &&
+        hits.slice(resize).every((hit) => hit === HTCAPTION),
+      JSON.stringify(hits),
+    );
+  }
+}
+
+const channels = (hex: string) => [1, 3, 5].map((at) => Number.parseInt(hex.slice(at, at + 2), 16));
+const colorDistance = (a: string, b: string) =>
+  Math.max(...channels(a).map((value, index) => Math.abs(value - channels(b)[index]!)));
+
+/**
+ * Windows 10（宿主报 "client"）：窗口没有系统的缩放边，DWM 不再在左、右、下画边框线；
+ * 缩放改由贴边的把手接住按下，它们要命中到页面（HTCLIENT）。边框线只在屏幕上看得到
+ * （PrintWindow 自己补一条经典边），所以从屏幕上拍：暗色下窗口最外一圈看得见的像素要和里面
+ * 几像素是同一个颜色。
+ */
+async function expectClientFrame(page: Page, nativeWindow: NativeWindowState): Promise<void> {
+  for (const edge of [
+    "left",
+    "right",
+    "bottom",
+    "bottomLeft",
+    "bottomRight",
+    "topLeft",
+    "topRight",
+  ])
+    await expectNativeRegion(
+      page,
+      nativeWindow,
+      `.atm-window-edge[data-edge="${edge}"]`,
+      "no-drag",
+      HTCLIENT,
+    );
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if ((await page.locator("html").getAttribute("data-theme")) === "dark") break;
+    await page.getByRole("button", { name: /切换至.+模式/u }).click();
+  }
+  check("暗色主题", (await page.locator("html").getAttribute("data-theme")) === "dark");
+  // 等主题切换的过渡走完再拍。
+  await delay(800);
+  for (const corner of ["bottom-left", "bottom-right"] as const) {
+    const shot = await probe.screenCorner(
+      nativeWindow.hwnd,
+      corner,
+      join(screenshotDir, `packaged-window-edge-${corner}-dark.png`),
+    );
+    for (const [name, ring, inset] of [
+      [
+        corner === "bottom-left" ? "左边" : "右边",
+        shot.left ?? shot.right ?? [],
+        shot.visible.side,
+      ],
+      ["下边", shot.bottom, shot.visible.edge],
+    ] as const) {
+      const outer = ring[inset];
+      const inner = ring[inset + 4];
+      check(
+        `暗色下${name}最外一圈与界面同色（没有 DWM 边框线）`,
+        outer !== undefined && inner !== undefined && colorDistance(outer, inner) <= 12,
+        JSON.stringify({ corner, inset, ring }),
+      );
+    }
+  }
 }
 
 async function runSmoke(host: SmokeHost): Promise<Record<string, unknown>> {
@@ -222,6 +317,14 @@ async function runSmoke(host: SmokeHost): Promise<Record<string, unknown>> {
     await expectNativeRegion(page, shown, '[data-testid="window-minimize"]', "no-drag", HTCLIENT);
     await expectNativeRegion(page, shown, '[data-testid="window-maximize"]', "no-drag", HTCLIENT);
     await expectNativeRegion(page, shown, '[data-testid="window-close"]', "no-drag", HTCLIENT);
+    await expectTopEdge(page, shown);
+    const windowFrame = await page.evaluate(() => (window as any).ayanamiDesktop.getWindowFrame());
+    check(
+      "宿主报了窗口外框归谁画",
+      windowFrame === "client" || windowFrame === "native",
+      String(windowFrame),
+    );
+    if (windowFrame === "client") await expectClientFrame(page, shown);
 
     // 走侧栏导航，不改 hash 再 reload：宿主只放行入口文档本身的导航，带 hash 的 reload 会被拦下。
     await page.getByRole("button", { name: "设置", exact: true }).click();

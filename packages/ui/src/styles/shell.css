@@ -276,9 +276,40 @@
   mask-image: linear-gradient(#000 72%, transparent);
   pointer-events: none;
 }
+/*
+ * 这层磨砂只在底下真有内容时才出现。停在顶部时底下只有彩雾，它却照样把顶部最浓的那团
+ * 粉紫刷成 78% 的平底色：顶栏成了一条和画布不同色的色带，渐隐的下缘正好压在页面标题上。
+ * 现在跟着滚动走：滚动为 0 时完全透明，顶栏和彩雾是一整块；往下滚的头 32px 里渐渐浮出来。
+ * 页面短得滚不动时滚动时间线不生效，动画不起作用，用底下那条 opacity: 0（这时也没有内容会
+ * 钻到顶栏下面）。不支持滚动时间线的浏览器保持原来常显的样子。
+ */
+@supports (animation-timeline: scroll()) {
+  .atm-topbar::before {
+    opacity: 0;
+    animation: atm-topbar-veil linear both;
+    animation-timeline: scroll(nearest block);
+    animation-range: 0 32px;
+  }
+}
+@keyframes atm-topbar-veil {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
 .atm-titlebar-drag {
   min-width: 0;
   min-height: 44px;
+}
+/* 顶栏上内边距那一条（高度与上面 padding-top 相同）。不占网格、不接指针；桌面版把它声明成拖动区
+ * （apps/desktop/src/window-chrome.css），网页版里它什么也不做。 */
+.atm-titlebar-edge {
+  position: absolute;
+  inset: 0 0 auto;
+  height: 18px;
+  pointer-events: none;
 }
 .atm-search-button {
   display: flex;

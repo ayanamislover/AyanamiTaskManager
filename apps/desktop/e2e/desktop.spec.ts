@@ -1568,6 +1568,133 @@ test("forced-colors 与 reduced-transparency 保留焦点并关闭透明材质",
   }
 });
 
+test("桌面顶栏停在顶部时与彩雾一体，顶沿是拖动区，Windows 10 的缩放把手交给宿主", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.addInitScript(
+    ({ endpoint, token }) => {
+      const state = window as any;
+      state.__resizeCalls = [];
+      state.__maximizedListeners = new Set();
+      state.ayanamiDesktop = {
+        notifyRendererReady: () => undefined,
+        // 界面的数据照常走真实的 e2e 服务（换上用户凭证），总览要有内容才滚得动。
+        runtimeRequest: async (input: {
+          path: string;
+          method?: string;
+          headers?: Record<string, string>;
+          body?: string;
+        }) => {
+          const response = await fetch(`${endpoint}${input.path}`, {
+            method: input.method ?? "GET",
+            headers: { ...input.headers, authorization: `Bearer ${token}` },
+            ...(input.body === undefined ? {} : { body: input.body }),
+          });
+          return {
+            status: response.status,
+            statusText: response.statusText,
+            headers: Object.fromEntries(response.headers.entries()),
+            body: await response.text(),
+          };
+        },
+        minimizeWindow: async () => undefined,
+        toggleMaximizeWindow: async () => false,
+        isWindowMaximized: async () => false,
+        closeWindow: async () => undefined,
+        onWindowMaximizedChange: (listener: (value: boolean) => void) => {
+          state.__maximizedListeners.add(listener);
+          return () => state.__maximizedListeners.delete(listener);
+        },
+        onNavigate: () => () => undefined,
+        getWindowFrame: async () => "client",
+        startWindowResize: async (edge: string) => {
+          state.__resizeCalls.push(edge);
+          return true;
+        },
+      };
+    },
+    { endpoint: apiUrl.replace(/\/api\/v1$/u, ""), token: headers.authorization.slice(7) },
+  );
+  for (const theme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme: theme });
+    await page.goto("/#overview");
+    await expect(page.locator("html")).toHaveAttribute("data-atm-desktop", "true");
+    await page.locator(".atm-page-head, .atm-content h1").first().waitFor();
+    const main = page.locator(".atm-main");
+    const veil = () =>
+      page
+        .locator(".atm-topbar")
+        .evaluate((element) => getComputedStyle(element, "::before").opacity);
+    // 停在顶部：磨砂底完全透明，顶栏和彩雾是一整块，不出现压在标题上的色带。
+    await main.evaluate((element) => (element.scrollTop = 0));
+    await expect.poll(veil).toBe("0");
+    await page.screenshot({
+      path: resolve("output", "playwright", `e2e-topbar-at-rest-${theme}.png`),
+    });
+    expect(await main.evaluate((element) => element.scrollHeight > element.clientHeight + 80)).toBe(
+      true,
+    );
+    // 内容滚到顶栏下面：磨砂底浮出来。
+    await main.evaluate((element) => (element.scrollTop = 200));
+    await expect.poll(veil).toBe("1");
+    await page.screenshot({
+      path: resolve("output", "playwright", `e2e-topbar-scrolled-${theme}.png`),
+    });
+    await main.evaluate((element) => (element.scrollTop = 0));
+    await expect.poll(veil).toBe("0");
+  }
+
+  const region = (selector: string) =>
+    page
+      .locator(selector)
+      .first()
+      .evaluate((element) => getComputedStyle(element).getPropertyValue("-webkit-app-region"));
+  // 顶沿那一条贴着窗口上沿、和顶栏上内边距一样高；外壳气口拖、主区域与顶栏本身不拖。
+  expect(await region(".atm-shell")).toBe("drag");
+  expect(await region(".atm-main")).toBe("no-drag");
+  expect(await region(".atm-topbar")).toBe("no-drag");
+  expect(await region(".atm-titlebar-edge")).toBe("drag");
+  const edge = await page.locator(".atm-titlebar-edge").evaluate((element) => ({
+    box: element.getBoundingClientRect().toJSON(),
+    paddingTop: getComputedStyle(element.parentElement!).paddingTop,
+  }));
+  expect(edge.box.y).toBe(0);
+  expect(`${edge.box.height}px`).toBe(edge.paddingTop);
+  expect(await region('[data-testid="window-minimize"]')).toBe("no-drag");
+
+  // Windows 10（宿主报 "client"）：七个贴边把手，排在整个界面后面，按下交给宿主。
+  const handles = page.locator(".atm-window-edge");
+  await expect(handles).toHaveCount(7);
+  expect(await region(".atm-window-edge")).toBe("no-drag");
+  expect(
+    await page.evaluate(() => {
+      const shell = document.querySelector(".atm-shell")!;
+      const edges = document.querySelector(".atm-window-edges")!;
+      return Boolean(shell.compareDocumentPosition(edges) & Node.DOCUMENT_POSITION_FOLLOWING);
+    }),
+  ).toBe(true);
+  const left = await page.locator('.atm-window-edge[data-edge="left"]').boundingBox();
+  expect(left?.x).toBe(0);
+  await page.mouse.move(left!.x + left!.width / 2, left!.y + left!.height / 2);
+  await page.mouse.down();
+  await page.mouse.up();
+  const bottomRight = await page.locator('.atm-window-edge[data-edge="bottomRight"]').boundingBox();
+  await page.mouse.move(bottomRight!.x + 6, bottomRight!.y + 6);
+  await page.mouse.down({ button: "right" });
+  await page.mouse.up({ button: "right" });
+  await page.mouse.down();
+  await page.mouse.up();
+  await expect
+    .poll(() => page.evaluate(() => (window as any).__resizeCalls as string[]))
+    .toEqual(["left", "bottomRight"]);
+  // 最大化时没有缩放把手。
+  await page.evaluate(() => {
+    for (const listener of (window as any).__maximizedListeners) listener(true);
+  });
+  await expect(handles).toHaveCount(0);
+});
+
 test("两张任务表格行与项目 tabs 可完整键盘操作并恢复焦点", async ({ page }) => {
   const api = await createRequest.newContext({ extraHTTPHeaders: headers });
   // Agent 专用的路由（begin、建任务、改任务、进度、end）走真实的 Agent HTTP（daemon.json）。
