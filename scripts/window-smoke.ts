@@ -11,12 +11,11 @@
  * 数据根固定在 output/window-smoke-data，报告写 output/window-smoke-report.json，
  * 截图写 output/playwright/。
  */
-import { agentFetch } from "./agent-fetch.js";
 import { mkdir, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import type { Page } from "@playwright/test";
-import { rendererPost } from "./renderer-user-request.js";
+import { rendererPost, rendererRequest } from "./renderer-user-request.js";
 import {
   HTCAPTION,
   HTCLIENT,
@@ -222,7 +221,7 @@ async function expectClientFrame(page: Page, nativeWindow: NativeWindowState): P
 async function runSmoke(host: SmokeHost): Promise<Record<string, unknown>> {
   let renderer: SmokeRenderer | null = null;
   try {
-    const runtime = await waitForRuntime(host);
+    await waitForRuntime(host);
     const backgroundWindows = await probe.windows(host.pid);
     check(
       "后台启动不建应用窗口",
@@ -340,16 +339,16 @@ async function runSmoke(host: SmokeHost): Promise<Record<string, unknown>> {
       () => page.getByText("设置已保存", { exact: true }).isVisible(),
       Boolean,
     );
-    const settingsResponse = await agentFetch(`${runtime.endpoint}/api/v1/settings`, {
-      headers: { authorization: `Bearer ${runtime.token}` },
-    });
-    const storedSettings = (await settingsResponse.json()) as Array<{
-      key: string;
-      value: unknown;
-    }>;
-    const storedNotificationMode = settingsResponse.ok
-      ? storedSettings.find((setting) => setting.key === "notification.mode")?.value
-      : undefined;
+    // 设置是用户专属路由：Agent 凭证读它得 404（凭证边界，不是缺路由）。以用户身份经界面的桥读回。
+    const settingsResponse = await rendererRequest<Array<{ key: string; value: unknown }> | null>(
+      page,
+      "GET",
+      "/api/v1/settings",
+    );
+    const storedNotificationMode =
+      settingsResponse.status === 200
+        ? settingsResponse.body?.find((setting) => setting.key === "notification.mode")?.value
+        : undefined;
     check(
       "通知模式经界面保存后服务端读回 CRITICAL",
       storedNotificationMode === "CRITICAL",
