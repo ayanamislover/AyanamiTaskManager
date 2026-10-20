@@ -33,11 +33,6 @@ const releaseGateContracts = [
   },
   { name: "unit tests", source: "releaseRunner", needle: '{ name: "test", args: ["test"] },' },
   { name: "desktop E2E", source: "releaseRunner", needle: '{ name: "e2e", args: ["test:e2e"] },' },
-  {
-    name: "benchmark",
-    source: "releaseRunner",
-    needle: '{ name: "benchmark", args: ["benchmark"] },',
-  },
   { name: "build", source: "releaseRunner", needle: '{ name: "build", args: ["build"] },' },
   {
     name: "native package",
@@ -56,6 +51,18 @@ const releaseGateContracts = [
       '{ name: "distribution-smoke", args: ["exec", "tsx", "scripts/distribution-smoke.ts"] },',
   },
   {
+    name: "install drill",
+    source: "releaseRunner",
+    needle:
+      'name: "install-drill",\n    args: ["exec", "tsx", "scripts/install-drill.ts", "--rebuild-packages"],',
+  },
+  {
+    name: "budget",
+    source: "releaseRunner",
+    needle:
+      'name: "budget",\n    args: ["exec", "tsx", "scripts/budget-measure.ts", "--json", "output/budget-report.json"],',
+  },
+  {
     name: "portable smoke",
     source: "distributionSmoke",
     needle: "  await portable();",
@@ -63,7 +70,12 @@ const releaseGateContracts = [
   {
     name: "installed smoke",
     source: "distributionSmoke",
-    needle: "  installedState = await installed();",
+    needle: "  installedState = await installedHalf();",
+  },
+  {
+    name: "clean machine declaration",
+    source: "workflow",
+    needle: 'ATM_DISTRIBUTION_CLEAN_MACHINE: "1"',
   },
 ] as const satisfies ReadonlyArray<{
   name: string;
@@ -170,7 +182,9 @@ describe("GitHub Actions runtime policy", () => {
   // distribution-smoke 验的是用户拿到的生产二进制：不能借 smoke 构建的钩子退出，
   // 并且要主动塞调试参数，证明生产宿主把它们清掉了。
   it("checks the production binaries without smoke hooks, and tries to open a debug port", () => {
-    const source = readFileSync(distributionSmokePath, "utf8");
+    const source = ["distribution-smoke.ts", "distribution-common.ts", "distribution-installed.ts"]
+      .map((name) => readFileSync(resolve(root, "scripts", name), "utf8"))
+      .join("\n");
 
     expect(source).not.toContain("pnpm.cmd");
     expect(source).not.toContain("--smoke-quit");

@@ -128,6 +128,14 @@ fn forward(setup: &mut Setup, txn: &mut Transaction, record: &Snapshot, version:
         }
     }
     legacy::move_items(&moved, &env.install_root, &newstyle)?;
+    // Back to Electron from 3.x: settle N before the pointer leaves it (07 §8).
+    if txn
+        .from
+        .as_deref()
+        .is_some_and(atm_install_state::startup::is_v3)
+    {
+        setup.settle_v3(txn)?;
+    }
     // R_POINTER: `legacy:` never equals any `app-x.y.z`, so every new-style admission ends.
     store::enter(&setup.store, txn, TxnState::ReversePointer).map_err(io)?;
     setup

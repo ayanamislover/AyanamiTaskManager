@@ -10,9 +10,6 @@
  */
 import { TASK_PATCH_OPERATION_NAMES, TaskPatchOperations } from "@ayanami-task/protocol";
 
-export const TASK_PATCH_COMPOSITE_DOCUMENTATION_BEGIN = "<!-- TASK_PATCH_COMPOSITE:BEGIN -->";
-export const TASK_PATCH_COMPOSITE_DOCUMENTATION_END = "<!-- TASK_PATCH_COMPOSITE:END -->";
-
 export type CompositeOperationDoc = {
   readonly operation: string;
   readonly purpose: string;
@@ -98,35 +95,4 @@ export function compositeTaskPatchOperationNames(): readonly string[] {
   return TASK_PATCH_OPERATION_NAMES.filter(
     (operation) => !TaskPatchOperations[operation].batchable,
   );
-}
-
-export function generateCompositeTaskPatchDocumentation(): string {
-  const documented = new Set(TASK_PATCH_COMPOSITE_DOCS.map((entry) => entry.operation));
-  const missing = compositeTaskPatchOperationNames().filter((name) => !documented.has(name));
-  if (missing.length > 0) throw new Error(`COMPOSITE_OPERATION_DOC_MISSING:${missing.join(",")}`);
-
-  const sections = TASK_PATCH_COMPOSITE_DOCS.flatMap((entry) => [
-    `#### \`${entry.operation}\``,
-    "",
-    entry.purpose,
-    "",
-    "```json",
-    JSON.stringify(entry.example, null, 2),
-    "```",
-    "",
-  ]);
-
-  return [
-    TASK_PATCH_COMPOSITE_DOCUMENTATION_BEGIN,
-    "### composite 任务操作（自动生成）",
-    "",
-    "上一张表只列状态机操作。`atm_task_patch` 还接受下列 composite 操作，它们**不可与其他操作同批**：",
-    "`items` 只允许一个元素。",
-    "",
-    "所有条目共用 `task_key` + `expected_version` 骨架。**`expected_version` 的语义按操作而异**：",
-    "`checklist_single` 比的是那条检查项自己的版本，其余操作都比任务版本。字段名相同不代表语义相同。",
-    "",
-    ...sections,
-    TASK_PATCH_COMPOSITE_DOCUMENTATION_END,
-  ].join("\n");
 }

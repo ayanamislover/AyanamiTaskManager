@@ -1,0 +1,26 @@
+[package]
+name = "atm-http"
+version = "0.0.0"
+description = "AyanamiTaskManager 3 Agent HTTP: loopback listener, transport guards, Principal::Agent, MCP and Agent REST"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+atm-domain = { path = "../domain" }
+atm-service = { path = "../service" }
+atm-store = { path = "../store" }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }
+
+
+[dev-dependencies]
+# 用例核对整库零写入（与 service 同一个版本，不新增下载）。
+rusqlite = "0.39"
+# 用例里的服务与常驻进程用同一个客户端存活探测（R11 A4）。
+atm-jobs = { path = "../jobs" }

@@ -1,14 +1,19 @@
 /**
  * 手动烟测共用的原生烟测宿主驱动（window / history / blur / login-startup / bridge-memory）。
  *
- * 做法与 packaged-smoke 一致：package-native --smoke 产出的版本目录（带 portable 标记）就地运行，
- * ATM_DATA_DIR 指到 output/ 下的沙箱；只有 smoke 构建的宿主给 WebView2 开 CDP 端口，
- * 端口从 <数据根>\webview\EBWebView\DevToolsActivePort 读，从不猜。
+ * 做法与 packaged-smoke 一致：package-native --smoke 产出的版本目录（带 portable 标记）就地运行。
+ * 3.x 是单进程：宿主自己就是服务，运行文件（runtime\daemon.json、host.json）、WebView 数据与
+ * lifecycle 日志都在 3.0 根 N。沙箱里两个根都显式给：ATM_DATA_DIR（2.x 根 L，转换的来源）指到
+ * output/ 下，ATM3_DATA_DIR（N）是合成 home 里的 Local\AyanamiTaskManager3。只有 smoke 构建的
+ * 宿主给 WebView2 开 CDP 端口，端口从 N\webview\EBWebView\DevToolsActivePort 读，从不猜。
  *
  * 这里有两条硬约束，凡是用它的脚本都继承：
  *   - 数据根只能在仓库 output/ 下，绝不碰真实安装与真实数据根。
  *   - 结束进程只按自己拉起的宿主 PID 结束进程树，从不按镜像名。
  */
+// 先于一切：这里拉起的宿主窗口不抢焦点、压在最底层（scripts/test-windows.ts）。
+import "./test-windows.js";
+import { agentFetch } from "./agent-fetch.js";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { mkdir, readFile, rm } from "node:fs/promises";
@@ -30,7 +35,8 @@ export type SmokeHost = {
   pid: number;
   stderr: string[];
   executable: string;
-  dataDir: string;
+  /** N：运行文件、WebView 数据与 lifecycle 日志所在。 */
+  v3Dir: string;
   env: NodeJS.ProcessEnv;
 };
 
@@ -84,8 +90,8 @@ export function smokeExecutable(): string {
   const executable = realpathSync.native(requested);
   if (!existsSync(join(dirname(executable), "portable")))
     throw new Error(`烟测宿主需要版本目录里的 portable 标记：${dirname(executable)}`);
-  // 生产宿主也能带 portable 标记，可它不认 ATM_SMOKE_CORE_USERPROFILE：Node 子进程会读到真实
-  // home 下的 Agent 配置。拿错了二进制要在启动前拒，不能等 CDP 超时才发现。
+  // 生产宿主也能带 portable 标记，可它不认 ATM_SMOKE_CORE_USERPROFILE：设置页读 Agent 接入时会读到
+  // 真实 home 下的 Agent 配置。拿错了二进制要在启动前拒，不能等 CDP 超时才发现。
   assertSmokeHost(readFileSync(executable));
   // 版本目录的上一层有 app.json 或 state\ 就是一份安装：宿主会按安装上下文准入、甚至走安装恢复。
   const parent = dirname(dirname(executable));
@@ -112,14 +118,19 @@ const realPath = (path: string) => {
   return join(realpathSync.native(probe), ...tail);
 };
 
-/** 真实安装与真实数据根：任何烟测都不许把数据根放到这里，也不许放到它们里面。 */
+/** 真实安装与真实数据根（L、N、安装根）：任何烟测都不许把数据根放到这里，也不许放到它们里面。 */
 export function realInstallRoots(env: NodeJS.ProcessEnv = process.env): string[] {
   const local = env.LOCALAPPDATA;
   if (!local) return [];
-  return [join(local, "AyanamiTaskManager"), join(local, "AyanamiTaskManagerDesktop")].map((path) =>
-    resolve(path),
-  );
+  return [
+    join(local, "AyanamiTaskManager"),
+    join(local, "AyanamiTaskManager3"),
+    join(local, "AyanamiTaskManagerDesktop"),
+  ].map((path) => resolve(path));
 }
+
+/** 沙箱里的 3.0 根 N：合成 home 的 Local\AyanamiTaskManager3（与产品默认的相对位置一样）。 */
+export const v3Root = (home: string) => join(home, "Local", "AyanamiTaskManager3");
 
 /**
  * 数据根必须是仓库 output/ 下的子目录，且不能是（或落进）真实数据根与真实安装。
@@ -155,26 +166,33 @@ export function assertSandboxDataDir(
 }
 
 /**
- * 宿主进程的环境。数据根显式给；继承来的数据根别名一律去掉。
+ * 宿主进程的环境。两个数据根都显式给（L 是 dataDir，N 在合成 home 里）；继承来的三个数据根变量
+ * 一律去掉——漏掉 ATM3_DATA_DIR 的话，外面设过它，宿主就把 N 写到那里去。
  *
- * WebView2 在合成 USERPROFILE 下起不来，宿主保留真实 profile；core 与 stdio 桥这些 Node 子进程
- * 经 smoke 构建认的 ATM_SMOKE_CORE_USERPROFILE 拿合成 home，APPDATA / LOCALAPPDATA 也指进沙箱——
- * 于是界面上读 Agent 集成状态时，读到的是沙箱里的空配置，不是这台机器上真实的 Agent 配置。
+ * WebView2 在合成 USERPROFILE 下起不来，宿主保留真实 profile；Agent 接入经 smoke 构建认的
+ * ATM_SMOKE_CORE_USERPROFILE 拿合成 home，APPDATA / LOCALAPPDATA 也指进沙箱——于是界面上读 Agent
+ * 集成状态时，读到的是沙箱里的空配置，不是这台机器上真实的 Agent 配置。
  */
 export function smokeHostEnvironment(dataDir: string, home: string): NodeJS.ProcessEnv {
-  const inherited = Object.fromEntries(
-    Object.entries(process.env).filter(
-      (entry): entry is [string, string] =>
-        entry[1] !== undefined && !["ATM_DATA_DIR", "AYANAMI_TASK_DATA_DIR"].includes(entry[0]),
-    ),
-  );
-  return {
-    ...inherited,
+  const own = {
     ATM_DATA_DIR: dataDir,
+    ATM3_DATA_DIR: v3Root(home),
     APPDATA: join(home, "Roaming"),
     LOCALAPPDATA: join(home, "Local"),
     ATM_SMOKE_CORE_USERPROFILE: home,
   };
+  // Windows 的变量名不分大小写：继承来的 `Atm3_Data_Dir` 和这里的 ATM3_DATA_DIR 是同一个变量，
+  // 留着它，子进程环境里就有两份，谁生效说不准。按大写比较一并去掉。
+  const replaced = new Set(
+    [...Object.keys(own), "AYANAMI_TASK_DATA_DIR"].map((key) => key.toUpperCase()),
+  );
+  const inherited = Object.fromEntries(
+    Object.entries(process.env).filter(
+      (entry): entry is [string, string] =>
+        entry[1] !== undefined && !replaced.has(entry[0].toUpperCase()),
+    ),
+  );
+  return { ...inherited, ...own };
 }
 
 /**
@@ -184,7 +202,7 @@ export function smokeHostEnvironment(dataDir: string, home: string): NodeJS.Proc
 export async function prepareSandbox(
   name: string,
   options: { dataDir?: string; fresh?: boolean } = {},
-): Promise<{ dataDir: string; home: string; env: NodeJS.ProcessEnv }> {
+): Promise<{ dataDir: string; v3Dir: string; home: string; env: NodeJS.ProcessEnv }> {
   const dataDir = assertSandboxDataDir(options.dataDir ?? join(outputRoot, `${name}-data`));
   const home = assertSandboxDataDir(join(outputRoot, `${name}-home`));
   if (options.fresh ?? true) await rm(dataDir, { recursive: true, force: true });
@@ -192,20 +210,22 @@ export async function prepareSandbox(
   await mkdir(dataDir, { recursive: true });
   await mkdir(join(home, "Roaming"), { recursive: true });
   await mkdir(join(home, "Local"), { recursive: true });
-  return { dataDir, home, env: smokeHostEnvironment(dataDir, home) };
+  return { dataDir, v3Dir: v3Root(home), home, env: smokeHostEnvironment(dataDir, home) };
 }
 
-export const devToolsPortFile = (dataDir: string) =>
-  join(dataDir, "webview", "EBWebView", "DevToolsActivePort");
-export const runtimeFile = (dataDir: string) => join(dataDir, "runtime", "daemon.json");
+/** 都在 N（3.x 单进程宿主写的位置），不在 L。 */
+export const devToolsPortFile = (v3Dir: string) =>
+  join(v3Dir, "webview", "EBWebView", "DevToolsActivePort");
+export const runtimeFile = (v3Dir: string) => join(v3Dir, "runtime", "daemon.json");
 
 export function startSmokeHost(input: {
   executable: string;
-  dataDir: string;
+  /** N：宿主的运行文件与 WebView 数据在这里（与 env 里的 ATM3_DATA_DIR / LOCALAPPDATA 一致）。 */
+  v3Dir: string;
   env: NodeJS.ProcessEnv;
   args?: string[];
 }): SmokeHost {
-  rmSync(devToolsPortFile(input.dataDir), { force: true });
+  rmSync(devToolsPortFile(input.v3Dir), { force: true });
   const child = spawn(input.executable, input.args ?? ["--background"], {
     cwd: repoRoot,
     env: input.env,
@@ -223,7 +243,7 @@ export function startSmokeHost(input: {
     pid: child.pid,
     stderr,
     executable: input.executable,
-    dataDir: input.dataDir,
+    v3Dir: input.v3Dir,
     env: input.env,
   };
 }
@@ -286,10 +306,10 @@ export class CheckLog {
   }
 }
 
-export async function readRuntime(dataDir: string): Promise<SmokeRuntime | null> {
-  if (!existsSync(runtimeFile(dataDir))) return null;
-  const runtime = JSON.parse(await readFile(runtimeFile(dataDir), "utf8")) as SmokeRuntime;
-  const response = await fetch(`${runtime.endpoint}/api/v1/system/status`, {
+export async function readRuntime(v3Dir: string): Promise<SmokeRuntime | null> {
+  if (!existsSync(runtimeFile(v3Dir))) return null;
+  const runtime = JSON.parse(await readFile(runtimeFile(v3Dir), "utf8")) as SmokeRuntime;
+  const response = await agentFetch(`${runtime.endpoint}/api/v1/system/status`, {
     headers: { authorization: `Bearer ${runtime.token}` },
   });
   return response.ok ? runtime : null;
@@ -302,7 +322,7 @@ export async function waitForRuntime(host: SmokeHost, timeoutMs = 30_000): Promi
         throw new Error(
           `宿主提前退出（${host.child.exitCode ?? host.child.signalCode}）：${host.stderr.join("")}`,
         );
-      return readRuntime(host.dataDir);
+      return readRuntime(host.v3Dir);
     },
     timeoutMs,
     "服务健康",
@@ -325,7 +345,12 @@ async function waitForExit(child: ChildProcess, timeoutMs: number): Promise<bool
 
 /** 用户再点一次入口：第二实例把 SHOW 交给正在运行的宿主后退出。 */
 export async function requestShow(host: SmokeHost): Promise<void> {
-  const show = spawn(host.executable, [], { cwd: repoRoot, env: host.env, stdio: "ignore" });
+  const show = spawn(host.executable, [], {
+    cwd: repoRoot,
+    env: host.env,
+    stdio: "ignore",
+    windowsHide: true,
+  });
   if (!(await waitForExit(show, 10_000))) {
     show.kill();
     throw new Error("SHOW 请求没有在 10 秒内送达");
@@ -333,9 +358,9 @@ export async function requestShow(host: SmokeHost): Promise<void> {
 }
 
 /** DevToolsActivePort 第一行就是端口；文件还没写或写到一半时返回 null。 */
-export async function readDevToolsPort(dataDir: string): Promise<number | null> {
-  if (!existsSync(devToolsPortFile(dataDir))) return null;
-  const value = Number((await readFile(devToolsPortFile(dataDir), "utf8")).split(/\r?\n/u)[0]);
+export async function readDevToolsPort(v3Dir: string): Promise<number | null> {
+  if (!existsSync(devToolsPortFile(v3Dir))) return null;
+  const value = Number((await readFile(devToolsPortFile(v3Dir), "utf8")).split(/\r?\n/u)[0]);
   return Number.isInteger(value) && value > 0 ? value : null;
 }
 
@@ -346,7 +371,7 @@ export async function readDevToolsPort(dataDir: string): Promise<number | null> 
 export async function connectRenderer(host: SmokeHost, timeoutMs = 30_000): Promise<SmokeRenderer> {
   return waitUntil(
     async () => {
-      const port = await readDevToolsPort(host.dataDir);
+      const port = await readDevToolsPort(host.v3Dir);
       if (port === null) return null;
       const browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
       const page = browser
@@ -378,7 +403,7 @@ export async function openProjectFromSidebar(page: Page, name: string): Promise<
 }
 
 /**
- * 只结束自己拉起的那个宿主的进程树（core、WebView2 都在树里），从不按镜像名。
+ * 只结束自己拉起的那个宿主的进程树（WebView2 在树里），从不按镜像名。
  * 只能对还没退出的子进程调用：Node 握着它的进程句柄，PID 在退出前不会被系统复用。
  */
 export function killProcessTree(pid: number): void {

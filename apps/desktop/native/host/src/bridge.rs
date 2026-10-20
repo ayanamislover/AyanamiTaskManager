@@ -15,12 +15,19 @@ pub enum Local {
     NotifyRendererReady,
     GetAutoLaunch,
     SetAutoLaunch,
-    ShowItemInFolder,
     CopyText,
     MinimizeWindow,
     ToggleMaximizeWindow,
     IsWindowMaximized,
     CloseWindow,
+    /// 窗口外框归谁画："native"（系统的缩放边）或 "client"（Windows 10：界面贴边的把手发起缩放，frame.rs）。
+    GetWindowFrame,
+    /// 界面贴边的把手按下：交给系统的缩放循环。参数是固定的几个边名（frame::resize_direction）。
+    StartWindowResize,
+    /// 服务处在哪一步，数据源冲突时带上原因（07 §7）。服务没开也答得了。
+    GetDataSource,
+    /// 用户对数据源冲突的选择（`KEEP_V3` / `RECONVERT`）。只有这个可信的 WebView 能发（B2）。
+    ChooseDataSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,12 +42,15 @@ fn method(name: &str) -> Option<Method> {
         "notifyRendererReady" => Method::Local(Local::NotifyRendererReady),
         "getAutoLaunch" => Method::Local(Local::GetAutoLaunch),
         "setAutoLaunch" => Method::Local(Local::SetAutoLaunch),
-        "showItemInFolder" => Method::Local(Local::ShowItemInFolder),
         "copyText" => Method::Local(Local::CopyText),
         "minimizeWindow" => Method::Local(Local::MinimizeWindow),
         "toggleMaximizeWindow" => Method::Local(Local::ToggleMaximizeWindow),
         "isWindowMaximized" => Method::Local(Local::IsWindowMaximized),
         "closeWindow" => Method::Local(Local::CloseWindow),
+        "getWindowFrame" => Method::Local(Local::GetWindowFrame),
+        "startWindowResize" => Method::Local(Local::StartWindowResize),
+        "getDataSource" => Method::Local(Local::GetDataSource),
+        "chooseDataSource" => Method::Local(Local::ChooseDataSource),
         "runtimeRequest" => Method::Core("runtimeRequest"),
         "getUpdateStatus" => Method::Core("getUpdateStatus"),
         "checkForUpdates" => Method::Core("checkForUpdates"),
@@ -74,7 +84,12 @@ pub enum Rejected {
 
 fn arity(method: &Method) -> usize {
     match method {
-        Method::Local(Local::SetAutoLaunch | Local::ShowItemInFolder | Local::CopyText) => 1,
+        Method::Local(
+            Local::SetAutoLaunch
+            | Local::CopyText
+            | Local::ChooseDataSource
+            | Local::StartWindowResize,
+        ) => 1,
         Method::Core("runtimeRequest" | "setMemoryProfile" | "installMcp") => 1,
         Method::Core("manageAgentIntegration") => 2,
         _ => 0,
@@ -88,12 +103,15 @@ fn arguments_valid(method: &Method, args: &[Value]) -> bool {
     }
     match method {
         Method::Local(Local::SetAutoLaunch) => args[0].is_boolean(),
-        Method::Local(Local::ShowItemInFolder) => {
-            args[0].as_str().is_some_and(|path| path.len() <= 4096)
-        }
         Method::Local(Local::CopyText) => {
             args[0].as_str().is_some_and(|text| text.len() <= 1 << 20)
         }
+        Method::Local(Local::ChooseDataSource) => {
+            matches!(args[0].as_str(), Some("KEEP_V3" | "RECONVERT"))
+        }
+        Method::Local(Local::StartWindowResize) => args[0]
+            .as_str()
+            .is_some_and(|edge| crate::frame::resize_direction(edge).is_some()),
         Method::Core("runtimeRequest") => args[0].is_object(),
         Method::Core("setMemoryProfile") => args[0].is_boolean(),
         Method::Core("installMcp") => args[0].is_string(),
@@ -152,6 +170,15 @@ pub fn error(id: u64, code: &str, message: &str) -> Value {
     json!({ "id": id, "ok": false, "error": { "code": code, "message": message } })
 }
 
+/// 带细节的错误（切换 memory profile 失败时的整份报告）。
+pub fn error_with(id: u64, code: &str, message: &str, details: Option<Value>) -> Value {
+    let mut frame = error(id, code, message);
+    if let Some(details) = details {
+        frame["error"]["details"] = details;
+    }
+    frame
+}
+
 pub fn emit_script(name: &str, value: Value) -> String {
     call_script("emit", &json!({ "event": name, "value": value }))
 }
@@ -168,7 +195,7 @@ pub const INIT_SCRIPT: &str = r#"(() => {
     pending.set(id, { resolve, reject });
     post({ id, method, args });
   });
-  const listeners = { maximized: new Set(), navigate: new Set() };
+  const listeners = { maximized: new Set(), navigate: new Set(), dataSource: new Set() };
   const subscribe = (set) => (listener) => {
     set.add(listener);
     return () => set.delete(listener);
@@ -188,7 +215,7 @@ pub const INIT_SCRIPT: &str = r#"(() => {
         }
       },
       emit(message) {
-        const set = message.event === "maximized" ? listeners.maximized : message.event === "navigate" ? listeners.navigate : null;
+        const set = message.event === "maximized" ? listeners.maximized : message.event === "navigate" ? listeners.navigate : message.event === "dataSource" ? listeners.dataSource : null;
         if (set) for (const listener of set) listener(message.value);
       },
     }),
@@ -201,7 +228,6 @@ pub const INIT_SCRIPT: &str = r#"(() => {
     getUpdateStatus: () => call("getUpdateStatus", []),
     checkForUpdates: () => call("checkForUpdates", []),
     applyUpdate: () => call("applyUpdate", []),
-    showItemInFolder: (path) => call("showItemInFolder", [path]),
     getMcpConfigs: () => call("getMcpConfigs", []),
     getMcpBridges: () => call("getMcpBridges", []),
     getMemoryProfile: () => call("getMemoryProfile", []),
@@ -214,6 +240,11 @@ pub const INIT_SCRIPT: &str = r#"(() => {
     toggleMaximizeWindow: () => call("toggleMaximizeWindow", []),
     isWindowMaximized: () => call("isWindowMaximized", []),
     closeWindow: () => call("closeWindow", []),
+    getWindowFrame: () => call("getWindowFrame", []),
+    startWindowResize: (edge) => call("startWindowResize", [edge]),
+    getDataSource: () => call("getDataSource", []),
+    chooseDataSource: (choice) => call("chooseDataSource", [choice]),
+    onDataSourceChange: subscribe(listeners.dataSource),
     onWindowMaximizedChange: subscribe(listeners.maximized),
     onNavigate: subscribe(listeners.navigate),
   };
@@ -271,6 +302,41 @@ mod tests {
         );
     }
 
+    /// W8h：选数据来源只收两个取值；别的（含大小写不同、数组、对象）在桥上就被拒，到不了宿主。
+    #[test]
+    fn the_data_source_choice_takes_one_of_two_values() {
+        for choice in ["KEEP_V3", "RECONVERT"] {
+            let call = parse(
+                SOURCE,
+                &format!(r#"{{"id":4,"method":"chooseDataSource","args":["{choice}"]}}"#),
+            )
+            .unwrap();
+            assert_eq!(call.method, Method::Local(Local::ChooseDataSource));
+        }
+        for args in [
+            r#"["keep_v3"]"#,
+            r#"["V3"]"#,
+            r#"[1]"#,
+            r#"[]"#,
+            r#"["KEEP_V3","RECONVERT"]"#,
+        ] {
+            assert_eq!(
+                parse(
+                    SOURCE,
+                    &format!(r#"{{"id":4,"method":"chooseDataSource","args":{args}}}"#)
+                ),
+                Err(Rejected::Arguments),
+                "{args}"
+            );
+        }
+        assert_eq!(
+            parse(SOURCE, r#"{"id":5,"method":"getDataSource","args":[]}"#)
+                .unwrap()
+                .method,
+            Method::Local(Local::GetDataSource)
+        );
+    }
+
     /// §9 负例「超大消息」：合法 JSON、白名单方法、类型正确的参数，只因体积超限就被拒。
     /// 上面那条用的是非 JSON 的填充，去掉体积检查也会以 Malformed 被拒，证明不了上限本身。
     #[test]
@@ -322,6 +388,84 @@ mod tests {
         ] {
             assert_eq!(parse(forged, body), Err(Rejected::Source), "{forged}");
         }
+    }
+
+    /// P-015：剪贴板只收 1 MiB 以内的文本；超出的整条拒掉，不截断。
+    #[test]
+    fn p015_copy_text_is_limited_to_one_mib() {
+        let message = |len: usize| {
+            format!(
+                r#"{{"id":4,"method":"copyText","args":["{}"]}}"#,
+                "x".repeat(len)
+            )
+        };
+        let call = parse(SOURCE, &message(1 << 20)).unwrap();
+        assert_eq!(call.method, Method::Local(Local::CopyText));
+        // 反例：多一个字节就拒，整条消息仍远在 MAX_MESSAGE_BYTES 以内，拒它的是 copyText 自己的上限。
+        assert_eq!(
+            parse(SOURCE, &message((1 << 20) + 1)),
+            Err(Rejected::Arguments)
+        );
+        assert_eq!(
+            parse(SOURCE, r#"{"id":4,"method":"copyText","args":[7]}"#),
+            Err(Rejected::Arguments)
+        );
+        // 2.x 宿主的 showItemInFolder / setNotificationMode 在 3.0 不是桥方法（通知方式只走托盘菜单的固定几项）：
+        // 页面送来的路径和任意字符串根本到不了宿主。
+        for name in ["showItemInFolder", "setNotificationMode", "openPath"] {
+            assert_eq!(
+                parse(
+                    SOURCE,
+                    &format!(r#"{{"id":5,"method":"{name}","args":["..\\x"]}}"#)
+                ),
+                Err(Rejected::UnknownMethod),
+                "{name}"
+            );
+        }
+    }
+
+    /// 缩放把手只收固定的几个边名；顶边、大小写不同、数组、数字一律在桥上被拒。
+    #[test]
+    fn window_resize_takes_one_of_the_handle_edges() {
+        for edge in [
+            "left",
+            "right",
+            "bottom",
+            "bottomLeft",
+            "bottomRight",
+            "topLeft",
+            "topRight",
+        ] {
+            let call = parse(
+                SOURCE,
+                &format!(r#"{{"id":6,"method":"startWindowResize","args":["{edge}"]}}"#),
+            )
+            .unwrap();
+            assert_eq!(call.method, Method::Local(Local::StartWindowResize));
+        }
+        for args in [
+            r#"["top"]"#,
+            r#"["Left"]"#,
+            r#"["bottom-left"]"#,
+            r#"[3]"#,
+            r#"[]"#,
+            r#"["left","right"]"#,
+        ] {
+            assert_eq!(
+                parse(
+                    SOURCE,
+                    &format!(r#"{{"id":6,"method":"startWindowResize","args":{args}}}"#)
+                ),
+                Err(Rejected::Arguments),
+                "{args}"
+            );
+        }
+        assert_eq!(
+            parse(SOURCE, r#"{"id":7,"method":"getWindowFrame","args":[]}"#)
+                .unwrap()
+                .method,
+            Method::Local(Local::GetWindowFrame)
+        );
     }
 
     #[test]

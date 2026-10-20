@@ -4,13 +4,8 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { AyanamiTaskService } from "@ayanami-task/application";
 import { describe, expect, it } from "vitest";
+import { createAyanamiMcpServer } from "../src/index.js";
 import {
-  createAyanamiMcpServer,
-  createAyanamiToolRegistry,
-  MCP_SURFACE_VERSION,
-} from "../src/index.js";
-import {
-  generateMcpToolContractMarkdown,
   LEGACY_TOOL_LIST_ARTIFACT_BYTES,
   LEGACY_TOOL_LIST_ARTIFACT_SHA256,
   LEGACY_TOOL_LIST_SOURCE_COMMIT,
@@ -264,32 +259,5 @@ describe("MCP tools/list metadata contract", () => {
       expect(nullableRestricted).not.toMatchObject({ enum: ["A"] });
       expect(nullableRestricted).not.toMatchObject({ const: "A" });
     }
-  });
-
-  it("keeps the generated contract page byte-for-byte aligned with the registry", () => {
-    const generated = generateMcpToolContractMarkdown(
-      createAyanamiToolRegistry({} as AyanamiTaskService),
-      MCP_SURFACE_VERSION,
-    );
-    expect(readFileSync("docs/generated/mcp-tool-contracts.md", "utf8")).toBe(generated);
-  });
-
-  /**
-   * 描述里写枚举取值时惯用 `a|b|c`，而表格的列分隔符也是 `|`：不转义的话那一行会被切成
-   * 十几列，页面上整张表当场散架，而逐字节对比的用例照样全绿——它比的是两边一样，
-   * 不是比出来的东西还算不算一张表。
-   */
-  it("contract 表格的每一行列数一致，描述里的竖线不会把表切开", () => {
-    const generated = generateMcpToolContractMarkdown(
-      createAyanamiToolRegistry({} as AyanamiTaskService),
-      MCP_SURFACE_VERSION,
-    );
-    const rows = generated
-      .split("\n")
-      .filter((line) => line.startsWith("| ") && !line.startsWith("| --"));
-    expect(rows.length).toBeGreaterThan(10);
-    const columns = rows.map((row) => row.replace(/\\\|/gu, "").split("|").length);
-    // 表头三列的那张与六列的那张各自内部一致，合起来只应出现两种列数。
-    expect([...new Set(columns)].sort((left, right) => left - right)).toEqual([5, 8]);
   });
 });

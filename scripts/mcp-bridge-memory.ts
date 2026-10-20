@@ -24,6 +24,7 @@ import {
   exited,
 } from "./smoke-host.js";
 import { withPowerShellScratch } from "./powershell-scratch.js";
+import { powershellArgs } from "./windows-text.js";
 
 const run = promisify(execFile);
 
@@ -190,12 +191,7 @@ async function measure(pids: number[]): Promise<Sample[]> {
   const { stdout } = await withPowerShellScratch((env) =>
     run(
       "powershell.exe",
-      [
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        `${PROCESS_TREE_PROBE}[AtmProcessTree]::Measure(@(${pids.join(",")}))`,
-      ],
+      powershellArgs(`${PROCESS_TREE_PROBE}[AtmProcessTree]::Measure(@(${pids.join(",")}))`),
       { maxBuffer: 8 * 1024 * 1024, windowsHide: true, env },
     ),
   );
@@ -354,7 +350,7 @@ async function main(): Promise<void> {
 
   // 先拍 Run 快照再启动宿主：读不到就什么都不启动。
   const loginItems = snapshotLoginItems();
-  const host = startSmokeHost({ executable, dataDir: sandbox.dataDir, env: sandbox.env });
+  const host = startSmokeHost({ executable, v3Dir: sandbox.v3Dir, env: sandbox.env });
   await loginItems.restoreAfter(async () => {
     try {
       await waitForRuntime(host);

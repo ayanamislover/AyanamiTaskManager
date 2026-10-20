@@ -1,14 +1,5 @@
 import { spawnSync } from "node:child_process";
-import {
-  existsSync,
-  mkdirSync,
-  mkdtempSync,
-  readdirSync,
-  readFileSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterAll, afterEach, describe, expect, it } from "vitest";
@@ -19,6 +10,9 @@ import { DpapiSecretStore } from "../src/dpapi-secret-store.js";
 /**
  * 手机同步密钥的 DPAPI 存储（ATM-T-0567）：Electron safeStorage 随 Electron 去掉以后，
  * 密钥经原生宿主的 `--dpapi` 一次性模式加密。不可用时拒绝保存，绝不退回明文。
+ *
+ * 这是 2.x 的 TS 实现。3.0 的宿主没有 `--dpapi`（W8a，密钥在宿主进程里由 atm-sync 的 DPAPI 读写），
+ * 所以这里只用假 helper 钉协议；2.x 密文与 3.0 互通由 `sync` 的 secret-vectors 用例逐字节重放证明。
  */
 const scratchRoot = resolve(process.cwd(), "output");
 mkdirSync(scratchRoot, { recursive: true });
@@ -28,30 +22,6 @@ afterAll(() => rmSync(work, { recursive: true, force: true }));
 const fakeHost = resolve(process.cwd(), "apps/desktop/test/fixtures/fake-dpapi.mjs");
 const fake = (timeoutMs?: number) =>
   hostDpapi(process.execPath, { prefixArgs: [fakeHost], ...(timeoutMs ? { timeoutMs } : {}) });
-const realHost = resolve(process.cwd(), "apps/desktop/native/target/debug/AyanamiTaskManager.exe");
-const hostCrate = resolve(process.cwd(), "apps/desktop/native/host");
-
-/**
- * 真宿主用例只在 debug 宿主已编译、且不比宿主源码旧时跑。落后的构建可能还不认 `--dpapi`（报出来是
- * DPAPI_FAILED，像产品故障），也可能是改代码之前的行为（假绿）。和 cargo 一样按修改时间判断。
- */
-function realHostState(): "missing" | "stale" | "ready" {
-  if (process.platform !== "win32" || !existsSync(realHost)) return "missing";
-  const sources = [
-    join(hostCrate, "Cargo.toml"),
-    ...readdirSync(join(hostCrate, "src"), { recursive: true, encoding: "utf8" }).map((name) =>
-      join(hostCrate, "src", name),
-    ),
-  ];
-  const newest = Math.max(...sources.map((path) => statSync(path).mtimeMs));
-  return newest > statSync(realHost).mtimeMs ? "stale" : "ready";
-}
-const realHostReady = realHostState();
-if (realHostReady === "stale")
-  console.warn(
-    "跳过真宿主 DPAPI 用例：apps/desktop/native/target/debug 里的宿主比 host 源码旧，先运行 cargo build -p atm-host",
-  );
-
 let counter = 0;
 const freshDirectory = () => join(work, `case-${(counter += 1)}`);
 
@@ -149,22 +119,6 @@ describe("经宿主调 DPAPI 的协议", () => {
     expect(pid).toBeGreaterThan(0);
     await expectGone(pid!);
   });
-
-  it.skipIf(realHostReady !== "ready")(
-    realHostReady === "stale"
-      ? "真宿主：DPAPI 往返（跳过：debug 宿主比源码旧，先 cargo build -p atm-host）"
-      : "真宿主（cargo build -p atm-host）：DPAPI 往返，篡改过的密文解不开",
-    async () => {
-      const dpapi = hostDpapi(realHost);
-      const secret = Buffer.from("space:0123456789abcdef");
-      const sealed = await dpapi.protect(secret);
-      expect(sealed.includes(secret)).toBe(false);
-      expect((await dpapi.unprotect(sealed)).equals(secret)).toBe(true);
-      const tampered = Buffer.from(sealed);
-      tampered[tampered.length - 1] = (tampered[tampered.length - 1] ?? 0) ^ 1;
-      await expect(dpapi.unprotect(tampered)).rejects.toThrow();
-    },
-  );
 });
 
 describe("DpapiSecretStore", () => {

@@ -18,7 +18,6 @@ import type {
 } from "../contracts.js";
 import { McpBridgePanel } from "../mcp-bridge-panel.js";
 import { agentClientLabel, agentIntegrationErrorMessage, formatTime } from "../presentation.js";
-import { SystemProjectionPanel } from "../projection-health-panel.js";
 import { ServiceStatus } from "../shell/service-status.js";
 import { AgentIntegrationCard } from "./agent-integration-card.js";
 import { DispatchPanel } from "./dispatch-panel.js";
@@ -84,10 +83,8 @@ export function SettingsPage({
   useEffect(() => {
     if (!settings.data) return;
     const backup = settings.data.find((entry) => entry.key === "backup.policy")?.value as any;
+    // 3.0 只有 notification.mode 一个开关（03 C-06）：2.x 的开关键在转换时已并入。
     const notification = settings.data.find((entry) => entry.key === "notification.mode")?.value;
-    const legacyNotification = settings.data.find(
-      (entry) => entry.key === "notification.enabled",
-    )?.value;
     if (backup) {
       setDailyEnabled(backup.enabled !== false);
       setDailyKeep(Number(backup.dailyKeep ?? 2));
@@ -96,17 +93,12 @@ export function SettingsPage({
     }
     if (["ALL", "CRITICAL", "OFF"].includes(String(notification))) {
       setNotificationMode(notification as NotificationMode);
-    } else if (legacyNotification === false) {
-      setNotificationMode("OFF");
     }
   }, [settings.data]);
   const savePolicy = useMutation({
     mutationFn: async () => {
       const backup = settings.data?.find((entry) => entry.key === "backup.policy");
       const notification = settings.data?.find((entry) => entry.key === "notification.mode");
-      const legacyNotification = settings.data?.find(
-        (entry) => entry.key === "notification.enabled",
-      );
       await client.settings.put(
         "backup.policy",
         { enabled: dailyEnabled, dailyKeep, weeklyKeep, otherKeep },
@@ -116,11 +108,6 @@ export function SettingsPage({
         "notification.mode",
         notificationMode,
         Number(notification?.version ?? -1),
-      );
-      await client.settings.put(
-        "notification.enabled",
-        notificationMode !== "OFF",
-        Number(legacyNotification?.version ?? -1),
       );
     },
     onSuccess: async () => {
@@ -217,22 +204,16 @@ export function SettingsPage({
               </div>
               <div className="atm-row">
                 <div>
-                  <div className="atm-row-title">项目数据库</div>
-                  <div className="atm-row-sub">独立文件并通过 quick_check</div>
+                  <div className="atm-row-title">项目</div>
+                  <div className="atm-row-sub">
+                    全部项目在同一个数据库里，启动时通过 quick_check
+                  </div>
                 </div>
                 <span className="atm-key">{String(query.data!.projectCount)}</span>
               </div>
             </div>
           )}
         </section>
-        {query.data ? (
-          <SystemProjectionPanel
-            client={client}
-            summary={query.data.projectionSummary}
-            failures={query.data.projectionFailures}
-            notify={notify}
-          />
-        ) : null}
         <KnowledgeBackupPanel client={client} notify={notify} />
         <section className="atm-panel atm-settings-integrations">
           <div className="atm-panel-head">
@@ -253,12 +234,12 @@ export function SettingsPage({
                     {desktop?.setMemoryProfile ? (
                       <div className="atm-row" data-testid="memory-profile-toggle">
                         <div>
-                          <div className="atm-row-title">完整工具面（memory + actions）</div>
+                          <div className="atm-row-title">完整工具面（core + memory）</div>
                           <div className="atm-row-sub">
-                            默认开启完整工具面。关闭会同时移除 memory 与 actions 两个静态
-                            Profile，只保留 core，但关闭后将失去
-                            atm_task_patch、atm_progress_add、atm_record、atm_feedback、atm_search、atm_delta
-                            六个工具。切换后请重载或重启 Agent 客户端。
+                            默认开启完整工具面。关闭会移除 memory 这个静态 Profile，只保留
+                            core（任务、进度与记录都在 core 里），但关闭后将失去
+                            atm_search、atm_knowledge_search、atm_knowledge_get、atm_knowledge_save
+                            四个工具。切换后请重载或重启 Agent 客户端。
                           </div>
                           {memoryProfileError ? (
                             <div className="atm-inline-error" role="alert">

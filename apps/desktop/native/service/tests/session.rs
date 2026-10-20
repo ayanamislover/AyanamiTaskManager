@@ -1,0 +1,1525 @@
+//! Session 生命周期的验收（W2e；02 §2、S-001～S-022，00 02 C-06、C-07、C-08、C-14、C-17，03 C-04、P-006，
+//! 10 R3、R4′、R11 A1、A3、P1-3）。拒绝一律按整库逐表逐行快照核对零变化。
+
+mod support;
+
+use atm_domain::error::ErrorCode;
+use atm_domain::principal::{JobId, Principal};
+use atm_domain::time::Timestamp;
+use atm_domain::work::Operation;
+use atm_service::fp::{self, JsValue};
+use atm_service::memory::{ProgressRequest, ProgressScope, RecordRequest};
+use atm_service::session::{
+    BeginRequest, EndRequest, GitContext, Outcome, ProjectSelector, Resume, SweepPolicy,
+};
+use atm_service::work::Target;
+use atm_service::write::Written;
+use serde_json::{Value, json};
+use std::time::{SystemTime, UNIX_EPOCH};
+use support::*;
+
+// ---------- 助手 ----------
+
+fn agent_in(group: &str) -> Principal {
+    Principal::authenticated_agent(Some(group.to_owned()))
+}
+
+fn begin_req(agent: &str) -> BeginRequest {
+    BeginRequest {
+        selector: ProjectSelector {
+            code: Some("ATM".into()),
+            ..ProjectSelector::default()
+        },
+        cwd: Some("R:/repo".into()),
+        ..BeginRequest::new(agent)
+    }
+}
+
+fn sid(w: &Written) -> String {
+    w.result["session"]["id"].as_str().unwrap().to_owned()
+}
+
+fn now_minus(minutes: i64) -> String {
+    let ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    Timestamp::from_millis(ms - minutes * 60_000).to_string()
+}
+
+fn end(outcome: Outcome, release: bool) -> EndRequest {
+    EndRequest {
+        outcome,
+        summary: "收工".into(),
+        next: vec!["接着做".into()],
+        release_claims: release,
+        retirement_reason: None,
+        git: None,
+    }
+}
+
+fn system() -> Principal {
+    Principal::system_job(JobId::StartupRecover)
+}
+
+impl World {
+    fn begin(&self, req: BeginRequest) -> Written {
+        self.svc.begin(&agent(), req).unwrap()
+    }
+
+    fn end_as(
+        &self,
+        session: &str,
+        req: EndRequest,
+    ) -> Result<Written, atm_domain::error::DomainError> {
+        self.svc
+            .end_session(&agent(), &self.target(Some(session)), req)
+    }
+
+    fn record_as(
+        &self,
+        session: &str,
+        title: &str,
+    ) -> Result<Written, atm_domain::error::DomainError> {
+        self.svc.create_record(
+            &agent(),
+            &self.target(Some(session)),
+            RecordRequest::new("FACT", title, "摘要"),
+        )
+    }
+
+    fn sessions(&self) -> i64 {
+        self.count("SELECT count(*) FROM agent_sessions WHERE project_id = 'PA'")
+    }
+
+    /// 归档、垃圾箱两个项目（ARC、TRS）。
+    fn more_projects(&self) {
+        self.exec(&format!(
+            "INSERT INTO scope_generations (gen, scope_kind, scope_id, reason, epoch, created_at) VALUES
+               (3, 'PROJECT', 'PR', 'CREATED', 'ER', '{T0}'), (4, 'PROJECT', 'PT', 'CREATED', 'ET', '{T0}');
+             UPDATE app_meta SET scope_gen_counter = 4;
+             INSERT INTO projects (id, code, name, lifecycle, health, meta_version, scope_gen, epoch, created_at, updated_at) VALUES
+               ('PR', 'ARC', '归档的', 'ARCHIVED', 'UNKNOWN', 0, 3, 'ER', '{T0}', '{T0}'),
+               ('PT', 'TRS', '垃圾箱里的', 'TRASHED', 'UNKNOWN', 0, 4, 'ET', '{T0}', '{T0}');
+             INSERT INTO counters (project_id, name, next_value) VALUES ('PR', 'work_item', 1), ('PR', 'record', 1), ('PR', 'blocker', 1);"
+        ));
+    }
+
+    /// fixture 里的 session 心跳是 T0：扫描用例先把它们刷成现在，免得一起被扫掉。
+    fn fresh_fixture(&self) {
+        self.exec(&format!(
+            "UPDATE agent_sessions SET heartbeat_at = '{}' WHERE connection_state = 'ONLINE'",
+            now_minus(0)
+        ));
+    }
+
+    fn session_col(&self, project: &str, id: &str, column: &str) -> Value {
+        self.scalar(&format!(
+            "SELECT {column} FROM agent_sessions WHERE project_id = '{project}' AND id = '{id}'"
+        ))
+    }
+}
+
+// ================= begin =================
+
+/// S-001 + S-004：op_id trim 后 1–128；同 op_id 同请求重放同一 session、不加事件；改一个字段就冲突；
+/// git 探测结果变化不算请求变化。
+#[test]
+fn s001_s004_atomic_begin() {
+    let w = world("ss-begin-atomic");
+    w.refused(ErrorCode::OPERATION_ID_INVALID, || {
+        w.svc.begin(
+            &agent(),
+            BeginRequest {
+                op_id: Some("   ".into()),
+                ..begin_req("claude")
+            },
+        )
+    });
+    let req = BeginRequest {
+        op_id: Some(" b1 ".into()),
+        ..begin_req("claude")
+    };
+    let first = w.begin(req.clone());
+    assert_eq!(first.result["outcome"], "CREATED");
+    assert_eq!(
+        w.scalar("SELECT op_id FROM idempotency_receipts WHERE call_operation = 'session.recover-or-begin'"),
+        "b1"
+    );
+    let before = w.snapshot();
+    let again = w.begin(BeginRequest {
+        git: Some(GitContext {
+            available: true,
+            branch: Some("other".into()),
+            ..GitContext::default()
+        }),
+        ..req.clone()
+    });
+    assert!(again.replayed);
+    assert_eq!(sid(&again), sid(&first));
+    assert_eq!(again.result["sessionState"], "ONLINE");
+    assert_eq!(w.snapshot(), before);
+    w.refused(ErrorCode::IDEMPOTENCY_CONFLICT, || {
+        w.svc.begin(
+            &agent(),
+            BeginRequest {
+                role: Some("REVIEWER".into()),
+                ..req.clone()
+            },
+        )
+    });
+    // 02 C-17：session 关闭后再重放，回执照常给原 session，但如实报 sessionState=CLOSED。
+    w.exec(&format!(
+        "UPDATE agent_sessions SET connection_state = 'CLOSED', close_reason = 'EXPLICIT_END' WHERE id = '{}'",
+        sid(&first)
+    ));
+    let late = w.begin(req.clone());
+    assert!(late.replayed);
+    assert_eq!(sid(&late), sid(&first));
+    assert_eq!(late.result["sessionState"], "CLOSED");
+}
+
+/// R11 A3：3.0 的 begin 按 (principal, operation, op_id) 唯一，不按项目划分。
+#[test]
+fn a3_begin_op_id_is_shared_across_projects() {
+    let w = world("ss-begin-call");
+    w.more_projects();
+    w.begin(BeginRequest {
+        op_id: Some("same".into()),
+        ..begin_req("claude")
+    });
+    w.refused(ErrorCode::IDEMPOTENCY_CONFLICT, || {
+        w.svc.begin(
+            &agent(),
+            BeginRequest {
+                op_id: Some("same".into()),
+                selector: ProjectSelector {
+                    code: Some("ARC".into()),
+                    ..ProjectSelector::default()
+                },
+                ..begin_req("claude")
+            },
+        )
+    });
+}
+
+/// S-003 + 04 L-008：TRASHED 项目登记 / 累加恢复请求并报错（提交了请求，没有 session）；ARCHIVED 照常可写。
+#[test]
+fn s003_l008_trashed_and_archived_projects() {
+    let w = world("ss-begin-trash");
+    w.more_projects();
+    let trashed = || {
+        w.svc.begin(
+            &agent(),
+            BeginRequest {
+                mode: Some("quick".into()),
+                selector: ProjectSelector {
+                    code: Some("trs".into()),
+                    ..ProjectSelector::default()
+                },
+                ..begin_req("claude")
+            },
+        )
+    };
+    let e = trashed().unwrap_err();
+    assert_eq!(e.code, ErrorCode::PROJECT_DB_UNAVAILABLE);
+    assert_eq!(e.details["retryable"], false);
+    assert_eq!(e.details["recovery"]["request_count"], 1);
+    let e = trashed().unwrap_err();
+    assert_eq!(e.details["recovery"]["request_count"], 2);
+    assert_eq!(
+        w.count("SELECT count(*) FROM agent_sessions WHERE project_id = 'PT'"),
+        0
+    );
+    assert_eq!(w.count("SELECT count(*) FROM quick_tasks"), 0);
+    assert_eq!(
+        w.scalar("SELECT lifecycle FROM projects WHERE id = 'PT'"),
+        "TRASHED"
+    );
+    let r = w.begin(BeginRequest {
+        selector: ProjectSelector {
+            code: Some("ARC".into()),
+            ..ProjectSelector::default()
+        },
+        ..begin_req("claude")
+    });
+    assert_eq!(r.result["project"]["lifecycle"], "ARCHIVED");
+    // 选择器里的项目不存在 → PROJECT_NOT_FOUND；什么都没认出来 → PROJECT_REQUIRED（带下一步）。
+    w.refused(ErrorCode::PROJECT_NOT_FOUND, || {
+        w.svc.begin(
+            &agent(),
+            BeginRequest {
+                selector: ProjectSelector {
+                    code: Some("NOPE".into()),
+                    ..ProjectSelector::default()
+                },
+                ..begin_req("claude")
+            },
+        )
+    });
+    let e = w.refused(ErrorCode::PROJECT_REQUIRED, || {
+        w.svc.begin(
+            &agent(),
+            BeginRequest {
+                selector: ProjectSelector::default(),
+                ..begin_req("claude")
+            },
+        )
+    });
+    assert_eq!(e.details["next"]["allow_project_create"], true);
+}
+
+/// 04 L-010：精确路径 → marker → git common dir。
+#[test]
+fn l010_project_is_found_by_path_marker_or_common_dir() {
+    let w = world("ss-begin-locate");
+    w.exec(&format!(
+        "INSERT INTO project_paths (id, project_id, path_key, canonical_path, git_common_dir, is_primary, last_seen_at)
+         VALUES ('PP1', 'PA', 'r:\\repo', 'R:\\Repo', 'r:\\repo\\.git', 1, '{T0}')"
+    ));
+    for selector in [
+        ProjectSelector {
+            path_key: Some("r:\\repo".into()),
+            ..ProjectSelector::default()
+        },
+        ProjectSelector {
+            marker_project_id: Some("PA".into()),
+            ..ProjectSelector::default()
+        },
+        ProjectSelector {
+            git_common_dir: Some("r:\\repo\\.git".into()),
+            ..ProjectSelector::default()
+        },
+    ] {
+        let r = w.begin(BeginRequest {
+            selector,
+            ..begin_req("claude")
+        });
+        assert_eq!(r.result["project"]["code"], "ATM");
+    }
+    let e = w.refused(ErrorCode::PROJECT_NOT_FOUND, || {
+        w.svc.begin(
+            &agent(),
+            BeginRequest {
+                selector: ProjectSelector {
+                    marker_project_id: Some("GONE".into()),
+                    ..ProjectSelector::default()
+                },
+                ..begin_req("claude")
+            },
+        )
+    });
+    assert_eq!(e.details["diagnostic"], "MARKER_PROJECT_MISSING");
+}
+
+/// S-006 + S-011：resume 接回同四元组唯一的未关闭 session；两条 → AMBIGUOUS。agents 每次都 upsert。
+#[test]
+fn s006_s011_resume_reattaches_the_open_session() {
+    let w = world("ss-resume-open");
+    let a = w.begin(BeginRequest {
+        resume: Some(Resume::No),
+        thread_id: Some("t1".into()),
+        ..begin_req("codex")
+    });
+    let t2 = w.begin(BeginRequest {
+        resume: Some(Resume::Yes),
+        thread_id: Some("t2".into()),
+        ..begin_req("codex")
+    });
+    assert_eq!(t2.result["outcome"], "CREATED");
+    let r = w.begin(BeginRequest {
+        resume: Some(Resume::Yes),
+        thread_id: Some("t1".into()),
+        display_name: Some("Codex 新名".into()),
+        ..begin_req("codex")
+    });
+    assert_eq!(sid(&r), sid(&a));
+    assert_eq!(r.result["outcome"], "RESUMED");
+    assert_eq!(
+        w.scalar("SELECT type FROM events WHERE project_id = 'PA' ORDER BY seq DESC LIMIT 1"),
+        "agent.resumed"
+    );
+    // 接回不建新的 session，也就不 upsert agents；新建时才覆盖 display_name。
+    w.begin(BeginRequest {
+        resume: Some(Resume::No),
+        thread_id: Some("t1".into()),
+        display_name: Some("Codex 新名".into()),
+        ..begin_req("codex")
+    });
+    assert_eq!(
+        w.scalar("SELECT display_name FROM agents WHERE project_id = 'PA' AND id = 'codex'"),
+        "Codex 新名"
+    );
+    let e = w.refused(ErrorCode::SESSION_SUCCESSOR_AMBIGUOUS, || {
+        w.svc.begin(
+            &agent(),
+            BeginRequest {
+                resume: Some(Resume::Yes),
+                thread_id: Some("t1".into()),
+                ..begin_req("codex")
+            },
+        )
+    });
+    assert_eq!(e.details["candidates"].as_array().unwrap().len(), 2);
+}
+
+/// S-007 + S-013 + S-016 + R4′：paused 留交接；resume 新建 session 接它并确认交接；只确认本线程的来源。
+#[test]
+fn s007_s013_s016_resume_through_a_pending_handoff() {
+    let w = world("ss-resume-handoff");
+    let a = sid(&w.begin(BeginRequest {
+        resume: Some(Resume::No),
+        thread_id: Some("A".into()),
+        ..begin_req("codex")
+    }));
+    let b = sid(&w.begin(BeginRequest {
+        resume: Some(Resume::No),
+        thread_id: Some("B".into()),
+        ..begin_req("codex")
+    }));
+    let k1 = w.task("一");
+    let k2 = w.task("二");
+    w.patch_as(&agent(), Some(&a), vec![p(&k1, Operation::Start)])
+        .unwrap();
+    w.patch_as(&agent(), Some(&b), vec![p(&k2, Operation::Start)])
+        .unwrap();
+    // S-013：paused + release_claims=false → 交接写入、领取保留。
+    let r = w.end_as(&a, end(Outcome::Paused, false)).unwrap();
+    assert_eq!(r.result["handoffs"], 1);
+    assert_eq!(w.col(&k1, "claimed_by_session_id"), a.as_str());
+    assert!(w.col(&k1, "last_session_closed_at").is_string());
+    w.end_as(&b, end(Outcome::Paused, false)).unwrap();
+    let n = w.begin(BeginRequest {
+        resume: Some(Resume::Yes),
+        thread_id: Some("A".into()),
+        ..begin_req("codex")
+    });
+    assert_eq!(n.result["outcome"], "SUCCESSOR");
+    assert_eq!(n.result["predecessorSessionId"], a.as_str());
+    assert_eq!(n.result["acknowledgedHandoffs"], 1);
+    let new = sid(&n);
+    assert_eq!(
+        w.scalar(&format!(
+            "SELECT to_session_id FROM handoffs WHERE from_session_id = '{a}'"
+        )),
+        new.as_str()
+    );
+    // 线程 B 的交接不被确认。
+    assert_eq!(
+        w.scalar(&format!(
+            "SELECT to_session_id FROM handoffs WHERE from_session_id = '{b}'"
+        )),
+        Value::Null
+    );
+    // R2：领取属于 lineage，新 session 直接写它（不需要 takeover），领取随之转移。
+    w.patch_as(&agent(), Some(&new), vec![p(&k1, Operation::Verify)])
+        .unwrap();
+    assert_eq!(w.col(&k1, "claimed_by_session_id"), new.as_str());
+}
+
+/// S-007 反例：两个同四元组的待确认交接来源 → AMBIGUOUS(pending_handoff)，交接都不确认。
+#[test]
+fn s007_two_handoff_sources_are_ambiguous() {
+    let w = world("ss-resume-two");
+    for title in ["一", "二"] {
+        let s = sid(&w.begin(BeginRequest {
+            resume: Some(Resume::No),
+            ..begin_req("codex")
+        }));
+        let k = w.task(title);
+        w.patch_as(&agent(), Some(&s), vec![p(&k, Operation::Start)])
+            .unwrap();
+        w.end_as(&s, end(Outcome::Paused, false)).unwrap();
+    }
+    let e = w.refused(ErrorCode::SESSION_SUCCESSOR_AMBIGUOUS, || {
+        w.svc.begin(
+            &agent(),
+            BeginRequest {
+                resume: Some(Resume::Yes),
+                ..begin_req("codex")
+            },
+        )
+    });
+    assert_eq!(e.details["pending_handoff"], true);
+}
+
+/// S-008、S-009、00 02 C-07、C-14 / R3：指名 predecessor 的判定表。
+#[test]
+fn s008_s009_c07_named_predecessor() {
+    let w = world("ss-named");
+    let open = sid(&w.begin(BeginRequest {
+        resume: Some(Resume::No),
+        thread_id: Some("t".into()),
+        ..begin_req("codex")
+    }));
+    // ONLINE 且四元组全等 → 接回同一条。
+    let r = w.begin(BeginRequest {
+        resume: Some(Resume::Yes),
+        thread_id: Some("t".into()),
+        predecessor_session_id: Some(open.clone()),
+        ..begin_req("codex")
+    });
+    assert_eq!(sid(&r), open);
+    // 请求 role 不同 → IDENTITY_MISMATCH，原 session 不变。
+    w.refused(ErrorCode::SESSION_SUCCESSOR_IDENTITY_MISMATCH, || {
+        w.svc.begin(
+            &agent(),
+            BeginRequest {
+                resume: Some(Resume::Yes),
+                role: Some("REVIEWER".into()),
+                thread_id: Some("t".into()),
+                predecessor_session_id: Some(open.clone()),
+                ..begin_req("codex")
+            },
+        )
+    });
+    w.refused(ErrorCode::SESSION_SUCCESSOR_AGENT_MISMATCH, || {
+        w.svc.begin(
+            &agent(),
+            BeginRequest {
+                resume: Some(Resume::Yes),
+                predecessor_session_id: Some(open.clone()),
+                ..begin_req("claude")
+            },
+        )
+    });
+    w.refused(ErrorCode::SESSION_NOT_FOUND, || {
+        w.svc.begin(
+            &agent(),
+            BeginRequest {
+                resume: Some(Resume::Yes),
+                predecessor_session_id: Some("NOPE".into()),
+                ..begin_req("codex")
+            },
+        )
+    });
+    // S-009：正常结束、没有交接 → SESSION_NOT_RETIRED。
+    w.end_as(&open, end(Outcome::Completed, true)).unwrap();
+    w.refused(ErrorCode::SESSION_NOT_RETIRED, || {
+        w.svc.begin(
+            &agent(),
+            BeginRequest {
+                resume: Some(Resume::Yes),
+                predecessor_session_id: Some(open.clone()),
+                ..begin_req("codex")
+            },
+        )
+    });
+    // C-07：retired 的 predecessor，只校验 agent 与 role；cwd 与线程可以不同。
+    let retired = sid(&w.begin(BeginRequest {
+        resume: Some(Resume::No),
+        thread_id: Some("old".into()),
+        ..begin_req("codex")
+    }));
+    w.end_as(&retired, end(Outcome::Retired, true)).unwrap();
+    assert_eq!(
+        w.session_col("PA", &retired, "retirement_reason"),
+        "context rotation"
+    );
+    assert_eq!(
+        w.session_col("PA", &retired, "close_reason"),
+        "EXPLICIT_RETIRE"
+    );
+    w.refused(ErrorCode::SESSION_SUCCESSOR_IDENTITY_MISMATCH, || {
+        w.svc.begin(
+            &agent(),
+            BeginRequest {
+                resume: Some(Resume::Yes),
+                role: Some("REVIEWER".into()),
+                predecessor_session_id: Some(retired.clone()),
+                ..begin_req("codex")
+            },
+        )
+    });
+    let n = w.begin(BeginRequest {
+        resume: Some(Resume::Yes),
+        cwd: Some("R:/elsewhere".into()),
+        thread_id: Some("new".into()),
+        predecessor_session_id: Some(retired.clone()),
+        ..begin_req("codex")
+    });
+    assert_eq!(n.result["predecessorSessionId"], retired.as_str());
+    // C-14 + R3：非 resume 指名 predecessor 也要同 agent、同 role。
+    w.refused(ErrorCode::SESSION_SUCCESSOR_IDENTITY_MISMATCH, || {
+        w.svc.begin(
+            &agent(),
+            BeginRequest {
+                resume: Some(Resume::No),
+                role: Some("SUBAGENT".into()),
+                predecessor_session_id: Some(retired.clone()),
+                ..begin_req("codex")
+            },
+        )
+    });
+}
+
+/// S-010：不带 resume 的 begin 总是新建，不确认任何交接。
+#[test]
+fn s010_plain_begin_acknowledges_nothing() {
+    let w = world("ss-plain");
+    let a = sid(&w.begin(BeginRequest {
+        resume: Some(Resume::No),
+        ..begin_req("codex")
+    }));
+    let k = w.task("一");
+    w.patch_as(&agent(), Some(&a), vec![p(&k, Operation::Start)])
+        .unwrap();
+    w.end_as(&a, end(Outcome::Paused, false)).unwrap();
+    let r = w.begin(BeginRequest {
+        resume: Some(Resume::No),
+        ..begin_req("codex")
+    });
+    assert_eq!(r.result["outcome"], "CREATED");
+    assert_eq!(
+        w.count("SELECT count(*) FROM handoffs WHERE to_session_id IS NULL"),
+        1
+    );
+}
+
+/// R11 P1-3：resume 默认 auto，只接续客户端已退出 / 心跳超时 / 带交接关闭的 session；永远不接回 ONLINE；
+/// 多个候选不阻塞，列出来。
+#[test]
+fn p1_3_auto_resume() {
+    let w = world("ss-auto");
+    w.fresh_fixture();
+    let done = sid(&w.begin(BeginRequest {
+        resume: Some(Resume::No),
+        ..begin_req("codex")
+    }));
+    w.end_as(&done, end(Outcome::Completed, true)).unwrap();
+    let first = w
+        .svc
+        .begin(&agent_in("pid:dead"), begin_req("codex"))
+        .unwrap();
+    // 正常结束、没有交接的 done 不是候选。
+    assert_eq!(first.result["outcome"], "CREATED");
+    let a = sid(&first);
+    // 客户端还在：不接回它。
+    let r = w.begin(begin_req("codex"));
+    assert_eq!(r.result["outcome"], "CREATED");
+    assert_eq!(r.result["predecessorSessionId"], Value::Null);
+    let other = sid(&r);
+    // 客户端退出 → 扫描关闭（CLIENT_EXITED）→ 下一次 begin 自动接上它。
+    let alive = |id: &str| (id == "pid:dead").then_some(false);
+    let report = w
+        .svc
+        .sweep_sessions(&system(), SweepPolicy::default(), &alive)
+        .unwrap();
+    assert_eq!(
+        report.closed,
+        vec![("PA".into(), a.clone(), "CLIENT_EXITED".into())]
+    );
+    let n = w.begin(begin_req("codex"));
+    assert_eq!(n.result["outcome"], "SUCCESSOR");
+    assert_eq!(n.result["predecessorSessionId"], a.as_str());
+    // 已经被接续过的不再是候选；两个候选时新建并列出。
+    for s in [&other, &sid(&n)] {
+        w.exec(&format!(
+            "UPDATE agent_sessions SET connection_state = 'CLOSED', close_reason = 'HEARTBEAT_TIMEOUT' WHERE id = '{s}'"
+        ));
+    }
+    let m = w.begin(begin_req("codex"));
+    assert_eq!(m.result["outcome"], "CREATED");
+    assert_eq!(m.result["resumeCandidates"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        m.result["resumeCandidates"][0]["next"]["predecessor_session_id"],
+        m.result["resumeCandidates"][0]["sessionId"]
+    );
+}
+
+/// 00 C-08「超时阈值沿用 2.0」：扫描读存着的 `recovery.sessionTimeoutMinutes`，读法与 2.x 一样
+/// （`Math.min(1440, Math.max(1, Number(value ?? 5)))`：2.x 原样转来的字符串照样认、不取整、越界夹取；
+/// 不是数时退回默认 5）。反例：没存这个设置时 10 分钟没心跳就关；存了 30 分钟就不关。
+#[test]
+fn c08_the_sweep_uses_the_stored_timeout_read_like_2_x() {
+    let w = world("ss-timeout");
+    let s = sid(&w.begin(BeginRequest {
+        resume: Some(Resume::No),
+        ..begin_req("codex")
+    }));
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let ago = atm_domain::time::Timestamp::from_millis(now_ms - 10 * 60_000).to_string();
+    w.exec(&format!(
+        "UPDATE agent_sessions SET heartbeat_at = '{ago}', updated_at = '{ago}', client_identity = NULL WHERE id = '{s}'"
+    ));
+    let store = |json: &str| {
+        w.exec(&format!(
+            "INSERT INTO settings (key, value_json, version, updated_at)
+             VALUES ('recovery.sessionTimeoutMinutes', '{json}', 1, '2026-01-01T00:00:00.000Z')
+             ON CONFLICT (key) DO UPDATE SET value_json = excluded.value_json"
+        ))
+    };
+    let timeout = || w.svc.stored_sweep_policy().unwrap().timeout_ms;
+    assert_eq!(timeout(), 5 * 60_000);
+    for (json, ms) in [
+        (r#""30""#, 30 * 60_000),
+        (r#""12.5""#, 750_000),
+        ("12.5", 750_000),
+        (r#""abc""#, 5 * 60_000),
+        ("null", 5 * 60_000),
+        ("0", 60_000),
+        (r#""""#, 60_000),
+        ("true", 60_000),
+        ("5000", 1440 * 60_000),
+        (r#""Infinity""#, 1440 * 60_000),
+    ] {
+        store(json);
+        assert_eq!(timeout(), ms, "{json}");
+    }
+    let unknown = |_: &str| None;
+    store(r#""30""#);
+    let report = w
+        .svc
+        .sweep_sessions(&system(), w.svc.stored_sweep_policy().unwrap(), &unknown)
+        .unwrap();
+    // 夹具里别的 session 心跳早就旧了，只看这一个。
+    assert!(!report.closed.iter().any(|c| c.1 == s), "{report:?}");
+    w.exec("DELETE FROM settings WHERE key = 'recovery.sessionTimeoutMinutes'");
+    let report = w
+        .svc
+        .sweep_sessions(&system(), w.svc.stored_sweep_policy().unwrap(), &unknown)
+        .unwrap();
+    assert!(
+        report
+            .closed
+            .contains(&("PA".into(), s.clone(), "HEARTBEAT_TIMEOUT".into())),
+        "{report:?}"
+    );
+}
+
+/// R11 P1-3 第 2 条「客户端进程一退出就关闭」：不等周期扫描，begin 自己把客户端已经退出的同 agent / role / cwd
+/// ONLINE session 按 CLIENT_EXITED 关掉，于是 auto resume 立即接上它（Agent 崩溃后马上重启，U-2 W8）。
+/// 客户端还活着的、探测说不清的（`None`）、别的 cwd 的、resume:false 的，都不动。
+#[test]
+fn p1_3_a_crashed_client_is_closed_and_resumed_at_begin() {
+    let w = world("ss-crash");
+    let w = World {
+        svc: w.svc.with_liveness(std::sync::Arc::new(|id: &str| {
+            if id.starts_with("pid:dead") {
+                Some(false)
+            } else if id.starts_with("pid:live") {
+                Some(true)
+            } else {
+                None
+            }
+        })),
+        ..w
+    };
+    w.fresh_fixture();
+    let at = |cwd: &str| BeginRequest {
+        cwd: Some(cwd.into()),
+        ..begin_req("codex")
+    };
+    let crashed = sid(&w.svc.begin(&agent_in("pid:dead-1"), at("D:/repo")).unwrap());
+    let alive = sid(&w.svc.begin(&agent_in("pid:live-1"), at("D:/live")).unwrap());
+    let unknown = sid(&w
+        .svc
+        .begin(&agent_in("pid:unknown-1"), at("D:/unknown"))
+        .unwrap());
+    let elsewhere = sid(&w
+        .svc
+        .begin(&agent_in("pid:dead-2"), at("D:/other"))
+        .unwrap());
+
+    // resume:false 不碰别人：崩溃的那个还是 ONLINE。
+    let no = w
+        .svc
+        .begin(
+            &agent_in("pid:live-9"),
+            BeginRequest {
+                resume: Some(Resume::No),
+                ..at("D:/repo")
+            },
+        )
+        .unwrap();
+    assert_eq!(no.result["outcome"], "CREATED");
+    let state = |id: &str| {
+        w.scalar(&format!("SELECT connection_state || ':' || COALESCE(close_reason, '') FROM agent_sessions WHERE id = '{id}'"))
+    };
+    assert_eq!(state(&crashed), "ONLINE:");
+
+    // 新进程在同一个 cwd begin：崩溃的就地关闭并被接上。
+    let n = w.svc.begin(&agent_in("pid:live-2"), at("D:/repo")).unwrap();
+    assert_eq!(n.result["outcome"], "SUCCESSOR", "{}", n.result);
+    assert_eq!(n.result["predecessorSessionId"], crashed.as_str());
+    assert_eq!(state(&crashed), "CLOSED:CLIENT_EXITED");
+    // 别的 cwd 下客户端也退出了的那个不在这次 begin 的范围里，留给扫描。
+    assert_eq!(state(&elsewhere), "ONLINE:");
+
+    // 客户端还活着、探测说不清：都不关、不接回。
+    for (cwd, id) in [("D:/live", &alive), ("D:/unknown", &unknown)] {
+        let r = w.svc.begin(&agent_in("pid:live-3"), at(cwd)).unwrap();
+        assert_eq!(r.result["outcome"], "CREATED", "{cwd}");
+        assert_eq!(state(id), "ONLINE:", "{cwd}");
+    }
+}
+
+/// R11 A1：白名单客户端的同一连接组再 begin → 同一个 PRIMARY（CURRENT）；resume:false 新建；
+/// 非白名单不接回；REVIEWER 不替换 PRIMARY。
+#[test]
+fn a1_single_conversation_reattach() {
+    let w = world("ss-a1");
+    let p = agent_in("pid:1");
+    let wl = BeginRequest {
+        single_conversation: true,
+        ..begin_req("claude")
+    };
+    let first = sid(&w.svc.begin(&p, wl.clone()).unwrap());
+    let elsewhere = w.svc.begin(&agent_in("pid:2"), wl.clone()).unwrap();
+    assert_eq!(elsewhere.result["outcome"], "CREATED");
+    let again = w.svc.begin(&p, wl.clone()).unwrap();
+    assert_eq!(again.result["outcome"], "CURRENT");
+    assert_eq!(sid(&again), first);
+    let reviewer = w
+        .svc
+        .begin(
+            &p,
+            BeginRequest {
+                role: Some("REVIEWER".into()),
+                ..wl.clone()
+            },
+        )
+        .unwrap();
+    assert_ne!(sid(&reviewer), first);
+    let fresh = w
+        .svc
+        .begin(
+            &p,
+            BeginRequest {
+                resume: Some(Resume::No),
+                ..wl.clone()
+            },
+        )
+        .unwrap();
+    assert_ne!(sid(&fresh), first);
+    // 同一连接组的非白名单客户端（同一进程里的第二个对话）、另一个连接组：都不拿到第一个对话的 session。
+    for (principal, single) in [(agent_in("pid:1"), false), (agent_in("pid:3"), true)] {
+        let r = w
+            .svc
+            .begin(
+                &principal,
+                BeginRequest {
+                    single_conversation: single,
+                    ..begin_req("claude")
+                },
+            )
+            .unwrap();
+        assert_eq!(r.result["outcome"], "CREATED");
+    }
+    let other = w
+        .svc
+        .begin(
+            &agent_in("pid:2"),
+            BeginRequest {
+                single_conversation: false,
+                ..begin_req("claude")
+            },
+        )
+        .unwrap();
+    assert_eq!(other.result["outcome"], "CREATED");
+}
+
+// ================= 超时扫描 =================
+
+/// S-012 + 00 02 C-08 + R11 P1-3：只扫 ACTIVE；无身份按 5 分钟；客户端存活按 120 分钟兜底；不释放领取。
+#[test]
+fn s012_c08_p1_3_sweep() {
+    let w = world("ss-sweep");
+    w.more_projects();
+    w.fresh_fixture();
+    let stale = sid(&w.begin(begin_req("codex")));
+    let fresh = sid(&w.begin(BeginRequest {
+        resume: Some(Resume::No),
+        ..begin_req("codex")
+    }));
+    let alive = sid(&w
+        .svc
+        .begin(&agent_in("pid:alive"), begin_req("claude"))
+        .unwrap());
+    let archived = sid(&w.begin(BeginRequest {
+        selector: ProjectSelector {
+            code: Some("ARC".into()),
+            ..ProjectSelector::default()
+        },
+        ..begin_req("codex")
+    }));
+    let k = w.task("一");
+    w.patch_as(&agent(), Some(&stale), vec![p(&k, Operation::Start)])
+        .unwrap();
+    w.exec(&format!(
+        "UPDATE agent_sessions SET heartbeat_at = '{}' WHERE id IN ('{stale}', '{alive}', '{archived}');
+         UPDATE agent_sessions SET heartbeat_at = '{}' WHERE id = '{fresh}';",
+        now_minus(6),
+        now_minus(4)
+    ));
+    let liveness = |id: &str| (id == "pid:alive").then_some(true);
+    let report = w
+        .svc
+        .sweep_sessions(&system(), SweepPolicy::default(), &liveness)
+        .unwrap();
+    assert_eq!(
+        report.closed,
+        vec![("PA".into(), stale.clone(), "HEARTBEAT_TIMEOUT".into())]
+    );
+    assert_eq!(w.session_col("PA", &stale, "connection_state"), "CLOSED");
+    assert_eq!(
+        w.col(&k, "claimed_by_session_id"),
+        stale.as_str(),
+        "claim kept"
+    );
+    assert!(w.col(&k, "last_session_closed_at").is_string());
+    assert_eq!(
+        w.scalar("SELECT actor_type || ':' || type FROM events WHERE project_id = 'PA' ORDER BY seq DESC LIMIT 1"),
+        "SYSTEM:agent.recovered_stale"
+    );
+    // 存活的客户端到 120 分钟才算超时。
+    w.exec(&format!(
+        "UPDATE agent_sessions SET heartbeat_at = '{}' WHERE id = '{alive}'",
+        now_minus(121)
+    ));
+    let report = w
+        .svc
+        .sweep_sessions(&system(), SweepPolicy::default(), &liveness)
+        .unwrap();
+    assert_eq!(
+        report.closed,
+        vec![("PA".into(), alive, "HEARTBEAT_TIMEOUT".into())]
+    );
+    assert_eq!(w.session_col("PR", &archived, "connection_state"), "ONLINE");
+    // 能力：Agent 不能跑扫描。
+    w.refused(ErrorCode::PRINCIPAL_CAPABILITY_DENIED, || {
+        w.svc
+            .sweep_sessions(&agent(), SweepPolicy::default(), &liveness)
+            .map(|_| unreachable!())
+    });
+}
+
+// ================= end 与强制关闭 =================
+
+/// S-014 + 00 02 C-06：只把 CLAIMED 变回 READY 并清 assignee；IN_PROGRESS 保留状态、清领取。
+#[test]
+fn s014_c06_end_releases_claims() {
+    let w = world("ss-end-release");
+    let s = sid(&w.begin(begin_req("codex")));
+    let claimed = w.task("占住");
+    let started = w.task("开工");
+    w.patch_as(
+        &agent(),
+        Some(&s),
+        vec![p(&claimed, Operation::Claim), p(&started, Operation::Start)],
+    )
+    .unwrap();
+    let v = w.version(&claimed);
+    let r = w.end_as(&s, end(Outcome::Completed, true)).unwrap();
+    assert_eq!(r.result["handoffs"], 0);
+    assert_eq!(
+        r.result["releasedItems"],
+        json!([{ "key": claimed, "version": v + 1 }, { "key": started, "version": w.version(&started) }])
+    );
+    assert_eq!(w.col(&claimed, "status"), "READY");
+    assert_eq!(w.col(&claimed, "assignee_agent_id"), Value::Null);
+    assert_eq!(w.col(&started, "status"), "IN_PROGRESS");
+    assert_eq!(w.col(&started, "assignee_agent_id"), "codex");
+    assert_eq!(w.col(&started, "claimed_by_session_id"), Value::Null);
+    assert_eq!(w.session_col("PA", &s, "close_reason"), "EXPLICIT_END");
+    assert_eq!(
+        w.scalar("SELECT payload_json FROM events WHERE project_id = 'PA' AND type = 'agent.left'"),
+        "{\"outcome\":\"completed\",\"summary\":\"收工\",\"next\":[\"接着做\"]}"
+    );
+}
+
+/// S-018 + S-036：关闭的 session 不能写新请求（SESSION_CLOSED，零写入），但成功过的请求仍然 REPLAY。
+#[test]
+fn s018_s036_closed_sessions_replay_but_do_not_write() {
+    let w = world("ss-closed");
+    let s = sid(&w.begin(begin_req("codex")));
+    let t = Target::new("PA", Some(&s), "rec-1");
+    let req = RecordRequest::new("FACT", "事实", "摘要");
+    let first = w.svc.create_record(&agent(), &t, req.clone()).unwrap();
+    w.end_as(&s, end(Outcome::Completed, true)).unwrap();
+    let again = w.svc.create_record(&agent(), &t, req).unwrap();
+    assert!(again.replayed);
+    assert_eq!(again.result, first.result);
+    let e = w.refused(ErrorCode::SESSION_CLOSED, || w.record_as(&s, "新的"));
+    assert_eq!(e.details["next"]["predecessor_session_id"], s.as_str());
+    // S-036 反例：先查幂等，所以已关闭 session 上同 op_id 换内容是 IDEMPOTENCY_CONFLICT，不是 SESSION_CLOSED。
+    w.refused(ErrorCode::IDEMPOTENCY_CONFLICT, || {
+        w.svc.create_record(
+            &agent(),
+            &t,
+            RecordRequest::new("FACT", "事实", "改过的摘要"),
+        )
+    });
+}
+
+/// S-035：服务写出的事件带请求的 op_id；不带 op_id 的普通 begin 写的 agent.joined 没有 op_id。
+#[test]
+fn s035_events_carry_the_request_op_id() {
+    let w = world("ss-s035");
+    let k = w.task("一");
+    w.svc
+        .patch_work_items(
+            &agent(),
+            &Target::new("PA", Some("S1"), "op-claim"),
+            vec![p(&k, Operation::Claim)],
+        )
+        .unwrap();
+    assert_eq!(
+        w.scalar("SELECT op_id FROM events WHERE project_id = 'PA' AND type = 'work.claimed'"),
+        "op-claim"
+    );
+    let s = sid(&w.begin(begin_req("codex")));
+    assert_eq!(
+        w.scalar(&format!(
+            "SELECT op_id FROM events WHERE project_id = 'PA' AND type = 'agent.joined' AND session_id = '{s}'"
+        )),
+        Value::Null
+    );
+}
+
+/// S-019 + S-020：心跳超时后用旧 id 写入 → 同事务新建 successor（REBOUND）；再写一次接到同一个 successor；
+/// 写入失败时 successor 不留下。
+#[test]
+fn s019_s020_rebind_on_heartbeat_timeout() {
+    let w = world("ss-rebind");
+    w.exec("UPDATE agent_sessions SET connection_state = 'CLOSED', close_reason = 'HEARTBEAT_TIMEOUT' WHERE id = 'S2'");
+    let before = w.sessions();
+    w.refused(ErrorCode::WORK_ITEM_NOT_FOUND, || {
+        w.svc.add_progress(
+            &agent(),
+            &w.target(Some("S2")),
+            ProgressRequest::task("ATM-T-0099", "做了一点"),
+        )
+    });
+    assert_eq!(w.sessions(), before);
+    let r = w.record_as("S2", "一").unwrap();
+    let successor = r.rebound_to.clone().expect("rebound");
+    assert_eq!(
+        w.session_col("PA", &successor, "predecessor_session_id"),
+        "S2"
+    );
+    assert_eq!(w.session_col("PA", &successor, "agent_id"), "claude");
+    assert_eq!(
+        w.scalar(&format!(
+            "SELECT author_session FROM idempotency_receipts WHERE receipt_id = {}",
+            r.receipt_id
+        )),
+        successor.as_str()
+    );
+    assert_eq!(
+        w.scalar("SELECT source_session_id FROM records WHERE local_no = 1"),
+        successor.as_str()
+    );
+    let retry = w
+        .svc
+        .create_record(
+            &agent(),
+            &Target::new(
+                "PA",
+                Some("S2"),
+                format!("op-{}", w.op.load(std::sync::atomic::Ordering::SeqCst)),
+            ),
+            RecordRequest::new("FACT", "一", "摘要"),
+        )
+        .unwrap();
+    assert!(retry.replayed);
+    let again = w.record_as("S2", "二").unwrap();
+    assert_eq!(again.rebound_to.as_deref(), Some(successor.as_str()));
+    assert_eq!(w.sessions(), before + 1);
+}
+
+/// S-019 反例：两个在线 successor → AMBIGUOUS；successor 身份不同 → IDENTITY_MISMATCH。都零写入。
+#[test]
+fn s019_rebind_refusals() {
+    let w = world("ss-rebind-no");
+    w.exec(&format!(
+        "UPDATE agent_sessions SET connection_state = 'CLOSED', close_reason = 'HEARTBEAT_TIMEOUT' WHERE id = 'S1';
+         INSERT INTO agent_sessions (project_id, id, agent_id, role, work_state, connection_state, started_at, updated_at, predecessor_session_id)
+           VALUES ('PA', 'S3', 'claude', 'PRIMARY', 'IDLE', 'ONLINE', '{T1}', '{T1}', 'S1');"
+    ));
+    // S2 与 S3 都是 S1 的在线 successor。
+    w.refused(ErrorCode::SESSION_SUCCESSOR_AMBIGUOUS, || {
+        w.record_as("S1", "x")
+    });
+    w.exec("UPDATE agent_sessions SET connection_state = 'CLOSED', close_reason = 'EXPLICIT_END' WHERE id = 'S3';
+            UPDATE agent_sessions SET role = 'SUBAGENT' WHERE id = 'S2';");
+    w.refused(ErrorCode::SESSION_SUCCESSOR_IDENTITY_MISMATCH, || {
+        w.record_as("S1", "x")
+    });
+}
+
+/// S-021：end 不建 successor；有唯一 successor 时结束的是 successor。
+#[test]
+fn s021_end_does_not_create_a_successor() {
+    let w = world("ss-end-rebind");
+    w.exec("UPDATE agent_sessions SET connection_state = 'CLOSED', close_reason = 'HEARTBEAT_TIMEOUT' WHERE id = 'SX'");
+    let before = w.sessions();
+    w.refused(ErrorCode::SESSION_CLOSED, || {
+        w.end_as("SX", end(Outcome::Completed, true))
+    });
+    assert_eq!(w.sessions(), before);
+    w.exec("UPDATE agent_sessions SET connection_state = 'CLOSED', close_reason = 'HEARTBEAT_TIMEOUT' WHERE id = 'S1'");
+    let r = w.end_as("S1", end(Outcome::Completed, true)).unwrap();
+    assert_eq!(r.rebound_to.as_deref(), Some("S2"));
+    assert_eq!(w.session_col("PA", "S2", "connection_state"), "CLOSED");
+}
+
+/// S-017 + 03 §5.1：强制关闭只给 User；Agent 调用被拒，整库零变化。强制关闭覆盖 close_reason，之后不能 rebind。
+#[test]
+fn s017_force_close() {
+    let w = world("ss-force");
+    let k = w.task("占住");
+    w.s1(p(&k, Operation::Claim)).unwrap();
+    w.exec("UPDATE agent_sessions SET connection_state = 'CLOSED', close_reason = 'HEARTBEAT_TIMEOUT' WHERE id = 'S1'");
+    w.refused(ErrorCode::USER_AUTHORIZATION_REQUIRED, || {
+        w.svc
+            .force_close_session(&agent(), &w.target(None), "S1", true)
+    });
+    let r = w
+        .svc
+        .force_close_session(&user(), &w.target(None), "S1", true)
+        .unwrap();
+    assert_eq!(r.result["released"], 1);
+    assert_eq!(w.col(&k, "status"), "READY");
+    assert_eq!(w.col(&k, "assignee_agent_id"), Value::Null);
+    assert_eq!(w.session_col("PA", "S1", "close_reason"), "FORCE_CLOSE");
+    assert_eq!(
+        w.session_col("PA", "S1", "retirement_reason"),
+        "closed by user"
+    );
+    assert_eq!(
+        w.scalar(
+            "SELECT actor_type FROM events WHERE project_id = 'PA' AND type = 'agent.force_closed'"
+        ),
+        "USER"
+    );
+    // S2 是 S1 的 successor，但 FORCE_CLOSE 不可 rebind：用 S1 写入 → SESSION_CLOSED。
+    w.refused(ErrorCode::SESSION_CLOSED, || w.record_as("S1", "x"));
+    w.refused(ErrorCode::SESSION_NOT_FOUND, || {
+        w.svc
+            .force_close_session(&user(), &w.target(None), "NOPE", true)
+    });
+}
+
+/// 03 P-006：Agent 写入的 session 必须属于目标项目。
+#[test]
+fn p006_the_session_must_belong_to_the_project() {
+    let w = world("ss-p006");
+    let e = w.refused(ErrorCode::SESSION_NOT_FOUND, || w.record_as("EX", "x"));
+    assert_eq!(e.details["session_id"], "EX");
+    w.record_as("S1", "x").unwrap();
+}
+
+/// 00 02 C-08 + 10 R2：任何写入都刷新心跳，并给这个 session 持有的领取续租。
+#[test]
+fn c08_r2_writes_refresh_heartbeat_and_renew_leases() {
+    let w = world("ss-heartbeat");
+    let k = w.task("一");
+    w.s1(p(&k, Operation::Claim)).unwrap();
+    w.exec(&format!(
+        "UPDATE work_items SET claim_lease_until = '{}' WHERE local_no = 1;
+         UPDATE agent_sessions SET heartbeat_at = '{T0}' WHERE id = 'S1';",
+        now_minus(1)
+    ));
+    let version = w.version(&k);
+    w.record_as("S1", "写点别的").unwrap();
+    let lease = w.col(&k, "claim_lease_until");
+    assert!(lease.as_str().unwrap() > now_minus(-9).as_str(), "{lease}");
+    assert_eq!(
+        w.version(&k),
+        version,
+        "lease renewal is not a content change"
+    );
+    assert!(w.session_col("PA", "S1", "heartbeat_at").as_str().unwrap() > T0);
+}
+
+/// S-022：available 时取新值；无变化不写不发事件。界面入口只给 User。
+#[test]
+fn s022_git_context() {
+    let w = world("ss-git");
+    let git = GitContext {
+        available: true,
+        branch: Some("main".into()),
+        head: Some("abc1234".into()),
+        ..GitContext::default()
+    };
+    let v = w.session_col("PA", "S1", "version").as_i64().unwrap();
+    let r = w
+        .svc
+        .refresh_git_context(&user(), "PA", "S1", git.clone())
+        .unwrap();
+    assert_eq!(r["updated"], true);
+    assert_eq!(w.session_col("PA", "S1", "git_branch"), "main");
+    assert_eq!(w.session_col("PA", "S1", "version"), v + 1);
+    let before = w.snapshot();
+    let r = w.svc.refresh_git_context(&user(), "PA", "S1", git).unwrap();
+    assert_eq!(r["updated"], false);
+    assert_eq!(w.snapshot(), before);
+    // 不可用时保留旧值，只更新 available / error。
+    w.svc
+        .refresh_git_context(
+            &user(),
+            "PA",
+            "S1",
+            GitContext {
+                available: false,
+                error: Some("git not found".into()),
+                ..GitContext::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(w.session_col("PA", "S1", "git_branch"), "main");
+    assert_eq!(w.session_col("PA", "S1", "git_error"), "git not found");
+    w.refused(ErrorCode::USER_AUTHORIZATION_REQUIRED, || {
+        w.svc
+            .refresh_git_context(&agent(), "PA", "S1", GitContext::default())
+            .map(|_| unreachable!())
+    });
+}
+
+/// R11 A1 优先级 1 + A3：显式 session 接回（CURRENT）；要同 agent、同 role、未关闭；与 predecessor 互斥；进指纹。
+#[test]
+fn a1_explicit_session_reattach() {
+    let w = world("ss-explicit");
+    let s = sid(&w.begin(begin_req("codex")));
+    let r = w.begin(BeginRequest {
+        session: Some(s.clone()),
+        cwd: Some("R:/elsewhere".into()),
+        ..begin_req("codex")
+    });
+    assert_eq!(r.result["outcome"], "CURRENT");
+    assert_eq!(sid(&r), s);
+    for (code, req) in [
+        (
+            ErrorCode::INVALID_ARGUMENT,
+            BeginRequest {
+                session: Some(s.clone()),
+                predecessor_session_id: Some(s.clone()),
+                ..begin_req("codex")
+            },
+        ),
+        (
+            ErrorCode::SESSION_SUCCESSOR_AGENT_MISMATCH,
+            BeginRequest {
+                session: Some(s.clone()),
+                ..begin_req("claude")
+            },
+        ),
+        (
+            ErrorCode::SESSION_SUCCESSOR_IDENTITY_MISMATCH,
+            BeginRequest {
+                session: Some(s.clone()),
+                role: Some("REVIEWER".into()),
+                ..begin_req("codex")
+            },
+        ),
+        (
+            ErrorCode::SESSION_NOT_FOUND,
+            BeginRequest {
+                session: Some("EX".into()),
+                ..begin_req("codex")
+            },
+        ),
+    ] {
+        w.refused(code, || w.svc.begin(&agent(), req));
+    }
+    // 显式 session 是业务字段：同一个 op_id 换 session 就冲突。
+    let op = BeginRequest {
+        op_id: Some("x".into()),
+        session: Some(s.clone()),
+        ..begin_req("codex")
+    };
+    w.begin(op.clone());
+    w.refused(ErrorCode::IDEMPOTENCY_CONFLICT, || {
+        w.svc.begin(
+            &agent(),
+            BeginRequest {
+                session: Some("SX".into()),
+                ..op.clone()
+            },
+        )
+    });
+    w.end_as(&s, end(Outcome::Completed, true)).unwrap();
+    let e = w.refused(ErrorCode::SESSION_CLOSED, || {
+        w.svc.begin(
+            &agent(),
+            BeginRequest {
+                session: Some(s.clone()),
+                ..begin_req("codex")
+            },
+        )
+    });
+    assert_eq!(e.details["next"]["predecessor_session_id"], s.as_str());
+}
+
+/// R11 A3 的可比性：省略 resume 的 begin 与 2.x 旧行比较时按 2.x 缺省值 false 重建；显式 auto、显式 session 与旧行不可比。
+#[test]
+fn a3_omitted_resume_matches_a_2x_begin_receipt() {
+    let w = world("ss-begin-v1");
+    let legacy = JsValue::from_json(&json!({
+        "projectCode": "ATM", "cwd": "R:/repo", "title": null, "mode": "auto", "agentId": "codex",
+        "displayName": "codex", "clientKind": "generic", "parentSessionId": null, "threadId": null,
+        "role": "PRIMARY", "gitBranch": null, "gitHead": null, "resume": false, "predecessorSessionId": null,
+        "signals": {}, "allowProjectCreate": false, "creationReason": null,
+    }));
+    let fingerprint = fp::kernel_v1(&legacy).unwrap();
+    w.svc
+        .store()
+        .write(move |tx| {
+            tx.execute(
+                "INSERT INTO idempotency_receipts (scope_kind, scope_id, ns_kind, ns_id, op_id, legacy_key, legacy_class,
+                     operation, fp_v, fp_family, fingerprint, receipt_json, scope_generation, created_at)
+                 VALUES ('PROJECT', 'PA', 'ACTOR', 'BEGIN', 'old', 'session-begin:old', 'BEGIN', 'session.recover-or-begin', 1,
+                         'kernel-v1', ?1, '{\"id\":\"S1\",\"sequence\":3}', 1, ?2)",
+                rusqlite::params![fingerprint, T0],
+            )
+        })
+        .map_err(|e| format!("{e:?}"))
+        .unwrap();
+    let req = BeginRequest {
+        op_id: Some("old".into()),
+        ..begin_req("codex")
+    };
+    let before = w.snapshot();
+    let r = w.begin(req.clone());
+    assert!(r.replayed);
+    assert_eq!(r.result["id"], "S1");
+    assert_eq!(w.snapshot(), before);
+    for other in [
+        BeginRequest {
+            resume: Some(Resume::Auto),
+            ..req.clone()
+        },
+        BeginRequest {
+            session: Some("SX".into()),
+            ..req.clone()
+        },
+    ] {
+        w.refused(ErrorCode::IDEMPOTENCY_CONFLICT, || {
+            w.svc.begin(&agent(), other)
+        });
+    }
+}
+
+/// S-091：每种写入发出 02 §6.3 表里的事件（类型 + aggregate_type）；REPLAY 不发事件。
+/// 任务操作、检查项、review 的事件在 work / composite 的用例里逐个断言；这里覆盖 session、进度、记录与规划根。
+#[test]
+fn s091_each_write_emits_its_event() {
+    let w = world("ss-s091");
+    let last = || w.count("SELECT coalesce(max(seq), 0) FROM events WHERE project_id = 'PA'");
+    let since = |after: i64| -> Vec<String> {
+        let rows = w.scalar(&format!(
+            "SELECT json_group_array(type || '/' || aggregate_type) FROM
+               (SELECT type, aggregate_type FROM events WHERE project_id = 'PA' AND seq > {after} ORDER BY seq)"
+        ));
+        serde_json::from_str(rows.as_str().unwrap()).unwrap()
+    };
+    let mut at = last();
+    let mut expect = |what: &str, events: &[&str]| {
+        let now = last();
+        assert_eq!(since(at), events, "{what}");
+        at = now;
+    };
+    let joined = w.begin(BeginRequest {
+        resume: Some(Resume::No),
+        ..begin_req("codex")
+    });
+    let s = sid(&joined);
+    expect("new session", &["agent.joined/SESSION"]);
+    w.begin(BeginRequest {
+        resume: Some(Resume::Yes),
+        ..begin_req("codex")
+    });
+    expect("resume", &["agent.resumed/SESSION"]);
+    w.svc
+        .refresh_git_context(
+            &user(),
+            "PA",
+            &s,
+            GitContext {
+                available: true,
+                branch: Some("main".into()),
+                ..GitContext::default()
+            },
+        )
+        .unwrap();
+    expect("git refresh", &["agent.git_context.updated/SESSION"]);
+    let k = w.task("一");
+    expect("create", &["work.created/WORK_ITEM"]);
+    w.s1(p(&k, Operation::Start)).unwrap();
+    expect("start", &["work.started/WORK_ITEM"]);
+    w.svc
+        .add_progress(
+            &agent(),
+            &w.target(Some("S1")),
+            ProgressRequest::task(&k, "进展"),
+        )
+        .unwrap();
+    expect("task progress", &["work.progressed/WORK_ITEM"]);
+    w.svc
+        .add_progress(
+            &agent(),
+            &w.target(Some("S1")),
+            ProgressRequest {
+                blocker: Some("等 CI".into()),
+                ..ProgressRequest::task(&k, "卡住")
+            },
+        )
+        .unwrap();
+    expect("blocker", &["work.blocked/WORK_ITEM"]);
+    w.svc
+        .add_progress(
+            &agent(),
+            &w.target(Some("S1")),
+            ProgressRequest {
+                scope: ProgressScope::Project,
+                task_key: None,
+                ..ProgressRequest::task("", "周报")
+            },
+        )
+        .unwrap();
+    expect(
+        "project progress",
+        &["project.update.published/PROJECT_UPDATE"],
+    );
+    let t = w.target(Some("S1"));
+    let req = RecordRequest::new("FACT", "事实", "摘要");
+    w.svc.create_record(&agent(), &t, req.clone()).unwrap();
+    expect("record", &["record.created/RECORD"]);
+    w.svc.create_record(&agent(), &t, req).unwrap();
+    expect("replay", &[]);
+    w.end_as(&s, end(Outcome::Completed, true)).unwrap();
+    expect("end", &["agent.left/SESSION"]);
+    w.svc
+        .force_close_session(&user(), &w.target(None), "SX", true)
+        .unwrap();
+    expect("force close", &["agent.force_closed/SESSION"]);
+}
+
+/// 10 R4′ 验收：待确认交接 → 后继确认 → 范围恢复把交接退回待确认 → 后继 resume 时再次确认并继续工作；
+/// 确认方后来 CLOSED，交接作为历史保留，不让 CLOSED 的 session 复活。
+#[test]
+fn r4_handoffs_are_reconfirmed_after_a_restore() {
+    let w = world("ss-r4-handoff");
+    let thread_a = |resume: Resume| BeginRequest {
+        resume: Some(resume),
+        thread_id: Some("A".into()),
+        ..begin_req("codex")
+    };
+    let a = sid(&w.begin(thread_a(Resume::No)));
+    let k = w.task("一");
+    w.patch_as(&agent(), Some(&a), vec![p(&k, Operation::Start)])
+        .unwrap();
+    w.end_as(&a, end(Outcome::Paused, false)).unwrap();
+    let backups = w.dir.join("backups");
+    let backup = atm_store::backup::create_backup(w.svc.store(), &backups, "MANUAL", &now_minus(0))
+        .unwrap()
+        .id;
+    let n = w.begin(thread_a(Resume::Yes));
+    assert_eq!(n.result["outcome"], "SUCCESSOR");
+    assert_eq!(n.result["acknowledgedHandoffs"], 1);
+    let n = sid(&n);
+    let to = || {
+        w.scalar(&format!(
+            "SELECT to_session_id FROM handoffs WHERE from_session_id = '{a}'"
+        ))
+    };
+    assert_eq!(to(), n.as_str());
+    let at = now_minus(0);
+    atm_store::restore::restore_project(
+        w.svc.store(),
+        &backup,
+        "PA",
+        &atm_store::restore::RestoreOptions {
+            backups_root: &backups,
+            at: &at,
+            pin_until: &at,
+            budget: std::time::Duration::from_secs(60),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        to(),
+        Value::Null,
+        "the restore brought the handoff back to pending"
+    );
+    assert_eq!(w.session_col("PA", &n, "connection_state"), "ONLINE");
+    let again = w.begin(thread_a(Resume::Yes));
+    assert_eq!(sid(&again), n);
+    assert_eq!(again.result["outcome"], "RESUMED");
+    assert_eq!(again.result["acknowledgedHandoffs"], 1);
+    assert_eq!(to(), n.as_str());
+    w.patch_as(&agent(), Some(&n), vec![p(&k, Operation::Verify)])
+        .unwrap();
+    // 确认方结束：交接留作历史，n 不会因此复活；新的 resume 开新的 session。
+    w.end_as(&n, end(Outcome::Completed, true)).unwrap();
+    let later = w.begin(thread_a(Resume::Yes));
+    assert_ne!(sid(&later), n);
+    assert_eq!(to(), n.as_str());
+    assert_eq!(w.session_col("PA", &n, "connection_state"), "CLOSED");
+}
+
+/// peer W2 r1 P1-01：选择器里的项目代码含汉字、表情、二字节字符时，找不到就是 PROJECT_NOT_FOUND，
+/// 不在拼「你是不是要找」时按字节切片 panic；前缀按字符取（`AT中` 提示 ATM）。
+#[test]
+fn unicode_project_codes_are_domain_errors() {
+    let w = world("ss-begin-unicode");
+    for code in ["中文", "a中", "😀", "é", "AT中"] {
+        let e = w.refused(ErrorCode::PROJECT_NOT_FOUND, || {
+            w.svc.begin(
+                &agent(),
+                BeginRequest {
+                    selector: ProjectSelector {
+                        code: Some(code.into()),
+                        ..ProjectSelector::default()
+                    },
+                    ..begin_req("claude")
+                },
+            )
+        });
+        if code == "AT中" {
+            assert_eq!(e.details["did_you_mean"], json!(["ATM"]), "{e:?}");
+        }
+    }
+}
+
+/// begin 之前关闭已退出客户端的 session 是一个独立的维护事务：begin 本身随后失败（这里是 op_id 冲突）时，
+/// begin 没有提交，但那次关闭已经提交了——错误里如实列出关掉的 session（peer W4 r1 P1-05）。
+#[test]
+fn p1_05_a_failed_begin_lists_what_its_maintenance_already_closed() {
+    let w = world("ss-p105");
+    let w = World {
+        svc: w.svc.with_liveness(std::sync::Arc::new(|id: &str| {
+            Some(!id.starts_with("pid:dead"))
+        })),
+        ..w
+    };
+    w.fresh_fixture();
+    let at = |title: &str| BeginRequest {
+        cwd: Some("D:/repo".into()),
+        title: Some(title.into()),
+        op_id: Some("p105".into()),
+        ..begin_req("codex")
+    };
+    let crashed = sid(&w.svc.begin(&agent_in("pid:dead-1"), at("first")).unwrap());
+    let e = w
+        .svc
+        .begin(&agent_in("pid:live-2"), at("second"))
+        .unwrap_err();
+    assert_eq!(e.code.as_str(), "IDEMPOTENCY_CONFLICT", "{e:?}");
+    assert_eq!(e.committed, None, "begin 自己没有提交：{e:?}");
+    assert_eq!(
+        e.details["closed_exited_sessions"],
+        serde_json::json!([crashed]),
+        "{e:?}"
+    );
+    assert_eq!(
+        w.scalar(&format!(
+            "SELECT connection_state || ':' || close_reason FROM agent_sessions WHERE id = '{crashed}'"
+        )),
+        "CLOSED:CLIENT_EXITED"
+    );
+}

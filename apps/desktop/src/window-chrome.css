@@ -39,6 +39,28 @@ html[data-atm-desktop="true"] .atm-main::-webkit-scrollbar-thumb {
   background-clip: padding-box;
 }
 
+/*
+ * 顶沿整条都是拖动区。窗口最上面那一截以前不在任何拖动区里：主区域上方是顶栏 18px 的上内边距
+ * （顶栏本身是 no-drag，只有里面的字标格和按钮组拖得动），侧栏上方是卡片外 12px 的气口（外壳
+ * 没有 app-region），那里既拖不动也缩放不了。现在外壳四周的气口和顶栏上内边距那一条
+ * （.atm-titlebar-edge）也是拖动区；主区域本身不拖，内容里照常选字、点击。
+ *
+ * WebView2 判拖动区按文档顺序，不按谁画在上面：后出现的元素的 app-region 盖掉先出现的（实测：
+ * 窗口按钮在 DOM 里排在整个界面前面，顶栏要是整块声明 drag，按钮就成了 HTCAPTION）。所以顶栏
+ * 本身保持 no-drag，只把上内边距那一条做成拖动区——窗口按钮从 y=20 起，碰不到它。
+ *
+ * 拖动区最上面那 8 个物理像素（100% 缩放；SM_CYFRAME 那么高）WebView2 自己答 HTTOP，是改窗口
+ * 高度的缩放边，从那往下才是拖窗口。这是 WebView2 内建的，与拖动区从哪一像素开始无关（实测
+ * 拖动区从 1、2、4px 开始，上面照样是 HTTOP 到第 8 像素），和系统窗口顶沿能缩放的习惯一致。
+ */
+html[data-atm-desktop="true"] .atm-shell {
+  -webkit-app-region: drag;
+}
+
+html[data-atm-desktop="true"] .atm-main {
+  -webkit-app-region: no-drag;
+}
+
 html[data-atm-desktop="true"] .atm-sidebar {
   -webkit-app-region: drag;
   user-select: none;
@@ -53,6 +75,91 @@ html[data-atm-desktop="true"] .atm-topbar {
   padding-right: 166px;
   -webkit-app-region: no-drag;
   user-select: none;
+}
+
+html[data-atm-desktop="true"] .atm-titlebar-edge {
+  -webkit-app-region: drag;
+}
+
+/*
+ * 浮在拖动区上面的面板要自己声明 no-drag。没声明 app-region 的浮层（哪怕 z-index 更高）盖在
+ * 拖动区上，鼠标落下去照样是拖窗口（实测命中 HTCAPTION）：抽屉标题栏伸到顶沿那一条里，那里的
+ * 按钮就点不动。只收面板本身，不收全屏的遮罩：遮罩底下的顶沿仍然能拖窗口。
+ */
+html[data-atm-desktop="true"] :is(.atm-modal, .atm-drawer, .atm-notice) {
+  -webkit-app-region: no-drag;
+}
+
+/*
+ * Windows 10 的缩放把手（宿主报 getWindowFrame() === "client" 时才渲染，见 renderer.tsx）。
+ *
+ * 那里窗口没有系统的缩放边：系统的缩放边会让 DWM 在左、右、下画一圈跟系统强调色走的边框线
+ * （native/host/src/frame.rs）。改由贴着窗口边的这几条把手接住按下，交给系统的缩放循环。
+ * 它们排在整个界面后面、z-index 最高，声明 no-drag：盖得住外壳的拖动区，按下才到得了页面。
+ * 6px 宽的边落在外壳的气口里（侧栏外 12px、主区域右侧 7px、内容底部留白），不压内容。
+ */
+.atm-window-edge {
+  position: fixed;
+  z-index: 110;
+  -webkit-app-region: no-drag;
+}
+
+.atm-window-edge[data-edge="left"],
+.atm-window-edge[data-edge="right"] {
+  top: 12px;
+  bottom: 12px;
+  width: 6px;
+  cursor: ew-resize;
+}
+
+.atm-window-edge[data-edge="left"] {
+  left: 0;
+}
+
+.atm-window-edge[data-edge="right"] {
+  right: 0;
+}
+
+.atm-window-edge[data-edge="bottom"] {
+  right: 12px;
+  bottom: 0;
+  left: 12px;
+  height: 6px;
+  cursor: ns-resize;
+}
+
+.atm-window-edge:is(
+  [data-edge="bottomLeft"],
+  [data-edge="bottomRight"],
+  [data-edge="topLeft"],
+  [data-edge="topRight"]
+) {
+  width: 12px;
+  height: 12px;
+}
+
+.atm-window-edge[data-edge="bottomLeft"] {
+  bottom: 0;
+  left: 0;
+  cursor: nesw-resize;
+}
+
+.atm-window-edge[data-edge="bottomRight"] {
+  right: 0;
+  bottom: 0;
+  cursor: nwse-resize;
+}
+
+.atm-window-edge[data-edge="topLeft"] {
+  top: 0;
+  left: 0;
+  cursor: nwse-resize;
+}
+
+.atm-window-edge[data-edge="topRight"] {
+  top: 0;
+  right: 0;
+  cursor: nesw-resize;
 }
 
 html[data-atm-desktop="true"] .atm-brand,

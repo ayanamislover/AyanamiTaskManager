@@ -123,11 +123,9 @@ describe("Overview feature", () => {
           progress: 75,
           progress_source: "STATUS_WEIGHTED",
           last_activity_at: "2026-08-28T00:00:00.000Z",
-          projection: { status: "CAUGHT_UP", lag: 0 },
         },
       ],
       quick: { blocked: 1 },
-      projectionFailures: [],
       recentEvents: [{ id: "event-1", type: "work.started", title: "开始实现" }],
     });
     queryClient.setQueryData(
@@ -177,7 +175,6 @@ describe("Overview feature", () => {
       sequence: 45,
       projects: [{ ...project(), last_project_update_at: "2026-08-28T00:00:00.000Z" }],
       quick: { blocked: 0 },
-      projectionFailures: [],
       recentEvents: [],
     });
     queryClient.setQueryData(["quick"], []);
@@ -216,7 +213,6 @@ describe("Overview feature", () => {
         sequence: 46,
         projects: [{ ...project(), last_project_update_at: "2026-08-28T00:00:00.000Z" }],
         quick: { blocked: 0 },
-        projectionFailures: [],
         // 展示窗口里的备份事件与结论无关：提醒只看服务端给出的最近一次备份结果。
         recentEvents: [{ sequence: 30, type: "backup.failed", actor: "SYSTEM" }],
         lastBackup,
@@ -249,7 +245,6 @@ describe("Overview feature", () => {
       sequence: 43,
       projects: [{ ...project(), name: longName }],
       quick: { blocked: 0 },
-      projectionFailures: [],
       recentEvents: [],
     });
     queryClient.setQueryData(["quick"], []);
@@ -287,7 +282,6 @@ describe("Overview feature", () => {
         name: `项目${name}`,
       })),
       quick: { blocked: 0 },
-      projectionFailures: [],
       recentEvents: [],
     });
     queryClient.setQueryData(["quick"], []);

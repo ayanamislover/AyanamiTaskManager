@@ -52,6 +52,9 @@ pub struct Snapshot {
     pub run: Option<RawValue>,
     pub shortcuts: Vec<ShortcutSnapshot>,
     pub legacy: Option<Legacy>,
+    /// The keepalive task as it was (W8c). Snapshots from before it read as `Unknown`.
+    #[serde(default)]
+    pub keepalive: crate::keepalive::Kept,
 }
 
 fn path(env: &Env, txn: &str) -> PathBuf {
@@ -114,6 +117,7 @@ pub fn take(
         run: registry::read_value(&env.run_key, env::RUN_VALUE)?,
         shortcuts,
         legacy,
+        keepalive: crate::keepalive::snapshot(env),
     };
     fsx::write_json_atomic(&path(env, txn), &snapshot).map_err(|error| error.to_string())?;
     Ok(snapshot)
@@ -180,7 +184,14 @@ pub fn restore_registrations(env: &Env, snapshot: &Snapshot) -> Result<(), Strin
             }
         }
     }
-    Ok(())
+    crate::keepalive::restore(
+        env,
+        &snapshot.keepalive,
+        snapshot
+            .pointer
+            .as_ref()
+            .map(|pointer| pointer.current.as_str()),
+    )
 }
 
 pub fn saved_root_file(env: &Env, txn: &str, relative: &str) -> PathBuf {

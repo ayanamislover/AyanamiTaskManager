@@ -54,6 +54,8 @@ export const STAGE_INPUTS: Record<string, StageInputs> = {
       "playwright.config",
       // webServer 起的是它，改了它 e2e 跑的就是另一个东西。
       "scripts/start-e2e.ts",
+      // e2e 之前先编译服务（不算进 webServer 的超时），改了它编出来的就可能是另一个东西。
+      "scripts/build-e2e.ts",
     ],
     // playwright 的 testDir 是 apps/desktop/e2e，这些目录里是 vitest 单测，由 test
     // 阶段跑。不排掉的话，改一个单测文件就会作废 e2e——1.0.7 那次正是这样。
@@ -65,22 +67,10 @@ export const STAGE_INPUTS: Record<string, StageInputs> = {
       "packages/protocol/test/",
     ],
   },
-  // 性能阈值只跟存储与查询路径有关。
-  benchmark: {
-    include: [
-      "packages/storage-sqlite/",
-      "packages/application/",
-      "packages/domain/",
-      "migrations/",
-      "scripts/benchmark.ts",
-    ],
-    exclude: [
-      "packages/storage-sqlite/test/",
-      "packages/application/test/",
-      "packages/domain/test/",
-    ],
-  },
-  // 它验的是安装器本身：打包配置、发布脚本、原生依赖和迁移。改一行 CSS 重跑
+  // 2.x 的 benchmark（Node 服务）不在 3.0 的链上；install-drill、budget 与 power-loss 测的是这次的候选二进制，
+  // 每次都跑，不声明可复用的输入。
+
+  // distribution-smoke 验的是安装器本身：打包配置、发布脚本、原生依赖和迁移。改一行 CSS 重跑
   // 一遍安装卸载，证明不了任何新东西。
   //
   // 这里不排任何东西。scripts/ 收得宽是有意的：安装链会外调其中一批脚本，

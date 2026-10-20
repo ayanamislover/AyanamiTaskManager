@@ -39,11 +39,6 @@ export const LEGACY_TOOL_LIST_ARTIFACT_SHA256 =
 // schema generator; current core/memory/actions descriptors always come from Zod.
 export const LEGACY_TOOL_LIST_SOURCE_COMMIT = "410969b7fed5f1837078f6731271bf6c18381faf";
 
-/** 描述里出现 `|`（枚举取值常这么写）会把表格切出多余的列，写进单元格前先转义。 */
-function markdownCell(value: string): string {
-  return value.replaceAll("|", "\\|");
-}
-
 /**
  * `_meta.schema_hash` 只用来发现 schema 漂移，没人需要读完整 64 位十六进制。
  *
@@ -122,49 +117,6 @@ export function publishedProfileSchemaHash(
   surfaceVersion: number,
 ): string {
   return digest(publishedTools(registry, profile, surfaceVersion));
-}
-
-export function generateMcpToolContractMarkdown(
-  registry: ToolDefinitionRegistry,
-  surfaceVersion: number,
-): string {
-  const profiles = (["core", "memory", "actions"] as const).map((profile) => {
-    const tools = publishedTools(registry, profile, surfaceVersion);
-    return {
-      profile,
-      tools,
-      bytes: Buffer.byteLength(JSON.stringify(tools), "utf8"),
-      hash: publishedProfileSchemaHash(registry, profile, surfaceVersion),
-    };
-  });
-  const rows = profiles.flatMap(({ profile, tools }) =>
-    tools.map((tool) => {
-      const metadata = tool._meta as { schema_hash?: unknown } | undefined;
-      return `| ${profile} | \`${tool.name}\` | ${markdownCell(tool.description ?? "")} | ${String(
-        tool.annotations?.readOnlyHint,
-      )} | ${String(tool.annotations?.destructiveHint)} | \`${String(metadata?.schema_hash)}\` |`;
-    }),
-  );
-  return [
-    "# MCP Tool Contracts",
-    "",
-    "> Generated from `ToolDefinitionRegistry`; do not edit by hand.",
-    "",
-    `Surface: \`v${surfaceVersion}\``,
-    "",
-    "| Profile | Descriptor bytes | Profile schema hash |",
-    "| --- | ---: | --- |",
-    ...profiles.map(({ profile, bytes, hash }) => `| ${profile} | ${bytes} | \`${hash}\` |`),
-    "",
-    "| Profile | Tool | Description | Read only | Destructive | Schema hash |",
-    "| --- | --- | --- | --- | --- | --- |",
-    ...rows,
-    "",
-    "## Legacy compatibility artifact",
-    "",
-    `The unprofiled migration endpoint publishes the frozen v1.0.18 artifact from commit \`${LEGACY_TOOL_LIST_SOURCE_COMMIT}\`: ${LEGACY_TOOL_LIST_ARTIFACT_BYTES} bytes, SHA-256 \`${LEGACY_TOOL_LIST_ARTIFACT_SHA256}\`. Current installers only create the formal core, memory and actions profiles.`,
-    "",
-  ].join("\n");
 }
 
 export const TOOL_ERROR_DETAIL_TEXT_LIMIT = 500;

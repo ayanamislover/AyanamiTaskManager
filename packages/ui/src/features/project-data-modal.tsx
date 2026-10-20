@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { XIcon as X } from "@phosphor-icons/react/dist/icons/X";
-import type { AyanamiClient } from "@ayanami-task/client";
+import type { AyanamiClient, ImportSourceRef } from "@ayanami-task/client";
 import { useDialogs } from "../components/atm-dialogs.js";
 import { Empty, LoadingRows, MutationErrorAlert } from "../components/async-state.js";
 import type { PresenceRootProps } from "../components/presence.js";
@@ -38,7 +38,8 @@ export function ProjectDataModal({
     },
   });
   const restore = useMutation({
-    mutationFn: (id: string) => client.backups.restore(id),
+    // 只恢复这个项目：3.0 的备份是整库的，要指明范围（2.0 忽略这个请求体）。
+    mutationFn: (id: string) => client.backups.restore(id, { scope: "PROJECT", project }),
     onSuccess: async () => {
       await queryClient.invalidateQueries();
       notify("项目已从备份恢复");
@@ -46,8 +47,52 @@ export function ProjectDataModal({
   });
   const exportData = useMutation({
     mutationFn: (format: "aytproj" | "json" | "csv") => client.data.exportProject(project, format),
-    onSuccess: (result) => notify(`导出完成：${String(result.path)}`),
+    onSuccess: async (result) => {
+      notify(`导出完成：${String(result.path)}`);
+      await queryClient.invalidateQueries({ queryKey: ["import-sources"] });
+    },
   });
+  // 导入项目包：导出目录里的 .aytproj（含 2.0 的导出）与 2.x 的项目备份，导入为新项目。
+  const importSources = useQuery({
+    queryKey: ["import-sources"],
+    queryFn: () => client.data.importSources(),
+  });
+  const [packagePreview, setPackagePreview] = useState<Record<string, any> | null>(null);
+  const [importCode, setImportCode] = useState("");
+  const previewPackage = useMutation({
+    mutationFn: (source: ImportSourceRef) => client.data.previewImport(source),
+    onSuccess: (result) => {
+      setPackagePreview(result);
+      setImportCode(String(result.codeTaken ? result.suggestedCode : (result.project?.code ?? "")));
+    },
+  });
+  const applyPackage = useMutation({
+    mutationFn: async () => {
+      if (!packagePreview) throw new Error("请先预览要导入的项目包");
+      return client.data.applyImport(packagePreview.source as ImportSourceRef, importCode.trim());
+    },
+    onSuccess: async (result) => {
+      setPackagePreview(null);
+      await queryClient.invalidateQueries();
+      notify(`已导入为新项目 ${String(result.code)}`);
+    },
+  });
+  const packageRows = [
+    ...(importSources.data?.packages ?? []).map((item) => ({
+      key: `package:${String(item.origin)}:${String(item.name)}`,
+      source: item.source as ImportSourceRef,
+      title: String(item.name),
+      sub: `${item.origin === "LEGACY_EXPORTS" ? "2.x 导出 · " : ""}${formatTime(String(item.modifiedAt ?? ""))} · ${(Number(item.sizeBytes ?? 0) / 1024).toFixed(1)} KB`,
+    })),
+    ...(importSources.data?.legacyBackups ?? [])
+      .filter((item) => item.importable === "AS_PROJECT")
+      .map((item) => ({
+        key: `legacy:${String(item.id)}`,
+        source: item.source as ImportSourceRef,
+        title: `2.x 项目备份${item.project ? ` · ${String(item.project)}` : ""} · ${String(item.reason ?? "")}`,
+        sub: `${formatTime(String(item.createdAt ?? ""))} · ${(Number(item.sizeBytes ?? 0) / 1024).toFixed(1)} KB`,
+      })),
+  ];
   const previewImport = useMutation({
     mutationFn: async () => {
       if (!source) throw new Error("请先选择 agenttask.md");
@@ -116,6 +161,7 @@ export function ProjectDataModal({
                     <div className="atm-row" key={backup.id}>
                       <div>
                         <div className="atm-row-title">
+                          {backup.scope === "STORE" ? "整库备份 · " : ""}
                           {backup.reason} · {(Number(backup.sizeBytes) / 1024).toFixed(1)} KB
                         </div>
                         <div className="atm-row-sub">
@@ -177,6 +223,82 @@ export function ProjectDataModal({
             </div>
           </section>
           <section className="atm-section">
+            <h3>导入项目包</h3>
+            <div className="atm-row-sub" style={{ marginBottom: 10 }}>
+              导出目录里的 .aytproj（含 2.0 的导出）和 2.x
+              的项目备份会导入为新项目，现有项目不受影响。
+            </div>
+            <div className="atm-panel">
+              {importSources.isLoading ? (
+                <LoadingRows count={2} />
+              ) : packageRows.length ? (
+                <div className="atm-list">
+                  {packageRows.map((row) => (
+                    <div className="atm-row" key={row.key}>
+                      <div>
+                        <div className="atm-row-title">{row.title}</div>
+                        <div className="atm-row-sub">{row.sub}</div>
+                      </div>
+                      <button
+                        className="atm-button"
+                        disabled={previewPackage.isPending}
+                        onClick={() => previewPackage.mutate(row.source)}
+                      >
+                        预览
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <Empty
+                  title="没有可导入的项目包"
+                  text="导出的 .aytproj 放在数据目录的 exports 文件夹里，会显示在这里。"
+                />
+              )}
+            </div>
+            {packagePreview ? (
+              <div
+                className="atm-panel-body"
+                style={{ marginTop: 8 }}
+                data-testid="package-preview"
+              >
+                <div>
+                  {String(packagePreview.project?.code)} · {String(packagePreview.project?.name)}
+                  {packagePreview.counts?.work_items !== undefined
+                    ? ` · 任务 ${String(packagePreview.counts.work_items)}`
+                    : ""}
+                  {` · 附件 ${String(packagePreview.attachments ?? 0)}`}
+                </div>
+                {packagePreview.codeTaken ? (
+                  <div className="atm-row-sub">
+                    项目代码 {String(packagePreview.project?.code)} 已被占用，已填入一个空着的代码。
+                  </div>
+                ) : null}
+                <div className="atm-field" style={{ marginTop: 10 }}>
+                  <label htmlFor="import-code">导入后的项目代码</label>
+                  <input
+                    id="import-code"
+                    value={importCode}
+                    maxLength={12}
+                    onChange={(event) => setImportCode(event.target.value.toUpperCase())}
+                  />
+                </div>
+                <div className="atm-actions" style={{ marginTop: 10 }}>
+                  <button
+                    className="atm-button primary"
+                    disabled={!importCode.trim() || applyPackage.isPending}
+                    onClick={() => applyPackage.mutate()}
+                  >
+                    导入为新项目
+                  </button>
+                  <button className="atm-button" onClick={() => setPackagePreview(null)}>
+                    取消
+                  </button>
+                </div>
+              </div>
+            ) : null}
+          </section>
+          <section className="atm-section">
             <h3>导入旧 agenttask.md</h3>
             <div className="atm-field">
               <label htmlFor="agenttask-file">选择 Markdown 文件</label>
@@ -226,6 +348,9 @@ export function ProjectDataModal({
               createBackup.error,
               restore.error,
               exportData.error,
+              importSources.error,
+              previewPackage.error,
+              applyPackage.error,
               previewImport.error,
               applyImport.error,
             ]}

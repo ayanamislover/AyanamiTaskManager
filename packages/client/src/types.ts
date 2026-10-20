@@ -1,9 +1,6 @@
 import type {
   KnowledgeRevision,
   KnowledgeSource,
-  ProjectionFailureView,
-  ProjectionStateView,
-  ProjectionSummary,
   RecordInput,
   RecordView,
   SessionView,
@@ -26,11 +23,6 @@ export type {
   KnowledgeSearchInput,
   KnowledgeSearchPage,
   KnowledgeSource,
-  ProjectionBatchReceipt,
-  ProjectionFailureView,
-  ProjectionReconcileReceipt,
-  ProjectionStateView,
-  ProjectionSummary,
 } from "@ayanami-task/protocol";
 
 export type KnowledgeHistoryPage = {
@@ -96,10 +88,9 @@ export type RecordCreateReceipt = {
 export type ProjectRecord = RecordView;
 export type AgentSession = SessionView;
 
+/** 3.0 是单库，没有数据投影：投影健康随面板删除（00 §6）。 */
 export type SystemStatus = Record<string, unknown> & {
   ok: boolean;
-  projectionSummary: ProjectionSummary;
-  projectionFailures: ProjectionFailureView[];
 };
 
 export type OverviewProject = Record<string, unknown> & {
@@ -107,7 +98,6 @@ export type OverviewProject = Record<string, unknown> & {
   code: string;
   name: string;
   lifecycle: string;
-  projection: ProjectionStateView | null;
   health: string | null;
   current_milestone: string | null;
   next_target_date: string | null;
@@ -127,8 +117,6 @@ export type OverviewProject = Record<string, unknown> & {
 export type OverviewResponse = Record<string, unknown> & {
   sequence: number;
   projects: OverviewProject[];
-  projectionSummary: ProjectionSummary;
-  projectionFailures: ProjectionFailureView[];
   quick: Record<string, unknown>;
   recentEvents: Array<Record<string, unknown>>;
   /** 最近一次自动或手动备份的结果事件（backup.created / backup.failed），从没备份过为 null。 */

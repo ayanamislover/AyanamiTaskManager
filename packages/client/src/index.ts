@@ -1,4 +1,4 @@
-import type { ProjectionBatchReceipt, SearchPage } from "@ayanami-task/protocol";
+import type { SearchPage } from "@ayanami-task/protocol";
 import { queryString, requestJson } from "./http.js";
 import { createProjectsSurface } from "./surfaces/projects.js";
 import { createTasksSurface } from "./surfaces/tasks.js";
@@ -20,6 +20,11 @@ export { AyanamiClientError } from "./http.js";
 export type * from "./types.js";
 export type * from "./surfaces/sync.js";
 export type * from "./surfaces/dispatch.js";
+
+/** 一个可导入的来源：导出目录里的 `.aytproj`（按文件名点名），或一份 2.x 备份登记。 */
+export type ImportSourceRef =
+  | { kind: "PACKAGE"; origin: "EXPORTS" | "LEGACY_EXPORTS"; name: string }
+  | { kind: "LEGACY_BACKUP"; id: string };
 
 type SyncSurface = ReturnType<typeof createSyncSurface>;
 type DispatchSurface = ReturnType<typeof createDispatchSurface>;
@@ -96,11 +101,6 @@ export class AyanamiClient {
   readonly projects = createProjectsSurface(this.request.bind(this));
   readonly knowledge = createKnowledgeSurface(this.request.bind(this));
 
-  readonly projections = {
-    reconcileAll: () =>
-      this.request<ProjectionBatchReceipt>("POST", "/api/v1/system/projections/reconcile"),
-  };
-
   readonly sessions = {
     begin: (input: Record<string, unknown>) =>
       this.request<Record<string, unknown>>("POST", "/api/v1/sessions", input),
@@ -157,10 +157,15 @@ export class AyanamiClient {
       this.request<Record<string, any>>("POST", "/api/v1/backups", {
         scope: "KNOWLEDGE",
       }),
-    restore: (id: string) =>
+    // 恢复哪一部分：3.0 的备份是整库的，必须指明（项目或知识库）；2.0 按备份自己的范围恢复，忽略请求体。
+    restore: (
+      id: string,
+      target?: { scope: "PROJECT"; project: string } | { scope: "KNOWLEDGE" },
+    ) =>
       this.request<Record<string, any>>(
         "POST",
         `/api/v1/backups/${encodeURIComponent(id)}/restore`,
+        target,
       ),
   };
 
@@ -174,10 +179,24 @@ export class AyanamiClient {
       expectedSha256?: string;
     }) => this.request<Record<string, any>>("POST", "/api/v1/imports/agenttask-md/apply", input),
     exportProject: (project: string, format: "aytproj" | "json" | "csv" = "aytproj") =>
+      // 3.0：导出写文件，是 User 才能做的 POST（00 C-07、10 R8）。
       this.request<Record<string, any>>(
-        "GET",
+        "POST",
         `/api/v1/exports/${encodeURIComponent(project)}${queryString({ format })}`,
       ),
+    // 3.0：项目包（导出目录里的 .aytproj，含 2.0 的导出）与 2.x 备份的导入（W6c）。
+    importSources: () =>
+      this.request<{
+        packages: Array<Record<string, any>>;
+        legacyBackups: Array<Record<string, any>>;
+      }>("GET", "/api/v1/imports/packages"),
+    previewImport: (source: ImportSourceRef) =>
+      this.request<Record<string, any>>("POST", "/api/v1/imports/packages/preview", { source }),
+    applyImport: (source: ImportSourceRef, code?: string) =>
+      this.request<Record<string, any>>("POST", "/api/v1/imports/packages/apply", {
+        source,
+        ...(code ? { code } : {}),
+      }),
   };
 
   readonly tasks = createTasksSurface(this.request.bind(this));

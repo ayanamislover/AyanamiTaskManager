@@ -137,7 +137,9 @@ describe("resume 证据字节闭包", () => {
     for (const report of [
       "output/release-verification.json",
       "output/e2e/results.json",
-      "output/benchmark-report.json",
+      "output/package/candidate-binaries.json",
+      "output/drill/report.json",
+      "output/budget-report.json",
       "output/packaged-smoke-report.json",
       "output/portable-smoke-report.json",
       "output/installed-smoke-report.json",

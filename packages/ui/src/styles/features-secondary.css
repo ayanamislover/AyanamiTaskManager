@@ -346,3 +346,60 @@
 .agent-history-name .atm-row-title {
   flex: 0 1 auto;
 }
+
+/* 数据源冲突的选源页（07 §7）：选项沿用设置页「系统通知」那组卡片，原因原文用等宽小字。 */
+.atm-source-choice {
+  max-width: 760px;
+}
+.atm-source-choice-body {
+  display: grid;
+  gap: 14px;
+}
+.atm-source-choice-detail {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 12px;
+}
+.atm-source-choice-detail dt {
+  color: var(--atm-text-muted);
+}
+.atm-source-choice-detail dd {
+  margin: 0;
+  color: var(--atm-text-muted);
+  font: 12px var(--atm-mono);
+  overflow-wrap: anywhere;
+}
+
+/* 库读不出时的恢复页（W8f-3）：步骤是真实的先后顺序，命令整行等宽、可整段选中。 */
+.atm-damaged-steps {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding-left: 20px;
+  line-height: 1.6;
+}
+/* 行内的目录名与参数：和派单页一样用 Cascadia Mono（没有连字，`--list` 不会连成一条长划）。 */
+.atm-damaged-steps code,
+.atm-damaged-hint code {
+  font: 12px var(--atm-mono);
+}
+/* 恢复页的整库备份列表（W8h）：在恢复步骤下面另起一块，间距同设置页；ID 就是命令里要输入的那串，和命令一样等宽。 */
+.atm-source-choice > .atm-panel + .atm-panel {
+  margin-top: 18px;
+}
+.atm-damaged-backups code {
+  font: 12px var(--atm-mono);
+}
+.atm-damaged-command {
+  display: block;
+  padding: 10px 12px;
+  border: 1px solid var(--atm-border);
+  border-radius: var(--atm-radius-row);
+  color: var(--atm-text);
+  background: var(--atm-bg);
+  font: 12px/1.65 var(--atm-mono);
+  overflow-wrap: anywhere;
+  user-select: all;
+}

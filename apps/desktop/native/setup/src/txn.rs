@@ -10,6 +10,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
+use atm_install_state::handoff;
+use atm_install_state::startup::{self, RollbackAuthority, WaitPolicy};
 use atm_install_state::{AppPointer, Outcome, Transaction, TxnKind, TxnState};
 
 use crate::env::{self, Env};
@@ -26,6 +28,8 @@ use crate::store::{self, InstallLock, Store};
 use atm_install_state::ipc;
 
 const PROBE_TIMEOUT: Duration = Duration::from_secs(90);
+/// Bringing Electron 1.x back up. A START of a new-style version waits by `WaitPolicy`
+/// instead: 60 s without progress, longer while a 3.x conversion reports progress (07 §8).
 const START_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long a replay waits for the host an earlier attempt started. That host may never
 /// serve: having lost its transaction it goes through normal admission, finds the journal
@@ -64,6 +68,29 @@ fn code(error: &str) -> String {
         .chars()
         .take(64)
         .collect()
+}
+
+/// `host` is the process that started this setup. A START host whose setup died before it
+/// was admitted runs `--recover` itself and waits for it to finish: it writes no progress
+/// until then, so taking over its wait would only wait out the first-progress budget.
+/// Such a host is not a live START to take over: a forward replay undoes and stops it like
+/// any other, and ROLLBACK_START replaces it at once instead of waiting out the takeover.
+fn started_us(host: &atm_install_state::ProcessIdentity) -> bool {
+    // Only the process snapshot carries the parent pid (`procs::find` does not).
+    let me = std::process::id();
+    procs::snapshot()
+        .into_iter()
+        .find(|proc| proc.pid == me)
+        .is_some_and(|me| me.parent == host.pid && procs::alive(host))
+}
+
+/// Whether undoing `from → to` leaves the 3.x line, so `N` is settled first (07 §8:
+/// `A=legacy` when the conversion was published). Only when there is an older line to go
+/// back to: undoing a 3.x → 3.x update stays on 3.x (`N` stays the source), and undoing a
+/// first install hands nothing back. Writing `A=legacy` there made the restored 3.x compare
+/// against a 2.x root that does not exist and wait for the user (`LEGACY_GONE`; W8b drill).
+fn undo_leaves_v3(from: Option<&str>, to: &str) -> bool {
+    startup::is_v3(to) && from.is_some_and(|from| !startup::is_v3(from))
 }
 
 /// Where a failed or interrupted forward path ends. Before SWITCH nothing changed:
@@ -380,6 +407,10 @@ impl Setup {
                 Err(error) => return Err(format!("SEAL_FAILED: {error}")),
             }
         }
+        // Leaving 3.x for an older line: settle N before the version switch (07 §8).
+        if txn.from.as_deref().is_some_and(startup::is_v3) && !startup::is_v3(&to) {
+            self.settle_v3(txn)?;
+        }
         // SWITCH (§6 step 9)
         self.enter(txn, TxnState::Switch)?;
         self.store
@@ -581,11 +612,21 @@ impl Setup {
         step: u8,
     ) -> Step {
         if let Some(started) = self.started_host(txn, from) {
-            say!(
-                "ROLLBACK_START: taking over host {} started earlier",
-                started.pid
-            );
-            match self.await_healthy(txn, from, &started, TAKEOVER_TIMEOUT) {
+            let waited = if started_us(&started) {
+                // It is blocked on this very recovery: it cannot serve before we finish.
+                Err("it started this recovery and waits for it".to_owned())
+            } else {
+                say!(
+                    "ROLLBACK_START: taking over host {} started earlier",
+                    started.pid
+                );
+                let policy = WaitPolicy {
+                    first_progress: TAKEOVER_TIMEOUT,
+                    ..WaitPolicy::default()
+                };
+                self.await_healthy(txn, from, &started, policy)
+            };
+            match waited {
                 Ok(()) => return Ok(()),
                 Err(error) => {
                     say!(
@@ -626,7 +667,7 @@ impl Setup {
         txn.started = Some(identity.clone());
         self.store.save(txn).map_err(io)?;
         fault::after_spawn(txn.state, &self.env, &identity);
-        self.await_healthy(txn, version, &identity, START_TIMEOUT)
+        self.await_healthy(txn, version, &identity, fault::wait_policy())
     }
 
     /// The host this transaction started for `version`, if a replay finds it still alive:
@@ -643,36 +684,49 @@ impl Setup {
             .then_some(started)
     }
 
+    /// Wait for SERVICE_HEALTHY (07 §8): only the witness counts as health. Progress that this
+    /// transaction's own process writes into `N\runtime\startup-progress.json` keeps the wait
+    /// going past `first_progress` (up to `cap`) while it moves; `stall` without movement is
+    /// STUCK. Progress from another txn or process — a recycled pid included — is ignored, so a
+    /// setup restarted mid-conversion takes the wait over from the same process (F15–F18).
     fn await_healthy(
         &self,
         txn: &Transaction,
         version: &str,
         identity: &atm_install_state::ProcessIdentity,
-        timeout: Duration,
+        policy: WaitPolicy,
     ) -> Step {
-        let identity = identity.clone();
-        let deadline = Instant::now() + timeout;
-        let mut last = String::new();
-        while Instant::now() < deadline {
-            match runtime::service_healthy(
-                &self.env.health_dir(),
-                &self.env.runtime_dir(),
-                &txn.id,
+        let health_dir = self.env.health_dir();
+        let legacy_runtime = self.env.runtime_dir();
+        let ledger = self.env.txn_dir(&txn.id).join(handoff::LEDGER_FILE);
+        handoff::await_healthy(
+            &handoff::Await {
+                health_dir: &health_dir,
+                legacy_runtime: &legacy_runtime,
+                v3_root: &self.env.v3_root,
+                ledger: &ledger,
+                txn: &txn.id,
                 version,
-                &identity,
-            ) {
-                Ok(()) => {
-                    say!("START {version} SERVICE_HEALTHY (host {})", identity.pid);
-                    return Ok(());
-                }
-                Err(error) => last = error,
+                identity,
+                policy,
+                poll: Duration::from_millis(250),
+            },
+            &mut |line| say!("{line}"),
+        )
+    }
+
+    /// Before leaving 3.x (a failed upgrade's undo, an active rollback or downgrade, back to
+    /// Electron), 07 §8: the 3.x process must have released `N`'s admission; then, by the phase
+    /// the conversion durably reached, either nothing (not published) or
+    /// `A={authority: legacy, by: setup-rollback, txn}` before the version switch.
+    pub fn settle_v3(&self, txn: &Transaction) -> Step {
+        match startup::settle_for_rollback(&self.env.v3_root, &txn.id, store::now_ms())? {
+            RollbackAuthority::Written { generation } => {
+                say!("3.x generation {generation}: authority recorded as 2.x (setup-rollback)");
             }
-            if !procs::alive(&identity) {
-                return Err(format!("START_HOST_EXITED: {last}"));
-            }
-            std::thread::sleep(Duration::from_millis(250));
+            RollbackAuthority::NotWritten(why) => say!("3.x authority unchanged: {why}"),
         }
-        Err(format!("START_TIMEOUT: {last}"))
+        Ok(())
     }
 
     /// COMMIT never rolls back: the service is healthy. Registration failures leave
@@ -780,8 +834,15 @@ impl Setup {
     ) -> Step {
         let to_dir = self.env.app_dir(&txn.to);
         match step {
-            // UNDO_STOP
-            1 => quiesce::stop_started(&self.env, txn.started.as_ref(), &to_dir),
+            // UNDO_STOP; undoing an upgrade from an older line to 3.x also settles N (07 §8)
+            // before UNDO_RESTORE switches the version back.
+            1 => {
+                quiesce::stop_started(&self.env, txn.started.as_ref(), &to_dir)?;
+                if undo_leaves_v3(txn.from.as_deref(), &txn.to) {
+                    self.settle_v3(txn)?;
+                }
+                Ok(())
+            }
             // UNDO_RESTORE
             2 => {
                 match &snap.pointer {
@@ -898,6 +959,33 @@ impl Setup {
             TxnState::Fence | TxnState::Quiesce | TxnState::Isolate | TxnState::Seal => {
                 self.undo(&mut txn, Outcome::Aborted, 1)
             }
+            // A 3.x START may be a conversion that runs for an hour: if the process this
+            // transaction started is still alive, take the wait over instead of killing it
+            // (07 §8, F18). Its own progress keeps counting; anything older does not.
+            TxnState::Start
+                if startup::is_v3(&txn.to)
+                    && self
+                        .started_host(&txn, &txn.to.clone())
+                        .is_some_and(|started| !started_us(&started)) =>
+            {
+                let to = txn.to.clone();
+                let started = self.started_host(&txn, &to).ok_or("START_TAKEOVER_LOST")?;
+                say!("START {to}: taking over the wait for host {}", started.pid);
+                match self.await_healthy(&txn, &to, &started, fault::wait_policy()) {
+                    Ok(()) => {
+                        self.enter(&mut txn, TxnState::Commit)?;
+                        let snap = snapshot::load(&self.env, &txn.id)?;
+                        self.commit(&mut txn, &snap);
+                        Ok(Outcome::Committed)
+                    }
+                    Err(error) => {
+                        say!("START {to} failed after takeover: {error}");
+                        txn.error = Some(code(&error));
+                        let target = failure_outcome(&txn);
+                        self.undo(&mut txn, target, 1)
+                    }
+                }
+            }
             TxnState::Switch | TxnState::Start => {
                 let target = failure_outcome(&txn);
                 self.undo(&mut txn, target, 1)
@@ -1005,5 +1093,40 @@ impl Setup {
         }
         fsx::sweep_aside(&self.env.install_root);
         fsx::sweep_aside(&self.env.install_root.join("resources"));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// W8b：撤销只在回到更早的版本线时结算 N；3.x 之间、首装都不写 `A=legacy`。
+    #[test]
+    fn only_an_undo_back_to_an_older_line_settles_n() {
+        assert!(undo_leaves_v3(Some("2.0.0"), "3.0.0"));
+        assert!(undo_leaves_v3(Some("legacy:1.4.0"), "3.0.0"));
+        assert!(!undo_leaves_v3(Some("3.0.0"), "3.0.1"));
+        assert!(!undo_leaves_v3(Some("9.0.0"), "9.0.1"));
+        assert!(!undo_leaves_v3(None, "3.0.0"));
+        assert!(!undo_leaves_v3(Some("2.0.0"), "2.0.1"));
+    }
+
+    /// W8b：只有真正拉起本进程的那个宿主（pid 与创建时间都对得上）算「卡在准入、等我们」的 START 宿主。
+    #[test]
+    fn only_the_process_that_started_us_is_waiting_on_us() {
+        let me = std::process::id();
+        let parent_pid = procs::snapshot()
+            .into_iter()
+            .find(|proc| proc.pid == me)
+            .unwrap()
+            .parent;
+        let parent = procs::find(parent_pid).unwrap().identity();
+        assert!(started_us(&parent));
+        let reused = atm_install_state::ProcessIdentity {
+            started_at_ms: parent.started_at_ms + 1,
+            ..parent.clone()
+        };
+        assert!(!started_us(&reused));
+        assert!(!started_us(&procs::find(me).unwrap().identity()));
     }
 }

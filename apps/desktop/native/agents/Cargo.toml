@@ -1,0 +1,27 @@
+[package]
+name = "atm-agents"
+version = "0.0.0"
+description = "ATM 3 Agent integration: MCP client configs, rule block, skills, profile switch, docs install and the repair job"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+atm-domain = { path = "../domain" }
+serde_json = { workspace = true }
+sha2 = "0.10"
+# Codex 的 config.toml 按 TOML 解析（与 Codex 自己用的同一个解析器）：装了什么、谁是 ATM 的、节点类型，以及
+# 改写之后的核对（peer W6 r3 P2-01–03）。
+toml = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Diagnostics_ToolHelp",
+  "Win32_System_ProcessStatus",
+  "Win32_System_Threading",
+] }
+

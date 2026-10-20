@@ -42,15 +42,12 @@ function renderSettings(
     projectFailures: overrides.ok === false ? [{ code: "BROKEN" }] : [],
     projectCount: 3,
     sqlite: { fts5: true, trigram: true, wal: true, sqliteVersion: "3.50.0" },
-    projectionSummary: { healthy: 3, deferred: 0, failed: 0 },
-    projectionFailures: [],
   });
   queryClient.setQueryData(
     ["settings"],
     [
       { key: "backup.policy", value: { enabled: true, dailyKeep: 7, weeklyKeep: 4 }, version: 1 },
       { key: "notification.mode", value: "ALL", version: 1 },
-      { key: "notification.enabled", value: true, version: 1 },
     ],
   );
   queryClient.setQueryData(["mcp-configs"], {
@@ -112,7 +109,6 @@ function missingSettingsContracts(source: string): string[] {
     "const [weeklyKeep, setWeeklyKeep] = useState(2)",
     "const [otherKeep, setOtherKeep] = useState(2)",
     '"notification.mode"',
-    '"notification.enabled"',
     "getAutoLaunch",
     "setAutoLaunch",
     "getMemoryProfile",
@@ -188,6 +184,8 @@ describe("Settings feature", () => {
     const source = settingsSource();
     expect(missingSettingsContracts(source)).toEqual([]);
     expect(source).not.toMatch(/<select(?:\s|>)/u);
+    // 3.0 只写 notification.mode（03 C-06）：服务拒绝 notification.enabled，多写一次会让整次保存失败。
+    expect(source).not.toContain("notification.enabled");
     expect(source).not.toMatch(/from\s+["']\.\.\/app\.js["']/u);
     expect(readFileSync(featurePath, "utf8").split(/\r?\n/u).length).toBeLessThan(600);
     expect(readFileSync(panelsPath, "utf8").split(/\r?\n/u).length).toBeLessThan(600);

@@ -11,11 +11,13 @@
  * 数据根固定在 output/window-smoke-data，报告写 output/window-smoke-report.json，
  * 截图写 output/playwright/。
  */
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { computeReleaseFingerprint } from "./release-fingerprint.js";
+import { sha256, treeDigest } from "./tree-digest.js";
 import type { Page } from "@playwright/test";
-import { rendererPost } from "./renderer-user-request.js";
+import { rendererPost, rendererRequest } from "./renderer-user-request.js";
 import {
   HTCAPTION,
   HTCLIENT,
@@ -26,6 +28,7 @@ import {
 import {
   CheckLog,
   connectRenderer,
+  delay,
   openProjectFromSidebar,
   outputRoot,
   prepareSandbox,
@@ -66,6 +69,24 @@ const loginItems = snapshotLoginItems();
 const probe = NativeWindowProbe.start();
 await mkdir(screenshotDir, { recursive: true });
 const sandbox = await prepareSandbox("window-smoke");
+
+/**
+ * 报告绑定的候选（W8 关口 peer r18 P2-02）：源码（gitHead、工作树是否干净、源码指纹，与发布链同一个
+ * computeReleaseFingerprint）和实际运行的 smoke 包（宿主 exe 与整个包目录的 SHA-256）。开跑前记下；
+ * 跑完再算一次包目录，对不上就不算通过。截图也记哈希。
+ */
+const startedAt = new Date();
+const source = await computeReleaseFingerprint(process.cwd());
+const packageRoot = dirname(executable);
+const candidate = {
+  gitHead: source.gitHead,
+  dirty: source.dirty,
+  dirtyStateHash: source.dirtyStateHash,
+  sourceHash: source.sourceHash,
+  lockfileHash: source.lockfileHash,
+  executableSha256: sha256(await readFile(executable)),
+  package: { root: packageRoot, ...(await treeDigest(packageRoot)) },
+};
 
 /** 宿主唯一的应用窗口；没有就是 null（后台运行或窗口已关）。 */
 const appWindow = (host: SmokeHost) => probe.appWindow(host.pid);
@@ -123,10 +144,104 @@ async function expectNativeRegion(
   );
 }
 
+/** WebView2 在拖动区最上面 SM_CYFRAME 那几像素自己答的缩放码（改窗口高度）。 */
+const HTTOP = 12;
+
+/**
+ * 顶沿整条都能用：侧栏上方的气口、顶栏上内边距、搜索框上方，从窗口最上面一像素起往下，
+ * 先是 WebView2 自己答的 HTTOP（缩放边，不超过 10 个逻辑像素），紧接着就是 HTCAPTION。
+ * 以前这一截是 HTCLIENT：既拖不动窗口也缩放不了，鼠标得往下挪一点才拖得动。
+ */
+async function expectTopEdge(page: Page, nativeWindow: NativeWindowState): Promise<void> {
+  const devicePixelRatio = await page.evaluate(() => globalThis.devicePixelRatio);
+  const current = await probe.state(nativeWindow.hwnd);
+  // 顶栏上内边距 18px：再往下就是搜索框、按钮本身了。
+  const rows = Math.floor(18 * devicePixelRatio);
+  for (const selector of [".atm-sidebar", ".atm-titlebar-drag", ".atm-search-button"]) {
+    const box = await page.locator(selector).first().boundingBox();
+    check(`${selector} 可见`, box !== null);
+    const { x } = cssPointToScreen(
+      current.client,
+      { x: box.x + box.width / 2, y: 0 },
+      devicePixelRatio,
+    );
+    const hits: number[] = [];
+    for (let row = 0; row < rows; row++)
+      hits.push((await probe.hitTest(nativeWindow.hwnd, { x, y: current.client.y + row })).hit);
+    const resize = hits.findIndex((hit) => hit !== HTTOP);
+    check(
+      `${selector} 上方从顶沿起是缩放边接拖动区，没有拖不动的一截`,
+      resize >= 0 &&
+        resize <= 10 * devicePixelRatio &&
+        hits.slice(resize).every((hit) => hit === HTCAPTION),
+      JSON.stringify(hits),
+    );
+  }
+}
+
+const channels = (hex: string) => [1, 3, 5].map((at) => Number.parseInt(hex.slice(at, at + 2), 16));
+const colorDistance = (a: string, b: string) =>
+  Math.max(...channels(a).map((value, index) => Math.abs(value - channels(b)[index]!)));
+
+/**
+ * Windows 10（宿主报 "client"）：窗口没有系统的缩放边，DWM 不再在左、右、下画边框线；
+ * 缩放改由贴边的把手接住按下，它们要命中到页面（HTCLIENT）。边框线只在屏幕上看得到
+ * （PrintWindow 自己补一条经典边），所以从屏幕上拍：暗色下窗口最外一圈看得见的像素要和里面
+ * 几像素是同一个颜色。
+ */
+async function expectClientFrame(page: Page, nativeWindow: NativeWindowState): Promise<void> {
+  for (const edge of [
+    "left",
+    "right",
+    "bottom",
+    "bottomLeft",
+    "bottomRight",
+    "topLeft",
+    "topRight",
+  ])
+    await expectNativeRegion(
+      page,
+      nativeWindow,
+      `.atm-window-edge[data-edge="${edge}"]`,
+      "no-drag",
+      HTCLIENT,
+    );
+  for (let attempt = 0; attempt < 2; attempt++) {
+    if ((await page.locator("html").getAttribute("data-theme")) === "dark") break;
+    await page.getByRole("button", { name: /切换至.+模式/u }).click();
+  }
+  check("暗色主题", (await page.locator("html").getAttribute("data-theme")) === "dark");
+  // 等主题切换的过渡走完再拍。
+  await delay(800);
+  for (const corner of ["bottom-left", "bottom-right"] as const) {
+    const shot = await probe.screenCorner(
+      nativeWindow.hwnd,
+      corner,
+      join(screenshotDir, `packaged-window-edge-${corner}-dark.png`),
+    );
+    for (const [name, ring, inset] of [
+      [
+        corner === "bottom-left" ? "左边" : "右边",
+        shot.left ?? shot.right ?? [],
+        shot.visible.side,
+      ],
+      ["下边", shot.bottom, shot.visible.edge],
+    ] as const) {
+      const outer = ring[inset];
+      const inner = ring[inset + 4];
+      check(
+        `暗色下${name}最外一圈与界面同色（没有 DWM 边框线）`,
+        outer !== undefined && inner !== undefined && colorDistance(outer, inner) <= 12,
+        JSON.stringify({ corner, inset, ring }),
+      );
+    }
+  }
+}
+
 async function runSmoke(host: SmokeHost): Promise<Record<string, unknown>> {
   let renderer: SmokeRenderer | null = null;
   try {
-    const runtime = await waitForRuntime(host);
+    await waitForRuntime(host);
     const backgroundWindows = await probe.windows(host.pid);
     check(
       "后台启动不建应用窗口",
@@ -221,27 +336,39 @@ async function runSmoke(host: SmokeHost): Promise<Record<string, unknown>> {
     await expectNativeRegion(page, shown, '[data-testid="window-minimize"]', "no-drag", HTCLIENT);
     await expectNativeRegion(page, shown, '[data-testid="window-maximize"]', "no-drag", HTCLIENT);
     await expectNativeRegion(page, shown, '[data-testid="window-close"]', "no-drag", HTCLIENT);
+    await expectTopEdge(page, shown);
+    const windowFrame = await page.evaluate(() => (window as any).ayanamiDesktop.getWindowFrame());
+    check(
+      "宿主报了窗口外框归谁画",
+      windowFrame === "client" || windowFrame === "native",
+      String(windowFrame),
+    );
+    if (windowFrame === "client") await expectClientFrame(page, shown);
 
     // 走侧栏导航，不改 hash 再 reload：宿主只放行入口文档本身的导航，带 hash 的 reload 会被拦下。
     await page.getByRole("button", { name: "设置", exact: true }).click();
     const criticalNotifications = page.getByRole("radio", { name: /仅严重事件/u });
     await criticalNotifications.click();
-    await page.getByRole("button", { name: "保存设置" }).click();
+    // 派单可用时「Claude 自动开工」面板也有一个「保存设置」，点维护区的那个。
+    await page
+      .locator(".atm-settings-maintenance")
+      .getByRole("button", { name: "保存设置" })
+      .click();
     await log.eventually(
       "设置保存提示出现",
       () => page.getByText("设置已保存", { exact: true }).isVisible(),
       Boolean,
     );
-    const settingsResponse = await fetch(`${runtime.endpoint}/api/v1/settings`, {
-      headers: { authorization: `Bearer ${runtime.token}` },
-    });
-    const storedSettings = (await settingsResponse.json()) as Array<{
-      key: string;
-      value: unknown;
-    }>;
-    const storedNotificationMode = settingsResponse.ok
-      ? storedSettings.find((setting) => setting.key === "notification.mode")?.value
-      : undefined;
+    // 设置是用户专属路由：Agent 凭证读它得 404（凭证边界，不是缺路由）。以用户身份经界面的桥读回。
+    const settingsResponse = await rendererRequest<Array<{ key: string; value: unknown }> | null>(
+      page,
+      "GET",
+      "/api/v1/settings",
+    );
+    const storedNotificationMode =
+      settingsResponse.status === 200
+        ? settingsResponse.body?.find((setting) => setting.key === "notification.mode")?.value
+        : undefined;
     check(
       "通知模式经界面保存后服务端读回 CRITICAL",
       storedNotificationMode === "CRITICAL",
@@ -443,7 +570,7 @@ async function runSmoke(host: SmokeHost): Promise<Record<string, unknown>> {
       !exited(host.child),
       `pid ${host.pid} exit ${String(host.child.exitCode ?? host.child.signalCode)}`,
     );
-    check("关到托盘后服务仍健康", (await readRuntime(host.dataDir)) !== null);
+    check("关到托盘后服务仍健康", (await readRuntime(host.v3Dir)) !== null);
     await requestShow(host);
     const reopened = await visibleWindow(host, "关到托盘后重新打开");
     check("重新打开的是新窗口", reopened.hwnd !== shown.hwnd, String(reopened.hwnd));
@@ -602,7 +729,7 @@ async function runSmoke(host: SmokeHost): Promise<Record<string, unknown>> {
   }
 }
 
-const host = startSmokeHost({ executable, dataDir: sandbox.dataDir, env: sandbox.env });
+const host = startSmokeHost({ executable, v3Dir: sandbox.v3Dir, env: sandbox.env });
 let error: unknown;
 let details: Record<string, unknown> = {};
 try {
@@ -612,7 +739,7 @@ try {
     } finally {
       const clean = await stopSmokeHost(host);
       log.record("--smoke-quit 干净退出", clean, host.stderr.join(""));
-      log.record("退出后运行时文件已清理", !existsSync(runtimeFile(sandbox.dataDir)));
+      log.record("退出后运行时文件已清理", !existsSync(runtimeFile(sandbox.v3Dir)));
     }
   });
 } catch (caught) {
@@ -620,12 +747,27 @@ try {
 } finally {
   probe.close();
 }
+const packageAfter = await treeDigest(packageRoot);
+log.record(
+  "跑完之后 smoke 包的内容与开跑前一致",
+  packageAfter.sha256 === candidate.package.sha256,
+  JSON.stringify(packageAfter),
+);
+const screenshots: Record<string, string> = {};
+for (const name of (await readdir(screenshotDir)).sort()) {
+  const path = join(screenshotDir, name);
+  if (name.endsWith(".png") && (await stat(path)).mtimeMs >= startedAt.getTime())
+    screenshots[name] = sha256(await readFile(path));
+}
 const passed = error === undefined && log.failed.length === 0;
 const report = {
   passed,
   executable,
+  candidate,
   dataDir: sandbox.dataDir,
+  startedAt: startedAt.toISOString(),
   completedAt: new Date().toISOString(),
+  screenshots,
   ...details,
   checks: log.checks,
   ...(error === undefined

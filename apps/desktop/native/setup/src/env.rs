@@ -26,12 +26,17 @@ pub const SHIM: &str = "atm-mcp.exe";
 pub struct Env {
     pub install_root: PathBuf,
     pub data_dir: PathBuf,
+    /// ATM 3 的新根 `N`（07 §1）：启动进度、转换清单、权威记录都在这里（07 §8）。
+    pub v3_root: PathBuf,
     /// `...\Start Menu\Programs\ayanami`
     pub start_menu_dir: PathBuf,
     pub desktop_dir: PathBuf,
     /// HKCU-relative.
     pub uninstall_key: String,
     pub run_key: String,
+    /// The keepalive task's scheduler: `None` is the Windows Task Scheduler; a drill and the
+    /// unit tests give a folder, so they never register a real task.
+    pub scheduler_dir: Option<PathBuf>,
     pub sandbox: bool,
 }
 
@@ -67,6 +72,19 @@ pub fn check_roots_apart(install_root: &Path, data_dir: &Path) -> Result<(), Str
     Ok(())
 }
 
+/// 演练沙箱没有显式给 N 时，把沙箱里的 `v3-data` 写进本进程环境：setup 拉起的宿主、探针与
+/// 转换都继承同一个根，不会退回真实的 `%LOCALAPPDATA%\AyanamiTaskManager3`。
+#[cfg(feature = "drill")]
+pub fn pin_sandbox_v3_root() {
+    let Some(sandbox) = env_path("ATM_SETUP_SANDBOX") else {
+        return;
+    };
+    if env_path("ATM3_DATA_DIR").is_none() {
+        // SAFETY: main 的第一件事，此时还没有别的线程读环境。
+        unsafe { std::env::set_var("ATM3_DATA_DIR", sandbox.join("v3-data")) };
+    }
+}
+
 impl Env {
     pub fn detect() -> Result<Env, String> {
         let env = Env::locate()?;
@@ -87,6 +105,7 @@ impl Env {
         Ok(Env {
             install_root: local.join(INSTALL_DIR_NAME),
             data_dir,
+            v3_root: atm_install_state::startup::v3_root()?,
             start_menu_dir: appdata
                 .join("Microsoft")
                 .join("Windows")
@@ -98,6 +117,7 @@ impl Env {
                 r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{UNINSTALL_NAME}"
             ),
             run_key: r"Software\Microsoft\Windows\CurrentVersion\Run".into(),
+            scheduler_dir: None,
             sandbox: false,
         })
     }
@@ -115,10 +135,16 @@ impl Env {
         Env {
             install_root: sandbox.join("install"),
             data_dir,
+            // 演练绝不碰真实的新根：没有显式指定就放在沙箱里。
+            v3_root: std::env::var_os("ATM3_DATA_DIR")
+                .filter(|value| !value.is_empty())
+                .map(PathBuf::from)
+                .unwrap_or_else(|| sandbox.join("v3-data")),
             start_menu_dir: sandbox.join("start-menu").join(START_MENU_FOLDER),
             desktop_dir: sandbox.join("desktop"),
             uninstall_key: format!(r"{registry}\Uninstall\{UNINSTALL_NAME}"),
             run_key: format!(r"{registry}\Run"),
+            scheduler_dir: Some(sandbox.join("scheduler")),
             sandbox: true,
         }
     }
@@ -150,6 +176,19 @@ impl Env {
     }
     pub fn runtime_dir(&self) -> PathBuf {
         self.data_dir.join("runtime")
+    }
+    /// `N\runtime`: where a 3.x service keeps its lease and daemon.json (the bridge reads the
+    /// same descriptor there).
+    pub fn v3_runtime_dir(&self) -> PathBuf {
+        self.v3_root.join("runtime")
+    }
+    /// The service lease wherever a new-style service keeps it: the 2.x data root, else a 3.x
+    /// single-process lease under `N\runtime`.
+    pub fn service_lease(&self) -> Option<(u32, crate::runtime::Layout)> {
+        crate::runtime::lease(&self.runtime_dir()).or_else(|| {
+            crate::runtime::lease(&self.v3_runtime_dir())
+                .filter(|(_, layout)| *layout == crate::runtime::Layout::Single)
+        })
     }
     pub fn start_menu_shortcut(&self) -> PathBuf {
         self.start_menu_dir.join(SHORTCUT_NAME)

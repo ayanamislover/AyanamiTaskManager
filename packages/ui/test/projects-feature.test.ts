@@ -93,7 +93,9 @@ describe("Projects feature", () => {
       }),
     );
 
-    expect(projectsMarkup).toContain("每个正式项目拥有独立 SQLite 文件和可移动的路径别名。");
+    expect(projectsMarkup).toContain(
+      "正式项目各有自己的任务、记录和可移动的路径别名，全部存在同一个本地数据库里。",
+    );
     expect(projectsMarkup).toContain("AyanamiTaskManager");
     expect(projectsMarkup).toContain("旧项目");
     expect(projectsMarkup).toContain("恢复项目");

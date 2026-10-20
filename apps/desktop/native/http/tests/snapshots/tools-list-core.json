@@ -1,0 +1,923 @@
+[
+  {
+    "name": "atm_begin",
+    "description": "开始或接续会话并返回 brief。开工只调这一次，直接用返回的 brief；上下文压缩后改调无参的 atm_brief。在仓库里首次使用加 allow_project_create:true。resume 默认 auto：自动接上本 Agent 已退出的上一会话；要新会话传 resume:false。例：{agent_id:\"claude-code\", cwd:\"D:/repo\"} 必填：agent_id。 参数：agent_id≤128；project≤20；allow_project_create 默认 false；mode=auto|quick|project，默认 auto；role=PRIMARY|SUBAGENT|REVIEWER|OBSERVER，默认 PRIMARY；resume=true|false|auto，默认 auto；session≤128；predecessor_session_id≤128；parent_session_id≤128；title≤400；brief=none|minimal|full，默认 full；max_chars=400–5000，默认 1200；op_id≤128。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "agent_id": {
+          "type": "string"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "allow_project_create": {
+          "type": "boolean"
+        },
+        "mode": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "quick",
+            "project"
+          ]
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "PRIMARY",
+            "SUBAGENT",
+            "REVIEWER",
+            "OBSERVER"
+          ]
+        },
+        "resume": {
+          "enum": [
+            true,
+            false,
+            "auto"
+          ]
+        },
+        "session": {
+          "type": "string"
+        },
+        "predecessor_session_id": {
+          "type": "string"
+        },
+        "parent_session_id": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "signals": {
+          "type": "object",
+          "properties": {
+            "expected_minutes": {
+              "type": "integer"
+            },
+            "subtask_count": {
+              "type": "integer"
+            },
+            "multi_session": {
+              "type": "boolean"
+            },
+            "multi_agent": {
+              "type": "boolean"
+            },
+            "has_dependencies": {
+              "type": "boolean"
+            },
+            "needs_evidence": {
+              "type": "boolean"
+            },
+            "has_target_date": {
+              "type": "boolean"
+            }
+          }
+        },
+        "brief": {
+          "type": "string",
+          "enum": [
+            "none",
+            "minimal",
+            "full"
+          ]
+        },
+        "max_chars": {
+          "type": "integer"
+        },
+        "op_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "agent_id"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    },
+    "_meta": {
+      "surface_version": "v6",
+      "schema_hash": "f1759c507b0316a3"
+    }
+  },
+  {
+    "name": "atm_brief",
+    "description": "重新取回 working set，参数全部可选（省略时按本连接的会话）。只在上下文压缩或长时间离开后调用。带 since_seq 时附带增量（取代 atm_delta）。 参数：project≤20；session≤128；task_key≤40；include 最多 11 项；include[]=objective|counts|own|next|records|current|handoff|progress|artifacts|task|delta；cursor≤4000；max_chars=300–5000，默认 1200。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "project": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "task_key": {
+          "type": "string"
+        },
+        "since_seq": {
+          "type": "integer"
+        },
+        "include": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "objective",
+              "counts",
+              "own",
+              "next",
+              "records",
+              "current",
+              "handoff",
+              "progress",
+              "artifacts",
+              "task",
+              "delta"
+            ]
+          }
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "max_chars": {
+          "type": "integer"
+        }
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    },
+    "_meta": {
+      "surface_version": "v6",
+      "schema_hash": "5a022233884e0633"
+    }
+  },
+  {
+    "name": "atm_task_list",
+    "description": "分页列任务。status 写 open、closed、all 或具体状态（BACKLOG|READY|CLAIMED|IN_PROGRESS|BLOCKED|WAITING_AGENT|WAITING_USER|VERIFYING|DONE|CANCELLED）；mine:true 只列本会话持有的；view=reconcile 时只看 include_active、limit、cursor、field_mask。 参数：project≤20；session≤128；ready_only 默认 false；mine 默认 false；status≤100；owner≤128；parent_key≤40；milestone_id≤128；query≤500；view=core|context|full|reconcile，默认 core；include_active 默认 false；field_mask 最多 20 项；field_mask[]≤64；limit=1–100，默认 10；cursor≤4000；max_chars=500–50000，默认 12000。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "project": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "ready_only": {
+          "type": "boolean"
+        },
+        "mine": {
+          "type": "boolean"
+        },
+        "status": {
+          "type": "string"
+        },
+        "owner": {
+          "type": "string"
+        },
+        "parent_key": {
+          "type": "string"
+        },
+        "milestone_id": {
+          "type": "string"
+        },
+        "query": {
+          "type": "string"
+        },
+        "view": {
+          "type": "string",
+          "enum": [
+            "core",
+            "context",
+            "full",
+            "reconcile"
+          ]
+        },
+        "include_active": {
+          "type": "boolean"
+        },
+        "field_mask": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "limit": {
+          "type": "integer"
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "max_chars": {
+          "type": "integer"
+        }
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    },
+    "_meta": {
+      "surface_version": "v6",
+      "schema_hash": "bec8ff335f7c040b"
+    }
+  },
+  {
+    "name": "atm_task_get",
+    "description": "读单个任务。field_mask 只在 view 已有的字段内过滤，越界的回显在 ignored_fields；last_progress=N 附带最近 N 条进度。 必填：task_key。 参数：task_key≤40；project≤20；view=core|context|full，默认 core；field_mask 最多 30 项；field_mask[]≤64；last_progress=1–10；cursor≤2000；max_chars=300–50000，默认 12000。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_key": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "view": {
+          "type": "string",
+          "enum": [
+            "core",
+            "context",
+            "full"
+          ]
+        },
+        "field_mask": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "last_progress": {
+          "type": "integer"
+        },
+        "cursor": {
+          "type": "string"
+        },
+        "max_chars": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "task_key"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": true,
+      "destructiveHint": false
+    },
+    "_meta": {
+      "surface_version": "v6",
+      "schema_hash": "82c8e634a4e084a9"
+    }
+  },
+  {
+    "name": "atm_task_create",
+    "description": "批量建任务，默认 READY（还没整理好的显式写 BACKLOG）。depends_on 与 parent 可以写已有任务 key，也可以写本批序号（\"1\" 起）或 client_ref。回执带 refs（client_ref→key）与检查项 id。例：{items:[{title:\"A\"},{title:\"B\",depends_on:[\"1\"]}]} 必填：items。 参数：items 最多 50 项；items[] 每项必填 title；items[].title≤400；items[].client_ref≤100；items[].depends_on 最多 50 项；items[].depends_on[]≤100；items[].parent≤100；items[].status=BACKLOG|READY|CLAIMED|IN_PROGRESS|BLOCKED|WAITING_AGENT|WAITING_USER|VERIFYING|DONE|CANCELLED，默认 READY；items[].type=EPIC|TASK|SUBTASK|BUG|RESEARCH|REVIEW，默认 TASK；items[].priority=LOW|NORMAL|HIGH|CRITICAL，默认 NORMAL；items[].description≤50000；items[].acceptance 最多 100 项；items[].acceptance[]≤1000；items[].checklist 最多 100 项；items[].checklist[] 每项必填 title；items[].checklist[].title≤400；items[].checklist[].evidence_required 默认 false；items[].checklist[].weight=0.001–1000；items[].objective_id≤128；items[].milestone_id≤128；items[].discovered_from≤100；items[].weight=0.001–1000；items[].target_date≤10；items[].verification_required 默认 false；items[].assignee_agent_id≤128；project≤20；session≤128；op_id≤128。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "title": {
+                "type": "string"
+              },
+              "client_ref": {
+                "type": "string"
+              },
+              "depends_on": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "parent": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "BACKLOG",
+                  "READY",
+                  "CLAIMED",
+                  "IN_PROGRESS",
+                  "BLOCKED",
+                  "WAITING_AGENT",
+                  "WAITING_USER",
+                  "VERIFYING",
+                  "DONE",
+                  "CANCELLED"
+                ]
+              },
+              "type": {
+                "type": "string",
+                "enum": [
+                  "EPIC",
+                  "TASK",
+                  "SUBTASK",
+                  "BUG",
+                  "RESEARCH",
+                  "REVIEW"
+                ]
+              },
+              "priority": {
+                "type": "string",
+                "enum": [
+                  "LOW",
+                  "NORMAL",
+                  "HIGH",
+                  "CRITICAL"
+                ]
+              },
+              "description": {
+                "type": "string"
+              },
+              "acceptance": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "checklist": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": {
+                    "title": {
+                      "type": "string"
+                    },
+                    "evidence_required": {
+                      "type": "boolean"
+                    },
+                    "weight": {
+                      "type": "number"
+                    }
+                  },
+                  "required": [
+                    "title"
+                  ]
+                }
+              },
+              "objective_id": {
+                "type": "string"
+              },
+              "milestone_id": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "discovered_from": {
+                "type": "string"
+              },
+              "weight": {
+                "type": "number"
+              },
+              "target_date": {
+                "type": "string"
+              },
+              "verification_required": {
+                "type": "boolean"
+              },
+              "assignee_agent_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "title"
+            ]
+          }
+        },
+        "project": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "op_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "items"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    },
+    "_meta": {
+      "surface_version": "v6",
+      "schema_hash": "2501824e6ed6fe88"
+    }
+  },
+  {
+    "name": "atm_task_patch",
+    "description": "改任务状态。单条直接写 {task_key, operation, …}，多条放 items。complete、verify、block、wait_user、wait_agent 会自动先 start；本会话持有的任务不需要 expected_version，edit、cancel、reopen 和别人的任务需要。complete 可以同时带 note、evidence、checklist（item 写检查项 id、序号或标题）。block 填 blocked_reason，wait_* 填 waiting_for。例：{task_key:\"ATM-T-1\", operation:\"complete\", evidence:[\"cargo test 全绿\"]} 参数：task_key≤40；operation=start|complete|verify|verify_and_complete|block|wait_user|wait_agent|ready|release|claim|cancel|reopen|edit|checklist|review_request|review_submit；takeover_stale 默认 false；note≤500；evidence 最多 100 项；evidence[] 是文本≤2000或对象；evidence[] 每项必填 kind、value；evidence[].kind=git_sha|atm_record|atm_task|test_result|url|file；evidence[].value≤2000；evidence[].note≤500；checklist 最多 100 项；checklist[] 每项必填 status；checklist[].item≤400；checklist[].status=TODO|DOING|DONE|SKIPPED；checklist[].evidence 最多 100 项；checklist[].evidence 每项同顶层 evidence；blocked_reason≤2000；waiting_for≤1000；cancel_reason≤2000；duplicate_of≤100；superseded_by≤100；title≤400；description≤50000；acceptance 最多 100 项；acceptance[]≤1000；target_date≤10；parent_key≤100；assignee_agent_id≤128；depends_on 最多 50 项；depends_on[]≤100；discovered_from≤100；expected_fields.title≤400；expected_fields.description≤50000；expected_fields.acceptance 最多 100 项；expected_fields.acceptance[]≤1000；expected_fields.target_date≤10；expected_fields.parent_key≤100；request_key≤128；verdict=APPROVED|CHANGES_REQUESTED；parent_checklist_id≤128；items 最多 50 项；items 每项字段与顶层相同，task_key、operation 必填；project≤20；session≤128；op_id≤128。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "task_key": {
+          "type": "string"
+        },
+        "operation": {
+          "type": "string",
+          "enum": [
+            "start",
+            "complete",
+            "verify",
+            "verify_and_complete",
+            "block",
+            "wait_user",
+            "wait_agent",
+            "ready",
+            "release",
+            "claim",
+            "cancel",
+            "reopen",
+            "edit",
+            "checklist",
+            "review_request",
+            "review_submit"
+          ]
+        },
+        "expected_version": {
+          "type": "integer"
+        },
+        "takeover_stale": {
+          "type": "boolean"
+        },
+        "note": {
+          "type": "string"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "git_sha",
+                      "atm_record",
+                      "atm_task",
+                      "test_result",
+                      "url",
+                      "file"
+                    ]
+                  },
+                  "value": {
+                    "type": "string"
+                  },
+                  "note": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "value"
+                ]
+              }
+            ]
+          }
+        },
+        "checklist": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "item": {
+                "type": "string"
+              },
+              "status": {
+                "type": "string",
+                "enum": [
+                  "TODO",
+                  "DOING",
+                  "DONE",
+                  "SKIPPED"
+                ]
+              },
+              "evidence": {
+                "type": "array",
+                "items": {
+                  "type": "object"
+                }
+              },
+              "expected_checklist_version": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          }
+        },
+        "blocked_reason": {
+          "type": "string"
+        },
+        "waiting_for": {
+          "type": "string"
+        },
+        "cancel_reason": {
+          "type": "string"
+        },
+        "duplicate_of": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "superseded_by": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "description": {
+          "type": "string"
+        },
+        "acceptance": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "target_date": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "parent_key": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "assignee_agent_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "discovered_from": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "expected_fields": {
+          "type": "object",
+          "properties": {
+            "title": {
+              "type": "string"
+            },
+            "description": {
+              "type": "string"
+            },
+            "acceptance": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            "target_date": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "parent_key": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        },
+        "request_key": {
+          "type": "string"
+        },
+        "verdict": {
+          "type": "string",
+          "enum": [
+            "APPROVED",
+            "CHANGES_REQUESTED"
+          ]
+        },
+        "candidate_hashes": {},
+        "parent_checklist_id": {
+          "type": "string"
+        },
+        "expected_parent_checklist_version": {
+          "type": "integer"
+        },
+        "items": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          }
+        },
+        "project": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "op_id": {
+          "type": "string"
+        }
+      }
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": true
+    },
+    "_meta": {
+      "surface_version": "v6",
+      "schema_hash": "a5d9b201ad79412d"
+    }
+  },
+  {
+    "name": "atm_progress_add",
+    "description": "写进度。带 task_key 就是任务进度，否则是项目进度；percent 只用于任务，health 只用于项目。任务还没开工时会自动先 start。要阻塞任务请用 atm_task_patch 的 block。 必填：summary。 参数：summary≤500；task_key≤40；scope=task|project；percent=0–100；evidence 最多 20 项；evidence[] 是文本≤2000或对象；evidence[] 每项必填 kind、value；evidence[].kind=git_sha|atm_record|atm_task|test_result|url|file；evidence[].value≤2000；evidence[].note≤500；next 最多 20 项；next[]≤500；completed 最多 20 项；completed[] 是文本≤500或对象；completed[] 每项必填 text；completed[].text≤500；completed[].task_key≤40；health=ON_TRACK|AT_RISK|OFF_TRACK|UNKNOWN；blocker≤1000；project≤20；session≤128；op_id≤128。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "summary": {
+          "type": "string"
+        },
+        "task_key": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string",
+          "enum": [
+            "task",
+            "project"
+          ]
+        },
+        "percent": {
+          "type": "number"
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "git_sha",
+                      "atm_record",
+                      "atm_task",
+                      "test_result",
+                      "url",
+                      "file"
+                    ]
+                  },
+                  "value": {
+                    "type": "string"
+                  },
+                  "note": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "value"
+                ]
+              }
+            ]
+          }
+        },
+        "next": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "completed": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "properties": {
+                  "text": {
+                    "type": "string"
+                  },
+                  "task_key": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "text"
+                ]
+              }
+            ]
+          }
+        },
+        "health": {
+          "type": "string",
+          "enum": [
+            "ON_TRACK",
+            "AT_RISK",
+            "OFF_TRACK",
+            "UNKNOWN"
+          ]
+        },
+        "blocker": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "op_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "summary"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    },
+    "_meta": {
+      "surface_version": "v6",
+      "schema_hash": "ac2befed3341bdd8"
+    }
+  },
+  {
+    "name": "atm_record",
+    "description": "写长期记录（决策、约束、事实、风险、参考、教训）。summary 建议 300 字以内，超出部分自动移到 detail。kind=ATM_FEEDBACK 是给 ATM 本身的使用反馈（取代 atm_feedback）。 必填：kind、title、summary。 参数：kind=DECISION|CONSTRAINT|FACT|RISK|REFERENCE|LESSON|ATM_FEEDBACK；title≤400；detail≤100000；task_key≤40；importance=LOW|NORMAL|HIGH|CRITICAL，默认 NORMAL；supersedes≤128；topic≤200；subject_key≤200；scope≤100；project≤20；session≤128；op_id≤128。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": [
+            "DECISION",
+            "CONSTRAINT",
+            "FACT",
+            "RISK",
+            "REFERENCE",
+            "LESSON",
+            "ATM_FEEDBACK"
+          ]
+        },
+        "title": {
+          "type": "string"
+        },
+        "summary": {
+          "type": "string"
+        },
+        "detail": {
+          "type": "string"
+        },
+        "task_key": {
+          "type": "string"
+        },
+        "importance": {
+          "type": "string",
+          "enum": [
+            "LOW",
+            "NORMAL",
+            "HIGH",
+            "CRITICAL"
+          ]
+        },
+        "supersedes": {
+          "type": "string"
+        },
+        "topic": {
+          "type": "string"
+        },
+        "subject_key": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "op_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "title",
+        "summary"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    },
+    "_meta": {
+      "surface_version": "v6",
+      "schema_hash": "1ad851873902768d"
+    }
+  },
+  {
+    "name": "atm_end",
+    "description": "结束会话并交接。outcome 省略时：还持有未完成的任务取 paused，否则 completed。 必填：summary。 参数：summary≤500；outcome=completed|paused|blocked|cancelled|error|retired；next 最多 20 项；next[]≤500；release_claims 默认 true；retirement_reason≤500；project≤20；session≤128；op_id≤128。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "summary": {
+          "type": "string"
+        },
+        "outcome": {
+          "type": "string",
+          "enum": [
+            "completed",
+            "paused",
+            "blocked",
+            "cancelled",
+            "error",
+            "retired"
+          ]
+        },
+        "next": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "release_claims": {
+          "type": "boolean"
+        },
+        "retirement_reason": {
+          "type": "string"
+        },
+        "project": {
+          "type": "string"
+        },
+        "session": {
+          "type": "string"
+        },
+        "op_id": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "summary"
+      ]
+    },
+    "annotations": {
+      "readOnlyHint": false,
+      "destructiveHint": false
+    },
+    "_meta": {
+      "surface_version": "v6",
+      "schema_hash": "cc6d57ee8dda65bc"
+    }
+  }
+]

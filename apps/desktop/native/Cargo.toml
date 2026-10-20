@@ -2,7 +2,7 @@
 # mcp-shim 保持独立 crate（它的构建与 lock 已被发布链钉住），不进这个工作区。
 [workspace]
 resolver = "3"
-members = ["install-state", "build-support", "host", "launcher", "setup"]
+members = ["install-state", "build-support", "host", "launcher", "setup", "store", "domain", "service", "http", "jobs", "metrics", "runtime", "ui-bridge", "e2e-adapter", "cli", "agents", "sync-protocol", "sync", "dispatch", "damaged-state"]
 exclude = ["mcp-shim"]
 
 [workspace.package]
@@ -14,7 +14,7 @@ publish = false
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
 windows-sys = { version = "0.61" }
 
 [profile.release]

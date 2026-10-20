@@ -1,0 +1,27 @@
+[package]
+name = "atm-ui-bridge"
+version = "0.0.0"
+description = "ATM 3 ui-bridge: the in-process UI API (route table, dispatch, 2.0 shapes) and the User principal"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[features]
+# 测试专用：e2e 适配器构造 `UiSurface::E2eTest`（09 §2）。正式构建永远不带。
+e2e = ["atm-domain/e2e"]
+
+[dependencies]
+# W7e：设置页的手机同步与派单（#88–96）。
+atm-dispatch = { path = "../dispatch" }
+atm-domain = { path = "../domain" }
+atm-http = { path = "../http" }
+atm-service = { path = "../service" }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+atm-sync = { path = "../sync" }
+atm-store = { path = "../store" }
+rusqlite = { version = "0.39", features = ["bundled"] }
+sha2 = "0.10"

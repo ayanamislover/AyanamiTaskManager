@@ -223,9 +223,9 @@ describe("预算探针（真编译、真跑）", () => {
     expect(() => requireExitConfirmed("第 1 轮", { confirmed: true })).not.toThrow();
     const budget = readFileSync("scripts/budget-measure.ts", "utf8");
     const main = budget.slice(budget.indexOf("await withLoginItemsRestored(async () => {"));
-    // 四处收尾（内存、前台、后台、smoke）各确认一次，且都在保存证据之后。
+    // 六处收尾（首次转换、内存、前台、后台、smoke、导出场景）各确认一次，且都在保存证据之后。
     const confirms = [...main.matchAll(/requireExitConfirmed\(/gu)].map((match) => match.index!);
-    expect(confirms).toHaveLength(4);
+    expect(confirms).toHaveLength(6);
     for (const at of confirms) {
       expect(main.slice(0, at).trimEnd().endsWith("save();")).toBe(true);
     }

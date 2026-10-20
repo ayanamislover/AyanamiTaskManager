@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process";
+import { type RegistryValue, registryDelete, registrySet, registryValues } from "./windows-text.js";
 
 /**
  * The "start at login" switch writes the AppUserModelId value under HKCU Run, and that
@@ -11,13 +11,14 @@ import { execFileSync } from "node:child_process";
  * and this run deleted that very name (`deleted`, recorded at the step that deletes it).
  * A value the user changed or removed in the meantime — the real app's own settings,
  * another tool — is left alone. Entries that do not name this application are never
- * touched. The value type is kept on restore. Value names compare case-insensitively, as the
+ * touched. The restore writes the value type and bytes back as they were (W8 gate peer r18 P2-01:
+ * the text form of a REG_MULTI_SZ is not one-to-one). Value names compare case-insensitively, as the
  * registry does: "COM.SQUIRREL..." and "com.squirrel..." are the same value.
  */
-export type RunEntry = { type: string; data: string };
+export type RunEntry = RegistryValue;
 export type RunSnapshot = Record<string, RunEntry>;
 export type RunRestoreStep =
-  | { action: "set"; name: string; type: string; data: string }
+  | { action: "set"; name: string; value: RunEntry }
   | { action: "delete"; name: string };
 export type RunOwnership = {
   /** Executables this run launched; a value naming one of them was written by this run. */
@@ -54,9 +55,9 @@ export function loginItemRestorePlan(
   for (const [name, entry] of Object.entries(before)) {
     if (!mentionsApplication(name, entry.data)) continue;
     const now = findRunEntry(after, name);
-    if (now?.data === entry.data && now.type === entry.type) continue;
+    if (now?.code === entry.code && now.raw === entry.raw) continue;
     if (now ? ours(now.data) : owned.deleted.some((deleted) => sameName(deleted, name)))
-      steps.push({ action: "set", name, type: entry.type, data: entry.data });
+      steps.push({ action: "set", name, value: entry });
   }
   for (const [name, entry] of Object.entries(after)) {
     if (findRunEntry(before, name) || !mentionsApplication(name, entry.data)) continue;
@@ -70,25 +71,15 @@ export const RUN_VALUE = "com.squirrel.AyanamiTaskManagerDesktop.AyanamiTaskMana
 
 const RUN_KEY = "HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run";
 
-export function parseRunQuery(output: string): RunSnapshot {
-  const entries: RunSnapshot = {};
-  for (const line of output.split(/\r?\n/u)) {
-    // "    <name>    REG_SZ    <data>" — data itself may contain runs of spaces.
-    const match = /^ {4}(.+?) {4}(REG_[A-Z_]+) {4}(.*)$/u.exec(line);
-    if (match) entries[match[1]!] = { type: match[2]!, data: match[3]! };
-  }
-  return entries;
-}
-
 /**
- * The Run key as it is now. A failed query throws: an empty snapshot would make the
- * restore believe every entry was added by this run, or that none existed before.
+ * The Run key as it is now, read through advapi32 (see windows-text.ts: reg.exe prints in the system
+ * code page, so a value naming a path outside it would not compare). A failed read throws: an empty
+ * snapshot would make the restore believe every entry was added by this run, or that none existed
+ * before. A missing key has no entries.
  */
 export function readRunSnapshot(): RunSnapshot {
   if (process.platform !== "win32") return {};
-  return parseRunQuery(
-    execFileSync("reg.exe", ["query", RUN_KEY], { encoding: "utf8", windowsHide: true }),
-  );
+  return registryValues(RUN_KEY) ?? {};
 }
 
 /** Values only, for assertions. */
@@ -98,14 +89,10 @@ export function readRunEntries(): Record<string, string> {
   );
 }
 
+/** Writes the plan back through windows-text.ts (advapi32): type code and bytes as snapshotted. */
 export function applyRunRestore(steps: readonly RunRestoreStep[]): void {
   for (const step of steps) {
-    if (step.action === "set")
-      execFileSync(
-        "reg.exe",
-        ["add", RUN_KEY, "/v", step.name, "/t", step.type, "/d", step.data, "/f"],
-        { windowsHide: true },
-      );
-    else execFileSync("reg.exe", ["delete", RUN_KEY, "/v", step.name, "/f"], { windowsHide: true });
+    if (step.action === "set") registrySet(RUN_KEY, step.name, step.value);
+    else registryDelete(RUN_KEY, step.name);
   }
 }

@@ -1,7 +1,7 @@
 [package]
 name = "atm-host"
 version = "0.0.0"
-description = "AyanamiTaskManager desktop host (WebView2 window, tray, core supervisor)"
+description = "AyanamiTaskManager desktop host (WebView2 window, tray, the in-process ATM 3 service)"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
@@ -17,11 +17,30 @@ path = "src/main.rs"
 smoke = ["atm-install-state/smoke"]
 
 [dependencies]
+# 只为编译期的发布守卫（E2E_SURFACE）：主体由 ui-bridge 构造，宿主自己不构造。
+atm-domain = { path = "../domain" }
+# W6d：Agent 接入（MCP 配置、规则块、Skills、memory profile、Agent 文档、修复作业）。
+atm-agents = { path = "../agents" }
+# 两个启动作业的 System 主体只在 atm-jobs 里构造。
+atm-jobs = { path = "../jobs" }
+atm-service = { path = "../service" }
 atm-install-state = { path = "../install-state" }
+# W5a：服务在宿主进程里（不再拉起 Node core）。
+atm-runtime = { path = "../runtime" }
+# 手机同步的连接器在宿主进程里起（W7e）。
+atm-sync = { path = "../sync" }
+# 安装探测在进程内只读检查数据（W8a：不再有 Node core 可问）。
+atm-store = { path = "../store" }
+# W5e：WebView 的界面请求在进程内分发。
+atm-ui-bridge = { path = "../ui-bridge" }
 serde.workspace = true
+# W5g lifecycle：错误消息只留指纹、runId 散列。
+sha2 = "0.10"
 serde_json.workspace = true
 tao = "0.35"
 wry = "0.55"
+# 与 tao 同一份：只用来认 Windows 10 / 11（frame.rs）。
+windows-version = "0.1"
 tray-icon = "0.24"
 # 与 wry 0.55 同版本：直接挂 WebView2 的 frame 事件（webview_frames.rs）。
 webview2-com = "0.38"
@@ -29,6 +48,7 @@ webview2-com = "0.38"
 windows = { version = "0.61", features = ["Data_Xml_Dom", "UI_Notifications", "Win32_System_Com", "Win32_UI_Shell"] }
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
+  "Win32_Graphics_Dwm",
   "Win32_Security",
   "Win32_Security_Authorization",
   "Win32_Security_Cryptography",
@@ -39,13 +59,19 @@ windows-sys = { workspace = true, features = [
   "Win32_System_DataExchange",
   "Win32_System_Memory",
   "Win32_System_Pipes",
+  "Win32_System_ProcessStatus",
   "Win32_System_Registry",
   "Win32_System_Threading",
   "Win32_System_IO",
   "Win32_System_LibraryLoader",
+  "Win32_UI_Controls",
   "Win32_UI_Shell",
   "Win32_UI_WindowsAndMessaging",
 ] }
 
 [build-dependencies]
 atm-build-support = { path = "../build-support" }
+
+[dev-dependencies]
+# 探测的真实进程用例（tests/health_probe.rs）：按 2.x 的迁移建合成的旧根。
+rusqlite = { version = "0.39", features = ["bundled"] }

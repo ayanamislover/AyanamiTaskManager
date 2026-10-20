@@ -1,3 +1,7 @@
+// 先于一切：这里拉起的宿主窗口不抢焦点、压在最底层（scripts/test-windows.ts）。
+import "./test-windows.js";
+import { agentFetch } from "./agent-fetch.js";
+import { binariesOf } from "./candidate-binaries.js";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
@@ -6,8 +10,6 @@ import { dirname, join, resolve, sep } from "node:path";
 import { Client as McpClient } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { chromium, type Browser, type Page } from "@playwright/test";
-import { format } from "prettier";
-import { AyanamiClient } from "../packages/client/src/index.js";
 import {
   applyRunRestore,
   loginItemRestorePlan,
@@ -15,11 +17,6 @@ import {
   readRunSnapshot,
 } from "./login-item-guard.js";
 import { assertSandboxDataDir } from "./smoke-host.js";
-import {
-  generateMutationAcknowledgementDocumentation,
-  MUTATION_ACK_DOCUMENTATION_BEGIN,
-  MUTATION_ACK_DOCUMENTATION_END,
-} from "../packages/mcp/src/mutation-ack-contract.js";
 import {
   buildAgentDocumentationManifest,
   compareAgentDocumentationManifests,
@@ -34,6 +31,7 @@ import {
 } from "../apps/desktop/src/mcp-launch.js";
 import { rendererRequest } from "./renderer-user-request.js";
 import { reclaimSmokeWorkspaces } from "./smoke-workspace.js";
+import { powershellArgs } from "./windows-text.js";
 
 type Runtime = {
   endpoint: string;
@@ -87,12 +85,20 @@ const reportPath = resolve(
 const agentConfigPrefix = "packaged-smoke-agent-config-";
 const agentConfigRoot = resolve(join(outputDir, `${agentConfigPrefix}${randomUUID()}`));
 const smokeHome = join(agentConfigRoot, "Home");
-const smokeAppData = join(agentConfigRoot, "Roaming");
-const smokeLocalAppData = join(agentConfigRoot, "Local");
+// 与真实 profile 同样的相对位置：smoke 宿主的 Agent 接入按 ATM_SMOKE_CORE_USERPROFILE 推出
+// AppData\Roaming / AppData\Local（host/src/agents.rs），Claude Desktop 的配置在前者。
+const smokeAppData = join(smokeHome, "AppData", "Roaming");
+const smokeLocalAppData = join(smokeHome, "AppData", "Local");
 const codexConfigPath = join(smokeHome, ".codex", "config.toml");
 const claudeConfigPath = join(smokeAppData, "Claude", "claude_desktop_config.json");
 const kimiConfigPath = join(smokeHome, ".kimi-code", "mcp.json");
-const runtimePath = join(dataDir, "runtime", "daemon.json");
+/**
+ * 3.0 根 N：3.x 是单进程，宿主自己就是服务，运行文件（daemon.json、daemon.lock、host.json）、
+ * WebView 数据与 lifecycle / host 日志都在这里。显式指到合成 LOCALAPPDATA 下（与产品默认的相对位置
+ * 一样），继承来的 ATM3_DATA_DIR 一律不用。dataDir 是 2.x 根 L：转换的来源、Agent 文档与 current 链接。
+ */
+const v3Dir = join(smokeLocalAppData, "AyanamiTaskManager3");
+const runtimePath = join(v3Dir, "runtime", "daemon.json");
 const hostileInheritedTokenOverride = "packaged-smoke-inherited-token-must-be-ignored";
 const inheritedEnvironment = Object.fromEntries(
   Object.entries(process.env).filter((entry): entry is [string, string] => entry[1] !== undefined),
@@ -100,6 +106,7 @@ const inheritedEnvironment = Object.fromEntries(
 const smokeEnvironment = {
   ...inheritedEnvironment,
   ATM_DATA_DIR: dataDir,
+  ATM3_DATA_DIR: v3Dir,
   AYANAMI_TASK_TOKEN: hostileInheritedTokenOverride,
   ATM_PACKAGED_SMOKE: "1",
   ATM_SMOKE_MCP_CONFIG_REPAIR: "1",
@@ -111,8 +118,8 @@ const smokeEnvironment = {
 };
 /**
  * 宿主进程用的环境：WebView2 在合成的 USERPROFILE 下起不来，宿主保留真实 profile；
- * smoke 构建的宿主把 ATM_SMOKE_CORE_USERPROFILE 交给它拉起的 Node（core 与 stdio 桥），
- * Agent 配置的位置由它们的 os.homedir() 决定，于是仍落在合成 home 里。
+ * smoke 构建的宿主用 ATM_SMOKE_CORE_USERPROFILE 作 Agent 接入的 home（agents.rs），
+ * Agent 配置仍落在合成 home 里。
  */
 const hostEnvironment = {
   ...smokeEnvironment,
@@ -121,7 +128,9 @@ const hostEnvironment = {
   ATM_SMOKE_CORE_USERPROFILE: smokeHome,
 };
 const checks: Array<{ name: string; passed: boolean; detail?: string }> = [];
-let recordedAgentProfiles: Record<McpProfile, RecordedMcpLaunch> | null = null;
+/** 3.0 写进 Agent 配置的两个档位（agents/src/lib.rs `enabled_profiles`）；actions 只是给旧配置留的别名。 */
+type WrittenProfile = Exclude<McpProfile, "actions">;
+let recordedAgentProfiles: Record<WrittenProfile, RecordedMcpLaunch> | null = null;
 
 function check(name: string, condition: unknown, detail?: string): asserts condition {
   checks.push({ name, passed: Boolean(condition), ...(detail === undefined ? {} : { detail }) });
@@ -131,6 +140,11 @@ function check(name: string, condition: unknown, detail?: string): asserts condi
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
 }
+
+// 写入回执契约的标记段。3.0 起由 atm-http 的 tests/docs.rs 从 Rust 的表生成，并与仓库里的 Guide 逐字节核对
+// （W4j-3，ATM-D-386）；这里核对装出去的三份文档里这一段与源码仓库的 Guide 逐字一致。
+const MUTATION_ACK_DOCUMENTATION_BEGIN = "<!-- MUTATION_ACK_CONTRACT:BEGIN -->";
+const MUTATION_ACK_DOCUMENTATION_END = "<!-- MUTATION_ACK_CONTRACT:END -->";
 
 function mutationAcknowledgementSection(content: string): string | null {
   const start = content.indexOf(MUTATION_ACK_DOCUMENTATION_BEGIN);
@@ -156,8 +170,8 @@ async function waitUntil<T>(read: () => Promise<T | null>, timeoutMs = 30_000): 
 }
 
 // smoke 宿主让 WebView2 以 --remote-debugging-port=0 启动，Chromium 把实际端口写在
-// WebView2 用户数据目录（<数据根>\webview）下——不猜端口。
-const devToolsPortFile = join(dataDir, "webview", "EBWebView", "DevToolsActivePort");
+// WebView2 用户数据目录（N\webview）下——不猜端口。
+const devToolsPortFile = join(v3Dir, "webview", "EBWebView", "DevToolsActivePort");
 
 function startApp(): RunningApp {
   rmSync(devToolsPortFile, { force: true });
@@ -173,6 +187,58 @@ function startApp(): RunningApp {
     if (stderr.length > 20) stderr.shift();
   });
   return { child, stderr };
+}
+
+type AgentTask = { key: string; title: string; status: string; version: number };
+type KnowledgeEntry = {
+  id: string;
+  revisionId: string;
+  revision: number;
+  version: number;
+  bodyMarkdown: string;
+};
+
+/**
+ * 以 Agent 身份调 3.x 的 Agent HTTP（daemon.json 里的 Agent 凭证）。形状按 3.x 的 Agent 面：
+ * 写入回信封（`result` 里才是对象），列表包一层（`{projects}`、`{backups}`），分页是 `items` +
+ * `has_more`。界面走的 ui-bridge 仍按 2.0 的形状应答，那是另一条路（user）。
+ */
+type AgentApi = {
+  request<T = any>(
+    method: string,
+    path: string,
+    body?: unknown,
+  ): Promise<{ status: number; body: T }>;
+  tasks(project: string): Promise<AgentTask[]>;
+};
+
+function agentApi(runtime: { endpoint: string; token: string }): AgentApi {
+  const request = async (method: string, path: string, body?: unknown) => {
+    const response = await agentFetch(`${runtime.endpoint}${path}`, {
+      method,
+      headers: {
+        authorization: `Bearer ${runtime.token}`,
+        ...(body === undefined ? {} : { "content-type": "application/json" }),
+      },
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    });
+    const text = await response.text();
+    return { status: response.status, body: text ? JSON.parse(text) : null };
+  };
+  return {
+    request,
+    async tasks(project) {
+      const page = await request(
+        "GET",
+        `/api/v1/projects/${encodeURIComponent(project)}/work-items?limit=100`,
+      );
+      if (page.status !== 200 || page.body?.has_more !== false || !Array.isArray(page.body.items))
+        throw new Error(
+          `任务列表读取失败：${page.status} ${JSON.stringify(page.body).slice(0, 300)}`,
+        );
+      return page.body.items as AgentTask[];
+    },
+  };
 }
 
 type UserPath = {
@@ -194,7 +260,12 @@ type UserPath = {
  * 后台启动的宿主没有窗口：先像用户再点一次入口那样发 SHOW（第二实例），窗口和 WebView 才建。
  */
 async function connectUserRenderer(): Promise<UserPath> {
-  const show = spawn(executable, [], { cwd: root, env: hostEnvironment, stdio: "ignore" });
+  const show = spawn(executable, [], {
+    cwd: root,
+    env: hostEnvironment,
+    stdio: "ignore",
+    windowsHide: true,
+  });
   await waitForExit(show, 10_000);
   const port = await waitUntil(async () => {
     if (!existsSync(devToolsPortFile)) return null;
@@ -224,7 +295,7 @@ async function waitForRuntime(app: RunningApp): Promise<Runtime> {
       throw new Error(`应用提前退出（${app.child.exitCode}）：${app.stderr.join("")}`);
     if (!existsSync(runtimePath)) return null;
     const runtime = JSON.parse(await readFile(runtimePath, "utf8")) as Runtime;
-    const response = await fetch(`${runtime.endpoint}/api/v1/system/status`, {
+    const response = await agentFetch(`${runtime.endpoint}/api/v1/system/status`, {
       headers: { authorization: `Bearer ${runtime.token}` },
     });
     return response.ok ? runtime : null;
@@ -250,7 +321,7 @@ function recordedLaunch(value: unknown, label: string): RecordedMcpLaunch {
   return { command: object.command, args: object.args as string[], env };
 }
 
-async function waitForPackagedAgentProfiles(): Promise<Record<McpProfile, RecordedMcpLaunch>> {
+async function waitForPackagedAgentProfiles(): Promise<Record<WrittenProfile, RecordedMcpLaunch>> {
   return waitUntil(async () => {
     if (!existsSync(codexConfigPath) || !existsSync(claudeConfigPath)) return null;
     const kimi = JSON.parse(await readFile(kimiConfigPath, "utf8")) as Record<string, any>;
@@ -261,8 +332,8 @@ async function waitForPackagedAgentProfiles(): Promise<Record<McpProfile, Record
     const servers = claude.mcpServers as Record<string, unknown> | undefined;
     const core = servers?.["ayanami-task-manager-core"];
     const memory = servers?.["ayanami-task-manager-memory"];
-    const actions = servers?.["ayanami-task-manager-actions"];
-    if (!core || !memory || !actions) return null;
+    // 修复要把种下的旧 actions 档位一起去掉（3.0 只写 core + memory；atm_task_patch 已在 core 里）。
+    if (!core || !memory || servers?.["ayanami-task-manager-actions"]) return null;
 
     check(
       "打包应用迁移 Codex 旧单入口及子表",
@@ -270,10 +341,10 @@ async function waitForPackagedAgentProfiles(): Promise<Record<McpProfile, Record
         !codex.includes("LEGACY_ENV_MUST_DISAPPEAR") &&
         codex.includes('mcp_servers."ayanami-task-manager-core"') &&
         codex.includes('mcp_servers."ayanami-task-manager-memory"') &&
-        codex.includes('mcp_servers."ayanami-task-manager-actions"'),
+        !codex.includes('mcp_servers."ayanami-task-manager-actions"'),
       codex,
     );
-    // Kimi 的三个档位要和 Claude 那边写下的启动方式完全一致（同一个 atm-mcp、同一组参数与环境），
+    // Kimi 的两个档位要和 Claude 那边写下的启动方式完全一致（同一个 atm-mcp、同一组参数与环境），
     // 无关 server 要逐字段原样保留，而不只是「还在」。
     const sameLaunch = (left: unknown, right: unknown) => {
       const pick = (value: unknown) => {
@@ -283,12 +354,13 @@ async function waitForPackagedAgentProfiles(): Promise<Record<McpProfile, Record
       return pick(left) === pick(right);
     };
     check(
-      "打包应用迁移 Kimi Code：三个档位写明 stdio 且启动方式与 Claude 一致，旧单入口删除，保留无关 server 与顶层键",
+      "打包应用迁移 Kimi Code：core / memory 写明 stdio 且启动方式与 Claude 一致，旧单入口与 actions 删除，保留无关 server 与顶层键",
       kimi.theme === "keep-top-level" &&
         JSON.stringify(kimiServers.other) ===
           JSON.stringify({ transport: "stdio", command: "keep.exe", args: [] }) &&
         !kimiServers["ayanami-task-manager"] &&
-        (["core", "memory", "actions"] as const).every((profile) => {
+        !kimiServers["ayanami-task-manager-actions"] &&
+        (["core", "memory"] as const).every((profile) => {
           const entry = kimiServers[`ayanami-task-manager-${profile}`];
           return (
             entry?.transport === "stdio" &&
@@ -298,21 +370,23 @@ async function waitForPackagedAgentProfiles(): Promise<Record<McpProfile, Record
       JSON.stringify(kimi),
     );
     check(
-      "打包应用迁移 Claude Desktop 且保留无关 server",
+      "打包应用迁移 Claude Desktop（旧单入口与 actions 删除）且保留无关 server",
       Boolean(servers?.other) && !servers?.["ayanami-task-manager"],
       JSON.stringify(servers),
     );
     return {
       core: recordedLaunch(core, "Claude core"),
       memory: recordedLaunch(memory, "Claude memory"),
-      actions: recordedLaunch(actions, "Claude actions"),
     };
   });
 }
 
 function installedProfileLaunch(profile: McpProfile): RecordedMcpLaunch {
   if (!recordedAgentProfiles) throw new Error("打包 Agent 配置尚未读回");
-  return recordedAgentProfiles[profile];
+  if (profile !== "actions") return recordedAgentProfiles[profile];
+  // 还没更新的旧配置写的是同一个 shim 加 --profile actions：3.0 把它当 core 的别名接着服务。
+  const core = recordedAgentProfiles.core;
+  return { ...core, args: ["--profile", "actions"] };
 }
 
 async function waitForExit(child: ChildProcess, timeoutMs = 15_000): Promise<number | null> {
@@ -340,49 +414,6 @@ async function stopApp(app: RunningApp): Promise<void> {
   await waitUntil(async () => (existsSync(runtimePath) ? null : true), 5_000);
 }
 
-async function withProjectEvent<T>(
-  runtime: Runtime,
-  project: string,
-  predicate: (frame: Record<string, unknown>) => boolean,
-  action: () => Promise<T>,
-): Promise<{ value: T; event: Record<string, unknown> }> {
-  const url = new URL(runtime.endpoint);
-  url.protocol = "ws:";
-  url.pathname = "/api/v1/ws";
-  url.searchParams.set("scope", `project:${project}`);
-  url.searchParams.set("since", "0");
-  const socket = new WebSocket(url);
-  let actionStarted = false;
-  let actionValue: T | undefined;
-  let matchedEvent: Record<string, unknown> | undefined;
-  return new Promise((resolveEvent, rejectEvent) => {
-    const timeout = setTimeout(() => rejectEvent(new Error("WebSocket 实时事件等待超时")), 15_000);
-    const finish = () => {
-      if (actionValue === undefined || matchedEvent === undefined) return;
-      clearTimeout(timeout);
-      socket.close();
-      resolveEvent({ value: actionValue, event: matchedEvent });
-    };
-    socket.addEventListener("open", () =>
-      socket.send(JSON.stringify({ type: "authenticate", token: runtime.token })),
-    );
-    socket.addEventListener("error", () => rejectEvent(new Error("WebSocket 连接失败")));
-    socket.addEventListener("message", (message) => {
-      const frame = JSON.parse(String(message.data)) as Record<string, unknown>;
-      if (frame.type === "authenticated" && !actionStarted) {
-        actionStarted = true;
-        void action().then((value) => {
-          actionValue = value;
-          finish();
-        }, rejectEvent);
-      } else if (predicate(frame)) {
-        matchedEvent = frame;
-        finish();
-      }
-    });
-  });
-}
-
 /**
  * MCP 客户端盯的是它直接拉起的那个进程：那个进程一退，客户端就判定 server 挂了，
  * 哪怕响应已经从继承的管道回来过。
@@ -406,13 +437,7 @@ const windowsPowerShell = join(
 function clipboard(script: string, input?: string): string {
   const result = spawnSync(
     windowsPowerShell,
-    [
-      "-NoProfile",
-      "-NonInteractive",
-      "-STA",
-      "-Command",
-      `Add-Type -AssemblyName System.Windows.Forms; ${script}`,
-    ],
+    powershellArgs(`Add-Type -AssemblyName System.Windows.Forms; ${script}`, ["-STA"]),
     { encoding: "utf8", windowsHide: true, ...(input === undefined ? {} : { input }) },
   );
   if (result.status !== 0) throw new Error(`CLIPBOARD_${String(result.status)}: ${result.stderr}`);
@@ -432,7 +457,7 @@ async function rejectedByHost(
   method: string,
   ...args: unknown[]
 ): Promise<boolean> {
-  const logPath = join(dataDir, "logs", "host.log");
+  const logPath = join(v3Dir, "logs", "host.log");
   const before = existsSync(logPath) ? readFileSync(logPath, "utf8").length : 0;
   const settled = await Promise.race([
     call(method, ...args).then(
@@ -534,7 +559,16 @@ async function checkBridgeParity(
   const preview = (await call("manageAgentIntegration", "CODEX", "PREVIEW")) as unknown;
   check("manageAgentIntegration 预览经桥返回", preview !== null && preview !== undefined);
 
-  check("showItemInFolder 拒绝非字符串参数", await rejectedByHost(call, "showItemInFolder", 42));
+  // 3.0 的桥上没有 showItemInFolder（host/src/bridge.rs：页面送来的路径到不了宿主）：调用当场失败。
+  const showItem = await call("showItemInFolder", "C:\\").then(
+    () => "resolved",
+    (error: unknown) => String(error),
+  );
+  check(
+    "3.0 桥上没有 showItemInFolder",
+    showItem !== "resolved" && /is not a function|undefined/u.test(showItem),
+    showItem,
+  );
   check("copyText 拒绝非字符串参数", await rejectedByHost(call, "copyText", { text: "x" }));
 
   const snapshot = clipboard(CLIPBOARD_SNAPSHOT);
@@ -575,10 +609,11 @@ async function checkBridgeParity(
  */
 async function checkShimWakesApp(): Promise<void> {
   // 被唤醒的实例不是烟测自己拉起的子进程：断言失败也要经 --smoke-quit 让它退出，不留进程。
+  let wokenGone = false;
   try {
     const tools = await packagedProfileTools("core");
     check("应用退出后 shim 唤醒宿主并完成握手", tools.includes("atm_begin"), tools.join(","));
-    const lifecycle = join(dataDir, "logs", "lifecycle-core.ndjson");
+    const lifecycle = join(v3Dir, "logs", "lifecycle.ndjson");
     const startups = readFileSync(lifecycle, "utf8")
       .split(/\r?\n/u)
       .filter(Boolean)
@@ -590,6 +625,11 @@ async function checkShimWakesApp(): Promise<void> {
       JSON.stringify(startups.at(-1)),
     );
   } finally {
+    // 运行文件在 Withdrawn 时就删了，进程还要再过一会儿才退、才放开单实例管道；只等文件消失，
+    // 紧接着的下一次启动会被当成第二个实例转交给它、自己以 0 退出（W8d-5 全链实测）。按 pid 等到进程没了。
+    const woken = existsSync(runtimePath)
+      ? (JSON.parse(readFileSync(runtimePath, "utf8")) as Runtime).pid
+      : null;
     const quit = spawn(executable, ["--smoke-quit"], {
       cwd: root,
       env: hostEnvironment,
@@ -597,11 +637,22 @@ async function checkShimWakesApp(): Promise<void> {
       stdio: "ignore",
     });
     await waitForExit(quit, 5_000);
-    await waitUntil(async () => (existsSync(runtimePath) ? null : true), 15_000).catch(
-      () => undefined,
-    );
+    await waitUntil(
+      async () => (existsSync(runtimePath) || (woken !== null && alive(woken)) ? null : true),
+      15_000,
+    ).catch(() => undefined);
+    wokenGone = woken !== null && !alive(woken);
   }
-  check("唤醒的实例经 --smoke-quit 退出", !existsSync(runtimePath));
+  check("唤醒的实例经 --smoke-quit 退出", !existsSync(runtimePath) && wokenGone);
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 async function checkMcpProcessOutlivesHandshake(): Promise<void> {
@@ -786,7 +837,11 @@ async function readKnowledgeThroughPackagedMemory(
       arguments: { project_code: project, agent_id: "knowledge-smoke-author", brief: "none" },
     });
     const session = String((begun.structuredContent as Record<string, unknown>)?.session);
-    check("知识写入建立真实 Session", !begun.isError && session !== "undefined");
+    check(
+      "知识写入建立真实 Session",
+      !begun.isError && session !== "undefined",
+      JSON.stringify(begun).slice(0, 800),
+    );
     const args = {
       project,
       session,
@@ -829,9 +884,24 @@ async function readKnowledgeThroughPackagedMemory(
       !updated.isError && (updated.structuredContent as Record<string, unknown>)?.version === 2,
     );
     const replay = await client.callTool({ name: "atm_knowledge_save", arguments: args });
+    // v6 的 ACK 规则：重放回同一份回执，只多标 replayed:true。
+    const sameReceiptReplayed = (result: typeof replay) => {
+      const { replayed: replayFlag, ...replayRest } = (result.structuredContent ?? {}) as Record<
+        string,
+        unknown
+      >;
+      const { replayed: firstFlag, ...firstRest } = receipt;
+      return (
+        !result.isError &&
+        firstFlag === false &&
+        replayFlag === true &&
+        JSON.stringify(replayRest) === JSON.stringify(firstRest)
+      );
+    };
     check(
-      "打包知识写入重试返回原回执",
-      !replay.isError && JSON.stringify(replay.structuredContent) === JSON.stringify(receipt),
+      "打包知识写入重试返回原回执（只多标 replayed）",
+      sameReceiptReplayed(replay),
+      `${JSON.stringify(receipt)} / ${JSON.stringify(replay.structuredContent)}`,
     );
     const largeMetadata = await client.callTool({
       name: "atm_knowledge_save",
@@ -910,8 +980,8 @@ async function readKnowledgeThroughPackagedMemory(
     const closedReplay = await client.callTool({ name: "atm_knowledge_save", arguments: args });
     check(
       "安装产物关闭Session后只读重放原知识回执",
-      !closedReplay.isError &&
-        JSON.stringify(closedReplay.structuredContent) === JSON.stringify(receipt),
+      sameReceiptReplayed(closedReplay),
+      `${JSON.stringify(receipt)} / ${JSON.stringify(closedReplay.structuredContent)}`,
     );
   } finally {
     await client.close();
@@ -919,27 +989,10 @@ async function readKnowledgeThroughPackagedMemory(
   }
 }
 
-async function packagedDefaultProfileTools(): Promise<string[]> {
+/** shim 带给定参数启动、不发任何消息：返回退出码与 stderr（10 秒不退出算失败）。 */
+async function shimRefuses(args: string[]): Promise<{ exitCode: number | null; stderr: string }> {
   const launch = mcpLaunch({ execPath: executable, dataDir });
-  const transport = new StdioClientTransport({
-    command: launch.command,
-    args: launch.args,
-    cwd: root,
-    env: { ...smokeEnvironment, ...launch.env },
-    stderr: "pipe",
-  });
-  const client = new McpClient({ name: "packaged-smoke-default-profile", version: "1.0.0" });
-  try {
-    await client.connect(transport);
-    return (await client.listTools()).tools.map((tool) => tool.name);
-  } finally {
-    await client.close();
-  }
-}
-
-async function checkInvalidPackagedProfileFails(): Promise<void> {
-  const launch = mcpLaunch({ execPath: executable, dataDir });
-  const child = spawn(launch.command, [...launch.args, "--profile", "merged"], {
+  const child = spawn(launch.command, args, {
     cwd: root,
     env: { ...smokeEnvironment, ...launch.env },
     stdio: ["ignore", "ignore", "pipe"],
@@ -960,8 +1013,24 @@ async function checkInvalidPackagedProfileFails(): Promise<void> {
       resolveExit(code);
     });
   });
-  check("非法打包 Profile 非零退出", exitCode !== 0, `exit=${String(exitCode)}`);
-  check("非法打包 Profile 给出明确错误", stderr.includes("MCP_PROFILE_INVALID"), stderr);
+  return { exitCode, stderr };
+}
+
+async function checkInvalidPackagedProfileFails(): Promise<void> {
+  const invalid = await shimRefuses(["--profile", "merged"]);
+  check("非法打包 Profile 非零退出", invalid.exitCode !== 0, `exit=${String(invalid.exitCode)}`);
+  check(
+    "非法打包 Profile 给出明确错误",
+    invalid.stderr.includes("MCP_PROFILE_INVALID"),
+    invalid.stderr,
+  );
+  // 3.0 没有不分档位的旧入口（06 #97）：没写 --profile 的旧配置明确报错，提示重装。
+  const bare = await shimRefuses([]);
+  check(
+    "不带 Profile 的旧配置明确拒绝",
+    bare.exitCode !== 0 && bare.stderr.includes("MCP_PROFILE_REQUIRED"),
+    `exit=${String(bare.exitCode)} ${bare.stderr}`,
+  );
 }
 
 async function claimThroughPackagedActions(
@@ -991,7 +1060,7 @@ async function claimThroughPackagedActions(
       },
     });
     check(
-      "actions Profile 修改 core 创建的任务",
+      "旧配置的 actions 别名修改 core 创建的任务",
       (patched.structuredContent as Record<string, unknown>).ok === true,
     );
   } finally {
@@ -1043,6 +1112,7 @@ await writeFile(
   `${JSON.stringify({
     mcpServers: {
       "ayanami-task-manager": { command: "legacy.exe", args: [] },
+      "ayanami-task-manager-actions": { command: "legacy.exe", args: ["--profile", "actions"] },
       other: { command: "keep.exe", args: [] },
     },
   })}\n`,
@@ -1050,7 +1120,7 @@ await writeFile(
 );
 
 // Keep this parent PID alive: a PID-only lock implementation must fail this real EXE probe.
-const lockPath = join(dataDir, "runtime", "daemon.lock");
+const lockPath = join(v3Dir, "runtime", "daemon.lock");
 await mkdir(dirname(lockPath), { recursive: true });
 await writeFile(lockPath, JSON.stringify({ pid: process.pid, nonce: "previous-boot" }));
 const previousBoot = new Date("2020-01-01T00:00:00Z");
@@ -1075,16 +1145,14 @@ try {
   );
   recordedAgentProfiles = await waitForPackagedAgentProfiles();
   // runtime.token 是 Agent 凭证：读和 Agent 写走它；用户操作走 user（真实 renderer 路径）。
-  const client = new AyanamiClient(runtime);
+  const agent = agentApi(runtime);
   user = await connectUserRenderer();
-  const status = await client.status();
+  const status = (await agent.request<Record<string, unknown>>("GET", "/api/v1/system/status"))
+    .body;
   check("打包应用健康检查", status.ok === true);
   check("正式桌面忽略继承的固定 token override", runtime.token !== hostileInheritedTokenOverride);
-  check("live runtime 不存在旧 local.token", !existsSync(join(dataDir, "runtime", "local.token")));
-  check(
-    "打包 native SQLite 可用",
-    Boolean((status.sqlite as Record<string, unknown>)?.sqliteVersion),
-  );
+  check("live runtime 不存在旧 local.token", !existsSync(join(v3Dir, "runtime", "local.token")));
+  check("打包 native SQLite 可用", Boolean((status.sqlite as Record<string, unknown>)?.version));
   const installedGuide = join(dataDir, "ATM_AGENT_GUIDE.md");
   const installedAgentDocs = join(dataDir, "docs", "agent-integration.md");
   const installedSecurityModel = join(dataDir, "docs", "security-model.md");
@@ -1149,9 +1217,10 @@ try {
   const guideContent = await readFile(installedGuide, "utf8");
   const agentDocsContent = await readFile(installedAgentDocs, "utf8");
   const mutationAckDocsContent = await readFile(installedMutationAckDocs, "utf8");
-  const expectedMutationAck = (
-    await format(generateMutationAcknowledgementDocumentation(), { parser: "markdown" })
-  ).trim();
+  const expectedMutationAck = mutationAcknowledgementSection(
+    await readFile(join(root, "ATM_AGENT_GUIDE.md"), "utf8"),
+  );
+  check("源码 Guide 带写入回执契约段", expectedMutationAck !== null);
   check(
     "Agent Guide 使用设备无关路径",
     guideContent.includes("%LOCALAPPDATA%\\AyanamiTaskManager\\ATM_AGENT_GUIDE.md") &&
@@ -1172,40 +1241,54 @@ try {
     );
   }
 
-  const project = await client.projects.create({
+  // Agent 建项目（06 #15 A+U）：3.x 的 Agent 面回写入信封，项目在 result.project 里。
+  const projectCreated = await agent.request<{
+    ok?: boolean;
+    operation?: string;
+    result?: { project?: { code: string } };
+  }>("POST", "/api/v1/projects", {
     name: "打包烟测项目",
-    sourcePath: null,
     code: "PSM",
+    op_id: "packaged-smoke-project",
   });
-  const knowledgeSaved = await user.request<Awaited<ReturnType<typeof client.knowledge.get>>>(
-    "POST",
-    "/api/v1/knowledge",
-    {
-      opId: "packaged-smoke-knowledge-create",
-      expectedVersion: 0,
-      slug: "packaged-smoke-knowledge",
-      title: "Packaged smoke knowledge",
-      summary: "Knowledge fixture for packaged MCP smoke",
-      useWhen: "验证打包 memory 入口",
-      tags: ["packaged", "smoke"],
-      appliesTo: ["packaged-smoke"],
-      bodyMarkdown: "# Packaged smoke\n\npackaged smoke knowledge body",
-      sourceRefs: [],
-      aliases: [],
-    },
+  check(
+    "Agent 路径建项目，回执是写入信封",
+    [200, 201].includes(projectCreated.status) &&
+      projectCreated.body.ok === true &&
+      projectCreated.body.operation === "project.create" &&
+      projectCreated.body.result?.project?.code === "PSM",
+    `${projectCreated.status} ${JSON.stringify(projectCreated.body).slice(0, 400)}`,
   );
+  const project = projectCreated.body.result!.project!;
+  const knowledgeSaved = await user.request<KnowledgeEntry>("POST", "/api/v1/knowledge", {
+    opId: "packaged-smoke-knowledge-create",
+    expectedVersion: 0,
+    slug: "packaged-smoke-knowledge",
+    title: "Packaged smoke knowledge",
+    summary: "Knowledge fixture for packaged MCP smoke",
+    useWhen: "验证打包 memory 入口",
+    tags: ["packaged", "smoke"],
+    appliesTo: ["packaged-smoke"],
+    bodyMarkdown: "# Packaged smoke\n\npackaged smoke knowledge body",
+    sourceRefs: [],
+    aliases: [],
+  });
   const knowledge = knowledgeSaved.body;
   check(
     "用户路径（renderer → 主进程代理）创建隔离烟测知识条目",
     knowledgeSaved.status === 201 && knowledge.revision === 1 && knowledge.version === 1,
     JSON.stringify(knowledgeSaved),
   );
-  const httpKnowledge = await client.knowledge.get(knowledge.id, {
-    revisionId: knowledge.revisionId,
-  });
+  // 3.0 里按 id 读知识条目是用户专属路由（06 #48 U）：Agent 经 memory 的 atm_knowledge_get 读（下面）。
+  const readBack = await user.request<KnowledgeEntry>(
+    "GET",
+    `/api/v1/knowledge/${encodeURIComponent(knowledge.id)}?revisionId=${encodeURIComponent(knowledge.revisionId)}`,
+  );
+  const httpKnowledge = readBack.body;
   check(
-    "HTTP knowledge service 读取烟测条目",
-    httpKnowledge.id === knowledge.id &&
+    "用户路径读回烟测知识条目",
+    readBack.status === 200 &&
+      httpKnowledge.id === knowledge.id &&
       httpKnowledge.revision === knowledge.revision &&
       httpKnowledge.bodyMarkdown.includes("packaged smoke knowledge body"),
     JSON.stringify(httpKnowledge),
@@ -1222,11 +1305,24 @@ try {
     },
   );
   check("用户路径以用户身份创建 Objective", objective.status === 201, JSON.stringify(objective));
-  check("创建独立项目数据库", existsSync(project.databasePath), project.databasePath);
+  // 3.0 是单库：没有每项目一个的数据库文件；Agent 列表里能看到这个项目即可。
+  const listed = await agent.request<{ projects?: Array<{ code: string }> }>(
+    "GET",
+    "/api/v1/projects",
+  );
+  check(
+    "Agent 项目列表（{projects}）里有新项目",
+    listed.body.projects?.some((entry) => entry.code === project.code) === true,
+    JSON.stringify(listed.body).slice(0, 300),
+  );
 
-  // 桥接脚本必须落在数据根：resources 每版换目录，写进 Agent 配置的路径不能跟着换。
-  const bridgePath = join(dataDir, "mcp-stdio.cjs");
-  check("MCP 桥接脚本安装到数据根", existsSync(bridgePath), bridgePath);
+  // 3.x 没有 Node：Agent 配置走原生 shim（下面核对），数据根里不再装 Node 桥接脚本。
+  const bridgePaths = [join(dataDir, "mcp-stdio.cjs"), join(v3Dir, "mcp-stdio.cjs")];
+  check(
+    "数据根里没有 Node 桥接脚本",
+    bridgePaths.every((path) => !existsSync(path)),
+    bridgePaths.join(", "),
+  );
 
   // 写进 Agent 配置的 command 不能带版本号：客户端在会话开始时把配置读进内存，之后盘上
   // 怎么改都影响不到它。安装态走数据根下由 atm-setup 维护的 current 链接；便携版没有安装
@@ -1267,7 +1363,7 @@ try {
   const coreTools = await packagedProfileTools("core");
   const memoryTools = await packagedProfileTools("memory");
   const actionsTools = await packagedProfileTools("actions");
-  const legacyTools = await packagedDefaultProfileTools();
+  // 3.0 的工具面（http/src/tools.rs PROFILES，MCP surface v6）：常见流程只用 core。
   check(
     "打包 core Profile 工具完整",
     JSON.stringify(coreTools) ===
@@ -1277,6 +1373,9 @@ try {
         "atm_task_list",
         "atm_task_get",
         "atm_task_create",
+        "atm_task_patch",
+        "atm_progress_add",
+        "atm_record",
         "atm_end",
       ]),
     coreTools.join(", "),
@@ -1285,11 +1384,7 @@ try {
     "打包 memory Profile 工具完整",
     JSON.stringify(memoryTools) ===
       JSON.stringify([
-        "atm_progress_add",
-        "atm_record",
-        "atm_feedback",
         "atm_search",
-        "atm_delta",
         "atm_knowledge_search",
         "atm_knowledge_get",
         "atm_knowledge_save",
@@ -1297,54 +1392,69 @@ try {
     memoryTools.join(", "),
   );
   check(
-    "打包 actions Profile 工具完整",
-    JSON.stringify(actionsTools) === JSON.stringify(["atm_task_patch"]),
+    "旧配置的 actions 别名只发布 atm_task_patch，且它就是 core 里那一个",
+    JSON.stringify(actionsTools) === JSON.stringify(["atm_task_patch"]) &&
+      coreTools.includes("atm_task_patch"),
     actionsTools.join(", "),
   );
   check(
-    "打包三 Profile 工具无重叠且联合为 15 个",
-    coreTools.filter((name) => [...memoryTools, ...actionsTools].includes(name)).length === 0 &&
-      memoryTools.filter((name) => actionsTools.includes(name)).length === 0 &&
-      new Set([...coreTools, ...memoryTools, ...actionsTools]).size === 15,
-  );
-  check(
-    "打包 stdio 未指定 Profile 时保留完整 legacy 兼容能力",
-    legacyTools.length === 11 &&
-      new Set(legacyTools).size === 11 &&
-      [...coreTools, ...memoryTools, ...actionsTools]
-        .filter((name) => name !== "atm_feedback" && !name.startsWith("atm_knowledge_"))
-        .every((name) => legacyTools.includes(name)) &&
-      !legacyTools.includes("atm_feedback"),
-    legacyTools.join(", "),
+    "core 与 memory 不重叠，合计 13 个",
+    coreTools.filter((name) => memoryTools.includes(name)).length === 0 &&
+      new Set([...coreTools, ...memoryTools]).size === 13,
   );
   await checkInvalidPackagedProfileFails();
 
-  const live = await withProjectEvent(
-    runtime,
-    project.code,
-    (frame) => frame.type === "work.created",
-    () => createThroughPackagedMcp(project.code, "打包烟测任务", "packaged-smoke-create-1"),
+  // 3.0 没有 WebSocket 事件流（06 #109 删除，界面按时刷新）：入口不存在；事件从项目事件页读。
+  const ws = await agent.request("GET", "/api/v1/ws");
+  check(
+    "3.0 没有 WebSocket 事件流（06 #109）",
+    ws.status === 404 && JSON.stringify(ws.body).includes("NOT_FOUND"),
+    `${ws.status} ${JSON.stringify(ws.body).slice(0, 200)}`,
   );
-  check("UI WebSocket 收到 MCP 实时事件", live.event.type === "work.created");
-  const liveTaskKey = String(live.event.key ?? "");
-  const liveCreated = (await client.tasks.list(project.code)).find(
-    (task) => task.key === liveTaskKey,
+  const live = {
+    value: await createThroughPackagedMcp(project.code, "打包烟测任务", "packaged-smoke-create-1"),
+  };
+  // task_create 的回执按 client_ref 给出 key（refs）；Agent 列表的默认字段里没有标题。
+  const liveKey = String(
+    (live.value.created.refs as Record<string, unknown> | undefined)?.["packaged-smoke-create-1"],
   );
-  check("固定 mutation ACK 后按事件 key 读回 durable task", liveCreated !== undefined, liveTaskKey);
+  const liveTasks = await agent.tasks(project.code);
+  const liveCreated = liveTasks.find((task) => task.key === liveKey);
+  check(
+    "MCP 建的任务经 Agent 列表读回",
+    liveCreated !== undefined,
+    JSON.stringify({ created: live.value.created, tasks: liveTasks }).slice(0, 1200),
+  );
+  const events = await agent.request<{ events?: Array<Record<string, unknown>> }>(
+    "GET",
+    `/api/v1/projects/${encodeURIComponent(project.code)}/events?since=0&limit=100`,
+  );
+  check(
+    "项目事件页有这条任务的 work.created",
+    events.status === 200 &&
+      events.body.events?.some(
+        (event) => event.type === "work.created" && JSON.stringify(event).includes(liveCreated.key),
+      ) === true,
+    `${events.status} ${JSON.stringify(events.body).slice(0, 400)}`,
+  );
   await claimThroughPackagedActions(
     project.code,
     live.value.session,
     liveCreated.key,
     liveCreated.version,
   );
-  const sharedTask = (await client.tasks.list(project.code)).find(
-    (task) => task.key === liveCreated.key,
-  );
-  check("core / actions Profile 共享同一数据库状态", sharedTask?.status === "CLAIMED");
+  const sharedTask = (await agent.tasks(project.code)).find((task) => task.key === liveCreated.key);
+  check("core 与 actions 别名共享同一数据库状态", sharedTask?.status === "CLAIMED");
 
   // 分离凭证在安装态生效：Agent 凭证新建备份被拒（它会淘汰用户的手动备份），且不落账。
-  const backupsBefore = (await client.backups.list(project.code)).length;
-  const agentBackup = await fetch(`${runtime.endpoint}/api/v1/backups`, {
+  const backupCount = async () => {
+    const listed = await agent.request<{ backups?: unknown[] }>("GET", "/api/v1/backups");
+    if (listed.status !== 200 || !Array.isArray(listed.body.backups))
+      throw new Error(`备份列表读取失败：${listed.status} ${JSON.stringify(listed.body)}`);
+    return listed.body.backups.length;
+  };
+  const backupsBefore = await backupCount();
+  const agentBackup = await agentFetch(`${runtime.endpoint}/api/v1/backups`, {
     method: "POST",
     headers: { authorization: `Bearer ${runtime.token}`, "content-type": "application/json" },
     body: JSON.stringify({ scope: "PROJECT", project: project.code }),
@@ -1355,7 +1465,7 @@ try {
     agentBackup.status === 403 &&
       agentBackupBody.includes("USER_AUTHORIZATION_REQUIRED") &&
       !agentBackupBody.includes(runtime.token) &&
-      (await client.backups.list(project.code)).length === backupsBefore,
+      (await backupCount()) === backupsBefore,
     `${agentBackup.status} ${agentBackupBody.slice(0, 200)}`,
   );
   const backupCreated = await user.request<{ id: string }>("POST", "/api/v1/backups", {
@@ -1365,16 +1475,19 @@ try {
   check("用户路径创建备份", backupCreated.status === 201, JSON.stringify(backupCreated));
   const backup = backupCreated.body;
   await createThroughPackagedMcp(project.code, "恢复后应消失", "packaged-smoke-create-2");
-  check("备份后写入第二项", (await client.tasks.list(project.code)).length === 2);
+  check("备份后写入第二项", (await agent.tasks(project.code)).length === 2);
+  // 3.0 是单库：恢复要指明范围，和界面（project-data-modal.tsx）发的一样。
   const restored = await user.request(
     "POST",
     `/api/v1/backups/${encodeURIComponent(String(backup.id))}/restore`,
+    { scope: "PROJECT", project: project.code },
   );
   check("用户路径恢复备份", restored.status === 200, JSON.stringify(restored).slice(0, 300));
-  const restoredTasks = await client.tasks.list(project.code, { view: "context" });
+  const restoredTasks = await agent.tasks(project.code);
   check(
     "在线备份恢复一致",
-    restoredTasks.length === 1 && restoredTasks[0]?.title === "打包烟测任务",
+    restoredTasks.length === 1 && restoredTasks[0]?.key === liveCreated.key,
+    JSON.stringify(restoredTasks),
   );
 
   // 自启动开关走界面真正调用的那条桥（宿主写 HKCU Run），登记值逐字比对；
@@ -1420,7 +1533,7 @@ try {
   await stopApp(app);
   check("完全退出清理运行时文件", !existsSync(runtimePath));
   await checkShimWakesApp();
-  check("完全退出后不存在旧 local.token", !existsSync(join(dataDir, "runtime", "local.token")));
+  check("完全退出后不存在旧 local.token", !existsSync(join(v3Dir, "runtime", "local.token")));
 
   await writeFile(
     lockPath,
@@ -1437,9 +1550,12 @@ try {
     "daemon 重启后 token 与 instanceId 均轮换",
     restartedRuntime.token !== runtime.token && restartedRuntime.instanceId !== runtime.instanceId,
   );
-  const staleCredentialResponse = await fetch(`${restartedRuntime.endpoint}/api/v1/system/status`, {
-    headers: { authorization: `Bearer ${runtime.token}` },
-  });
+  const staleCredentialResponse = await agentFetch(
+    `${restartedRuntime.endpoint}/api/v1/system/status`,
+    {
+      headers: { authorization: `Bearer ${runtime.token}` },
+    },
+  );
   const staleCredentialBody = await staleCredentialResponse.text();
   check(
     "旧 token 在新 daemon 上返回 401 且不回显新旧 secret",
@@ -1449,24 +1565,31 @@ try {
   );
   check(
     "restart live runtime 不存在旧 local.token",
-    !existsSync(join(dataDir, "runtime", "local.token")),
+    !existsSync(join(v3Dir, "runtime", "local.token")),
   );
-  const restartedClient = new AyanamiClient(restartedRuntime);
-  const projects = await restartedClient.projects.list();
-  const persistedTasks = await restartedClient.tasks.list(project.code);
+  const restartedAgent = agentApi(restartedRuntime);
+  const projects = await restartedAgent.request<{ projects?: Array<{ code: string }> }>(
+    "GET",
+    "/api/v1/projects",
+  );
+  const persistedTasks = await restartedAgent.tasks(project.code);
   check(
     "重启后项目与任务仍在",
-    projects.some((entry) => entry.code === project.code) && persistedTasks.length === 1,
+    projects.body.projects?.some((entry) => entry.code === project.code) === true &&
+      persistedTasks.length === 1,
+    `${JSON.stringify(projects.body).slice(0, 200)} tasks=${persistedTasks.length}`,
   );
   await stopApp(app);
   check(
     "restart 完全退出后不存在旧 local.token",
-    !existsSync(join(dataDir, "runtime", "local.token")),
+    !existsSync(join(v3Dir, "runtime", "local.token")),
   );
 
   const report = {
     passed: true,
     executable,
+    // 候选绑定（L6）：这份报告测的是哪份二进制（smoke 包，对 candidate-binaries.json 的 smoke 那套）。
+    binaries: binariesOf(dirname(executable)),
     dataDir,
     completedAt: new Date().toISOString(),
     checks,

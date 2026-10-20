@@ -5,16 +5,29 @@ import { assertReleaseChecklistIsDynamic as assertDynamicChecklistContent } from
 
 // 版本号散落的全部位置。漏改一处，Squirrel 会拿同名不同哈希的包当升级处理，
 // 装出来的还是旧版——1.0.1 那次就是这么撞上的。
-export const VERSIONED_FILES = [
-  "package.json",
-  // The daemon entrypoints consume this single source of truth rather than
-  // carrying duplicate literals themselves.
+/**
+ * 产品版本的站点。3.x 只有一个来源：package.json——原生 exe 的 VERSIONINFO 由 build-support
+ * 在构建时读它，安装版的版本是 `app-<v>` 目录名、便携版写在 portable 标记里，都由打包按它生成。
+ */
+export const VERSIONED_FILES = ["package.json", "docs/user-guide.md"] as const;
+
+/**
+ * 2.x 的 Node 实现（daemon、MCP、SQLite 仓储）。3.0 只拿它生成 2.x 夹具与跨实现对照（09 §6），
+ * 它写进数据里的版本就该是 2.x 的——钉在 LEGACY_VERSION，升版不动它们，残留检查也不看它们。
+ */
+export const LEGACY_VERSION = "2.0.0";
+export const LEGACY_VERSION_SITES = [
   "apps/daemon/src/runtime-discovery.ts",
   "apps/daemon/test/mcp-http.test.ts",
   "packages/mcp/src/server.ts",
   "packages/storage-sqlite/src/manager.ts",
-  "docs/user-guide.md",
 ] as const;
+
+/** 主版本 ≥ 3 是 3.x：与 install-state/src/startup.rs `is_v3` 同一规则。 */
+export function isV3(version: string): boolean {
+  const major = Number(version.split(/[.\-+]/u)[0]);
+  return Number.isSafeInteger(major) && major >= 3;
+}
 
 export function bumpVersion(root: string, from: string, to: string): string[] {
   const changed: string[] = [];
@@ -62,7 +75,8 @@ export function findVersionLeftovers(version: string, run: GrepRunner = defaultG
   return result.stdout
     .split("\n")
     .filter(Boolean)
-    .filter((line) => isVersionSiteLine(line, version));
+    .filter((line) => isVersionSiteLine(line, version))
+    .filter((line) => !LEGACY_VERSION_SITES.some((file) => line.startsWith(`${file}:`)));
 }
 
 function defaultGrep(args: string[]): { status: number | null; stdout: string } {

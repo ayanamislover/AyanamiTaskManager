@@ -1,13 +1,13 @@
 //! Windows ends a logon session by sending WM_QUERYENDSESSION / WM_ENDSESSION to top-level
 //! windows, then terminates the process as soon as WM_ENDSESSION returns. The quit chain
-//! never runs, so without a marker the next start reports a normal logoff as
-//! previous.unclean (lifecycle-diagnostics.ts). The main window may not exist (background
-//! start, window closed), hence a hidden top-level window of our own — message-only windows
-//! do not receive these broadcasts. It lives on the event-loop thread, whose pump
-//! dispatches to it.
+//! never runs. The main window may not exist (background start, window closed), hence a
+//! hidden top-level window of our own — message-only windows do not receive these
+//! broadcasts. It lives on the event-loop thread, whose pump dispatches to it.
+//!
+//! The lifecycle marker `session-end` (W5g) keeps a normal logoff from being reported as
+//! previous.unclean on the next start: it is the last record Windows lets us write.
 
 use std::sync::Mutex;
-use std::time::Duration;
 
 use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -16,20 +16,7 @@ use windows_sys::Win32::UI::WindowsAndMessaging::{
     WS_OVERLAPPED,
 };
 
-use crate::core_process::SessionMarker;
-
-/// Well inside the ~5 s Windows allows before it offers to kill "an app preventing shutdown".
-const MARK_TIMEOUT: Duration = Duration::from_millis(1500);
-
-static CURRENT: Mutex<Option<SessionMarker>> = Mutex::new(None);
-static DATA_DIR: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
-
-/// Called whenever the core is (re)started or has exited.
-pub fn set_core(marker: Option<SessionMarker>) {
-    if let Ok(mut current) = CURRENT.lock() {
-        *current = marker;
-    }
-}
+static LOG_ROOT: Mutex<Option<std::path::PathBuf>> = Mutex::new(None);
 
 fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
@@ -46,14 +33,7 @@ unsafe extern "system" fn window_proc(
         WM_QUERYENDSESSION => 1,
         WM_ENDSESSION => {
             if wparam != 0 {
-                let marker = CURRENT.lock().ok().and_then(|current| current.clone());
-                let confirmed = marker.is_some_and(|marker| marker.mark(MARK_TIMEOUT));
-                if let Some(dir) = DATA_DIR.lock().ok().and_then(|dir| dir.clone()) {
-                    crate::log(
-                        &dir,
-                        &format!("session end (core marker confirmed: {confirmed})"),
-                    );
-                }
+                ended();
             }
             0
         }
@@ -61,10 +41,21 @@ unsafe extern "system" fn window_proc(
     }
 }
 
+/// The session is ending: log it and leave the lifecycle marker. Also the smoke build's
+/// stand-in for a real logoff.
+pub fn ended() {
+    if let Some(dir) = LOG_ROOT.lock().ok().and_then(|dir| dir.clone()) {
+        crate::log(&dir, "session end");
+    }
+    if let Some(lifecycle) = crate::lifecycle::global() {
+        lifecycle.record(crate::lifecycle::Event::SessionEnd, &[]);
+    }
+}
+
 /// Creates the hidden window on the calling (event-loop) thread.
-pub fn install(data_dir: &std::path::Path) {
-    if let Ok(mut dir) = DATA_DIR.lock() {
-        *dir = Some(data_dir.to_path_buf());
+pub fn install(log_root: &std::path::Path) {
+    if let Ok(mut dir) = LOG_ROOT.lock() {
+        *dir = Some(log_root.to_path_buf());
     }
     let class = wide("AyanamiTaskManager.SessionEnd");
     unsafe {
@@ -91,7 +82,7 @@ pub fn install(data_dir: &std::path::Path) {
             std::ptr::null(),
         );
         if hwnd.is_null() {
-            crate::log(data_dir, "session-end window could not be created");
+            crate::log(log_root, "session-end window could not be created");
         }
     }
 }

@@ -15,8 +15,10 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   assertSandboxDataDir,
   exited,
+  realInstallRoots,
   smokeExecutable,
   smokeHostEnvironment,
+  v3Root,
 } from "../../../scripts/smoke-host.js";
 
 // 手动烟测（窗口、历史、毛玻璃、登录启动、bridge 内存）共用这道闸：数据根只能在 output/ 下，
@@ -77,20 +79,86 @@ describe("烟测数据根沙箱", () => {
     ).toThrow(/真实数据根/u);
   });
 
-  it("宿主环境去掉继承的数据根别名，Node 子进程拿合成 home", () => {
-    const previous = process.env.AYANAMI_TASK_DATA_DIR;
+  it("宿主环境去掉继承的数据根别名，N 落在合成 home 里，Agent 接入拿合成 home", () => {
+    const previous = {
+      AYANAMI_TASK_DATA_DIR: process.env.AYANAMI_TASK_DATA_DIR,
+      ATM3_DATA_DIR: process.env.ATM3_DATA_DIR,
+    };
     process.env.AYANAMI_TASK_DATA_DIR = "C:\\real";
+    // 外面设过 ATM3_DATA_DIR（比如指着真实的 N）：烟测宿主不能把 N 写到那里去。
+    process.env.ATM3_DATA_DIR = "C:\\real-v3";
     try {
       const env = smokeHostEnvironment("C:\\sandbox\\data", "C:\\sandbox\\home");
       expect(env.ATM_DATA_DIR).toBe("C:\\sandbox\\data");
       expect(env.AYANAMI_TASK_DATA_DIR).toBeUndefined();
+      expect(env.ATM3_DATA_DIR).toBe(v3Root("C:\\sandbox\\home"));
+      expect(v3Root("C:\\sandbox\\home")).toBe(
+        join("C:\\sandbox\\home", "Local", "AyanamiTaskManager3"),
+      );
       expect(env.ATM_SMOKE_CORE_USERPROFILE).toBe("C:\\sandbox\\home");
       expect(env.APPDATA).toBe(join("C:\\sandbox\\home", "Roaming"));
       expect(env.LOCALAPPDATA).toBe(join("C:\\sandbox\\home", "Local"));
     } finally {
-      if (previous === undefined) delete process.env.AYANAMI_TASK_DATA_DIR;
-      else process.env.AYANAMI_TASK_DATA_DIR = previous;
+      for (const [key, value] of Object.entries(previous))
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
     }
+  });
+
+  // Windows 的变量名不分大小写：外面以别的大小写设过的数据根变量，也不能和沙箱的那份并存。
+  it("继承来的数据根变量换了大小写也去掉，子进程环境里只有沙箱的那一份", () => {
+    const previous = process.env.ATM3_DATA_DIR;
+    delete process.env.ATM3_DATA_DIR;
+    process.env.Atm3_Data_Dir = "C:\\real-v3";
+    try {
+      const env = smokeHostEnvironment("C:\\sandbox\\data", "C:\\sandbox\\home");
+      const same = (name: string) => Object.keys(env).filter((key) => key.toUpperCase() === name);
+      for (const name of ["ATM_DATA_DIR", "ATM3_DATA_DIR", "APPDATA", "LOCALAPPDATA"])
+        expect(same(name), name).toEqual([name]);
+      expect(Object.values(env)).not.toContain("C:\\real-v3");
+    } finally {
+      delete process.env.Atm3_Data_Dir;
+      if (previous !== undefined) process.env.ATM3_DATA_DIR = previous;
+    }
+  });
+
+  it("真实的 L、N 与安装根都在拒绝之列", () => {
+    const roots = realInstallRoots({ LOCALAPPDATA: "C:\\Users\\u\\AppData\\Local" });
+    for (const name of ["AyanamiTaskManager", "AyanamiTaskManager3", "AyanamiTaskManagerDesktop"])
+      expect(roots).toContain(join("C:\\Users\\u\\AppData\\Local", name));
+  });
+
+  // 3.x 单进程：运行文件、WebView 数据、lifecycle / host 日志都在 N。按 L 去找，烟测要么一直等到超时，
+  // 要么断言落空（2.x 的 core 才写 lifecycle-core.ndjson、才有 atm-core.exe）。
+  it("烟测脚本从 N 读运行文件、WebView 端口与日志", () => {
+    const scripts = join(process.cwd(), "scripts");
+    const smokes = readdirSync(scripts)
+      .filter((name) => name.endsWith(".ts"))
+      .filter((name) => {
+        const source = readFileSync(join(scripts, name), "utf8");
+        return name === "packaged-smoke.ts" || source.includes('from "./smoke-host.js"');
+      });
+    expect(smokes.length).toBeGreaterThanOrEqual(12);
+    expect(smokes).toContain("budget-measure.ts");
+    const legacyLayout =
+      /join\(\s*(?:dataDir|runDir|sandbox\.dataDir|box\.dataDir)\s*,\s*"(?:runtime|webview|logs)"/u;
+    for (const name of smokes) {
+      const source = readFileSync(join(scripts, name), "utf8");
+      expect(source, name).not.toMatch(legacyLayout);
+      expect(source, name).not.toContain("lifecycle-core.ndjson");
+      expect(source, name).not.toContain("atm-core.exe");
+      expect(source, name).not.toMatch(
+        /(?:runtimeFile|devToolsPortFile)\(\s*sandbox\.dataDir\s*\)/u,
+      );
+      // 以 Agent 身份调服务只能走 agentFetch：Node 自带的 fetch 带 Sec-Fetch-Mode，服务一律拒绝。
+      expect(source, name).not.toMatch(
+        /(?<![A-Za-z])fetch\(\s*`\$\{\w*(?:runtime|Runtime)\w*\.endpoint/u,
+      );
+      expect(source, name).not.toMatch(/new AyanamiClient\((?![^)]*fetchImpl: agentFetch)/u);
+    }
+    const packaged = readFileSync(join(scripts, "packaged-smoke.ts"), "utf8");
+    expect(packaged).toContain('const v3Dir = join(smokeLocalAppData, "AyanamiTaskManager3");');
+    expect(packaged).toMatch(/ATM_DATA_DIR: dataDir,\s*ATM3_DATA_DIR: v3Dir,/u);
   });
 });
 
@@ -151,6 +219,22 @@ describe("烟测宿主与子进程", () => {
   });
 
   // 先启动宿主、后拍 Run 快照的话，快照读失败时宿主已经起来了却没人收拾（Codex R5-P2-3）。
+  // 单实例管道在进程退出时才放开，运行文件在 Withdrawn 时就删了：只等文件消失，下一次启动会被
+  // 转交给还没退干净的那个实例，自己以 0 退出（W8d-5 全链实测）。
+  it("shim 唤醒的实例退出后，按 pid 等到进程真的没了再往下走", () => {
+    const source = readFileSync("scripts/packaged-smoke.ts", "utf8");
+    const body = source.slice(
+      source.indexOf("async function checkShimWakesApp("),
+      source.indexOf("async function checkMcpProcessOutlivesHandshake("),
+    );
+    expect(body).toContain('(JSON.parse(readFileSync(runtimePath, "utf8")) as Runtime).pid');
+    expect(body).toMatch(/existsSync\(runtimePath\) \|\| \(woken !== null && alive\(woken\)\)/u);
+    expect(body).toContain("wokenGone = woken !== null && !alive(woken);");
+    expect(body).toContain(
+      'check("唤醒的实例经 --smoke-quit 退出", !existsSync(runtimePath) && wokenGone);',
+    );
+  });
+
   it("每个直接启动烟测宿主的脚本都先拍 Run 快照", () => {
     const scripts = join(process.cwd(), "scripts");
     const starting = readdirSync(scripts)

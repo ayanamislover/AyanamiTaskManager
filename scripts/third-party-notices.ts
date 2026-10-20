@@ -3,21 +3,27 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { unzipSync } from "fflate";
+import {
+  RENDERER_PACKAGES_FILE,
+  type RendererPackage,
+} from "../apps/desktop/scripts/renderer-packages.js";
 
 /**
  * 版本目录里的 THIRD_PARTY_NOTICES.txt：随包分发的第三方组件及其许可证原文。
  *
- * 三处来源，各按「实际进了包的」收：
- * - Rust：宿主、根启动器、安装器与 MCP shim 经正常依赖（不含 build/dev 依赖）链接进来的 crate，
- *   取自 `cargo metadata`（--locked、Windows x64 目标），许可证文件取自 crate 源码目录；
- * - npm：core/CLI/renderer 打包进来的生产依赖（根与各 workspace 的 dependencies 及其传递依赖，
- *   含已安装的 peer 依赖），许可证文件取自 node_modules；
- * - Node.js 运行时：`third_party/node/LICENSE`，`third_party/node/VERSION` 必须等于随包的版本。
- *   缺了或版本对不上就写入 NODE_LICENSE_PENDING——包照样能打（本机验收要用），
- *   assemble-release 见到这个标记拒绝组装候选，不会发出去。
+ * 3.0 的包是单进程、没有 Node（W8a），两处来源，各按「实际进了包的」收：
+ * - Rust：宿主、根启动器、安装器、atm.exe 与 MCP shim 经正常依赖（不含 build/dev 依赖）链接进来的
+ *   crate，取自 `cargo metadata`（--locked、Windows x64 目标），许可证文件取自 crate 源码目录；
+ * - npm：renderer bundle 里实际打进去的包（Vite 构建时记下的 `dist/renderer-packages.json`），
+ *   许可证文件取自各自的包目录。
+ *
+ * 有组件既没有许可文本、又补不上标准 MIT 时写入 LICENSE_TEXT_PENDING——包照样能打（本机验收要用），
+ * assemble-release 见到这个标记拒绝组装候选，不会发出去。
  */
 export const THIRD_PARTY_NOTICES = "THIRD_PARTY_NOTICES.txt";
-export const NODE_LICENSE_PENDING = "NODE_LICENSE_PENDING";
+export const LICENSE_TEXT_PENDING = "LICENSE_TEXT_PENDING";
+/** 链接进包里各个 exe 的工作区 crate（atm-mcp 在 mcp-shim 自己的工作区里）。 */
+export const PACKAGED_CRATES = ["atm-host", "atm-launcher", "atm-setup", "atm-cli"] as const;
 
 type Component = {
   ecosystem: "cargo" | "npm";
@@ -144,52 +150,28 @@ type PackageJson = {
   version?: string;
   license?: string | { type?: string };
   author?: string | { name?: string };
-  dependencies?: Record<string, string>;
-  optionalDependencies?: Record<string, string>;
-  peerDependencies?: Record<string, string>;
 };
 
-function packageDirectory(name: string, from: string, root: string): string | null {
-  for (let current = from; ; current = dirname(current)) {
-    const candidate = join(current, "node_modules", ...name.split("/"));
-    if (existsSync(join(candidate, "package.json"))) return candidate;
-    if (resolve(current) === resolve(root) || dirname(current) === current) return null;
-  }
-}
-
 /**
- * 根与各 workspace 的生产依赖（排除本仓自己的 @ayanami-task/*）及其传递依赖。
- *
- * peer 依赖由使用方提供：装了就是会被一起打进去的那一份，要收；没装说明没人用到。可选依赖
- * 没装是别的平台的预编译包。必需的 dependencies 没装则是依赖树坏了——不能默默少列一项。
+ * renderer bundle 里实际打进去的 npm 包（vite.config.ts 构建时写的清单）。没有清单说明 renderer
+ * 没构建过——不能拿空集当「没有 npm 组件」。
  */
 export function npmComponents(root: string): Component[] {
-  const manifests = [
-    join(root, "package.json"),
-    ...["apps", "packages"].flatMap((group) =>
-      readdirSync(join(root, group), { withFileTypes: true })
-        .filter((entry) => entry.isDirectory())
-        .map((entry) => join(root, group, entry.name, "package.json"))
-        .filter((path) => existsSync(path)),
-    ),
-  ];
-  const pending: Array<[string, string, boolean]> = manifests.flatMap((manifest) =>
-    Object.keys((JSON.parse(readFileSync(manifest, "utf8")) as PackageJson).dependencies ?? {})
-      .filter((name) => !name.startsWith("@ayanami-task/"))
-      .map((name): [string, string, boolean] => [name, dirname(manifest), true]),
-  );
+  const listing = join(root, "apps", "desktop", "dist", RENDERER_PACKAGES_FILE);
+  if (!existsSync(listing))
+    throw new Error(
+      `NOTICES_RENDERER_PACKAGES_MISSING: ${RENDERER_PACKAGES_FILE}（先构建 renderer）`,
+    );
+  const packages = JSON.parse(readFileSync(listing, "utf8")) as RendererPackage[];
   const found = new Map<string, Component>();
-  while (pending.length > 0) {
-    const [name, from, required] = pending.pop()!;
-    const directory = packageDirectory(name, from, root);
-    if (!directory) {
-      if (required) throw new Error(`NOTICES_DEPENDENCY_MISSING: ${name}（${from} 需要它）`);
-      continue;
-    }
+  for (const entry of packages) {
+    const directory = resolve(root, entry.dir);
+    if (!existsSync(join(directory, "package.json")))
+      throw new Error(`NOTICES_DEPENDENCY_MISSING: ${entry.name}（${entry.dir}）`);
     const manifest = JSON.parse(
       readFileSync(join(directory, "package.json"), "utf8"),
     ) as PackageJson;
-    const key = `${name}@${manifest.version ?? "?"}`;
+    const key = `${entry.name}@${manifest.version ?? "?"}`;
     if (found.has(key)) continue;
     const license =
       typeof manifest.license === "string"
@@ -197,7 +179,7 @@ export function npmComponents(root: string): Component[] {
         : (manifest.license?.type ?? "(see license file)");
     found.set(key, {
       ecosystem: "npm",
-      name,
+      name: entry.name,
       version: manifest.version ?? "?",
       license,
       authors:
@@ -208,30 +190,11 @@ export function npmComponents(root: string): Component[] {
             : [],
       texts: licenseTexts(directory),
     });
-    const optional = new Set(Object.keys(manifest.optionalDependencies ?? {}));
-    for (const dependency of Object.keys(manifest.dependencies ?? {}))
-      pending.push([dependency, directory, !optional.has(dependency)]);
-    for (const dependency of [...optional, ...Object.keys(manifest.peerDependencies ?? {})])
-      pending.push([dependency, directory, false]);
   }
   return [...found.values()];
 }
 
-function nodeSection(root: string, nodeVersion: string): string {
-  const license = join(root, "third_party", "node", "LICENSE");
-  const versionFile = join(root, "third_party", "node", "VERSION");
-  const recorded = existsSync(versionFile) ? readFileSync(versionFile, "utf8").trim() : null;
-  const heading = `Node.js ${nodeVersion} (runtime\\atm-core.exe) — MIT and bundled third-party licenses`;
-  if (!existsSync(license) || recorded !== nodeVersion)
-    return `${heading}\n\n${NODE_LICENSE_PENDING}: third_party/node/LICENSE for ${nodeVersion} is not in the repository (VERSION: ${recorded ?? "missing"}).`;
-  return `${heading}\n\n${readFileSync(license, "utf8").replace(/\r\n/gu, "\n").trimEnd()}`;
-}
-
-export function renderThirdPartyNotices(input: {
-  root: string;
-  nodeVersion: string;
-  components: readonly Component[];
-}): string {
+export function renderThirdPartyNotices(input: { components: readonly Component[] }): string {
   const rule = "=".repeat(78);
   const sorted = [...input.components].sort(
     (left, right) =>
@@ -240,7 +203,6 @@ export function renderThirdPartyNotices(input: {
       left.version.localeCompare(right.version),
   );
   const sections = [
-    nodeSection(input.root, input.nodeVersion),
     ...sorted.map((component) => {
       const head = `${component.name} ${component.version} (${component.ecosystem}) — ${component.license}`;
       const body =
@@ -248,7 +210,7 @@ export function renderThirdPartyNotices(input: {
           ? component.texts.map((text) => `--- ${text.file} ---\n${text.text}`).join("\n\n")
           : component.license === "MIT"
             ? `--- MIT (the package ships no license file) ---\n${standardMit(component.authors)}`
-            : "No license file is shipped in this package; its declared license is stated above.";
+            : `${LICENSE_TEXT_PENDING}: no license file is shipped in this package; its declared license is stated above.`;
       return `${head}\n\n${body}`;
     }),
   ];
@@ -261,17 +223,99 @@ export function renderThirdPartyNotices(input: {
   );
 }
 
-export function buildThirdPartyNotices(root: string, nodeVersion = process.version): string {
+/** 实际随包分发的第三方组件（去重）：notices 与 SBOM 用同一份清单。 */
+export function shippedComponents(root: string): Component[] {
   const native = join(root, "apps", "desktop", "native");
   const components = [
-    ...cargoComponents(native, ["atm-host", "atm-launcher", "atm-setup"]),
+    ...cargoComponents(native, PACKAGED_CRATES),
     ...cargoComponents(join(native, "mcp-shim"), ["atm-mcp"]),
     ...npmComponents(root),
   ];
   const unique = new Map(
     components.map((entry) => [`${entry.ecosystem}:${entry.name}@${entry.version}`, entry]),
   );
-  return renderThirdPartyNotices({ root, nodeVersion, components: [...unique.values()] });
+  return [...unique.values()];
+}
+
+export function buildThirdPartyNotices(root: string): string {
+  return renderThirdPartyNotices({ components: shippedComponents(root) });
+}
+
+/**
+ * SPDX 2.3 的 SBOM：产品本身，加上实际随包分发的组件（Rust crate 与 renderer 里的 npm 包）——
+ * 不是 package.json 的依赖表（那里大半是只在构建与测试里用的开发依赖，3.0 的包里没有 Node）。
+ */
+export function buildSbom(input: {
+  product: string;
+  version: string;
+  license: string;
+  namespace: string;
+  created: string;
+  components: ReadonlyArray<Pick<Component, "ecosystem" | "name" | "version" | "license">>;
+}): Record<string, unknown> {
+  const id = (component: { ecosystem: string; name: string; version: string }) =>
+    `SPDXRef-Package-${component.ecosystem}-${component.name}-${component.version}`.replace(
+      /[^A-Za-z0-9.-]+/gu,
+      "-",
+    );
+  const sorted = [...input.components].sort(
+    (left, right) =>
+      left.ecosystem.localeCompare(right.ecosystem) ||
+      left.name.localeCompare(right.name) ||
+      left.version.localeCompare(right.version),
+  );
+  // 声明的许可证是 SPDX 表达式（MIT OR Apache-2.0、Apache-2.0 WITH LLVM-exception）才照写，其余写 NOASSERTION。
+  const spdxLicense = (license: string) =>
+    /^[A-Za-z0-9.+-]+(?: (?:AND|OR|WITH) [A-Za-z0-9.+-]+)*$/u.test(license.replaceAll("/", " OR "))
+      ? license.replaceAll("/", " OR ")
+      : "NOASSERTION";
+  return {
+    spdxVersion: "SPDX-2.3",
+    dataLicense: "CC0-1.0",
+    SPDXID: "SPDXRef-DOCUMENT",
+    name: `${input.product}-${input.version}`,
+    documentNamespace: input.namespace,
+    creationInfo: {
+      created: input.created,
+      creators: ["Tool: AyanamiTaskManager release assembler"],
+    },
+    documentDescribes: ["SPDXRef-Package-AyanamiTaskManager"],
+    packages: [
+      {
+        name: input.product,
+        SPDXID: "SPDXRef-Package-AyanamiTaskManager",
+        versionInfo: input.version,
+        downloadLocation: "NOASSERTION",
+        filesAnalyzed: false,
+        licenseConcluded: input.license,
+        licenseDeclared: input.license,
+        copyrightText: "NOASSERTION",
+      },
+      ...sorted.map((component) => ({
+        name: component.name,
+        SPDXID: id(component),
+        versionInfo: component.version,
+        downloadLocation: "NOASSERTION",
+        filesAnalyzed: false,
+        licenseConcluded: "NOASSERTION",
+        licenseDeclared: spdxLicense(component.license),
+        copyrightText: "NOASSERTION",
+        externalRefs: [
+          {
+            referenceCategory: "PACKAGE-MANAGER",
+            referenceType: "purl",
+            // purl：npm 作用域的 @ 要编码成 %40（pkg:npm/%40scope/name@1.0.0）。
+            referenceLocator: `pkg:${component.ecosystem}/${component.name.replace(/^@/u, "%40")}@${component.version}`,
+          },
+        ],
+      })),
+    ],
+    relationships: sorted.map((component) => ({
+      spdxElementId: "SPDXRef-Package-AyanamiTaskManager",
+      relationshipType: "CONTAINS",
+      relatedSpdxElement: id(component),
+    })),
+  };
 }
 
 export type ReleaseNoticesStatus = { distributable: boolean; sha256: string };
@@ -279,7 +323,7 @@ export type ReleaseNoticesStatus = { distributable: boolean; sha256: string };
 /**
  * 发出去的是归档，不是 output 里旁边那个松散的版本目录：从版本 zip 与便携 zip 里取出
  * notices，两份必须逐字节相同、且等于版本清单逐文件记下的哈希（setup 按清单校验安装）。
- * 没有 Node 待补标记才算可分发。
+ * 没有许可文本待补标记才算可分发。
  */
 export function releaseNoticesStatus(input: {
   packageZip: Uint8Array;
@@ -304,7 +348,7 @@ export function releaseNoticesStatus(input: {
   if (listed?.sha256.toLowerCase() !== sha256)
     throw new Error("RELEASE_NOTICES_MISMATCH: 版本清单记录的声明哈希与归档不符");
   return {
-    distributable: !Buffer.from(inPackage).toString("utf8").includes(NODE_LICENSE_PENDING),
+    distributable: !Buffer.from(inPackage).toString("utf8").includes(LICENSE_TEXT_PENDING),
     sha256,
   };
 }

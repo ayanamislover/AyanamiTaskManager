@@ -1,8 +1,12 @@
-//! Discovery of the running daemon through `runtime/daemon.json`.
+//! Discovery of the running service through `runtime/daemon.json` under the 3.0 data
+//! root (`ATM3_DATA_DIR`, else `%LOCALAPPDATA%\AyanamiTaskManager3`). The 2.x root is
+//! never consulted: a 3.0 bridge talking to a 2.x daemon would speak the wrong surface.
 //!
-//! The error categories mirror the JavaScript bridge, because they decide what the
-//! caller does next: `DescriptorInvalid` fails the request at once, everything else
-//! means "not up yet" and is waited out (with one wake attempt).
+//! The error categories decide what the caller does next: `DescriptorInvalid` fails the
+//! request at once, everything else means "not up yet" and is waited out (with one wake
+//! attempt) — unless `runtime/startup-state.json` says the host is waiting for the user
+//! to pick a data source (07 §7), or `runtime/damaged.json` says the database has to be
+//! restored from a backup first (W8h): no amount of waiting fixes either.
 
 use serde_json::Value;
 use std::path::PathBuf;
@@ -23,13 +27,106 @@ pub enum RuntimeError {
     NotReady,
 }
 
+/// The 3.0 data root `N`, resolved exactly like setup and the host
+/// (`atm_install_state::v3_root`): an empty override falls through.
 pub fn data_directory() -> Option<PathBuf> {
-    // Empty values are falsy in the old bridge and fall through, so they do here too.
-    if let Some(dir) = std::env::var_os("ATM_DATA_DIR").filter(|v| !v.is_empty()) {
+    if let Some(dir) = std::env::var_os("ATM3_DATA_DIR").filter(|v| !v.is_empty()) {
         return Some(PathBuf::from(dir));
     }
     let base = std::env::var_os("LOCALAPPDATA").filter(|v| !v.is_empty())?;
-    Some(PathBuf::from(base).join("AyanamiTaskManager"))
+    Some(PathBuf::from(base).join("AyanamiTaskManager3"))
+}
+
+/// `N/runtime/startup-state.json` says the host is in SOURCE_CONFLICT: it serves nothing
+/// until the user chooses a data source in the ATM window. Returns the reason to report.
+/// A file that exists but cannot be read or parsed still counts as a conflict, like the
+/// host's own reading of it: a broken file must not turn into "keep waiting".
+pub fn source_conflict() -> Option<String> {
+    let path = data_directory()?.join("runtime").join("startup-state.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return Some("the startup state cannot be read".to_owned()),
+    };
+    let value: Option<Value> = serde_json::from_slice(&bytes).ok();
+    match value
+        .as_ref()
+        .and_then(|v| v.get("state"))
+        .and_then(Value::as_str)
+    {
+        Some("SOURCE_CONFLICT") => Some(
+            value
+                .as_ref()
+                .and_then(|v| v.get("reason"))
+                .and_then(Value::as_str)
+                .unwrap_or("data source conflict")
+                .to_owned(),
+        ),
+        Some(_) => None,
+        None => Some("the startup state is corrupt".to_owned()),
+    }
+}
+
+/// What a caller waiting for the service reports about `runtime/damaged.json`, once it has
+/// woken the desktop or found none to wake (W8 r8 P2-01). A state left by an earlier run may
+/// be stale: the database may have been put right outside ATM, and the woken host deletes
+/// the file once it is up. So while there is time left after a wake it counts only when the
+/// running host wrote it ([`damaged_by_the_running_host`]). With no desktop to wake, or when
+/// time is up, what is there is all there is.
+pub fn damaged_report(wake: crate::process::Wake, out_of_time: bool) -> Option<String> {
+    damaged_report_in(&data_directory()?, wake, out_of_time)
+}
+
+fn damaged_report_in(
+    root: &std::path::Path,
+    wake: crate::process::Wake,
+    out_of_time: bool,
+) -> Option<String> {
+    match wake {
+        crate::process::Wake::Started if !out_of_time => damaged_by_the_running_host(root),
+        _ => damaged_in(root),
+    }
+}
+
+/// `runtime/damaged.json` was written by a host that is still running: the writer it records
+/// (pid and start time, W8 r9 P2-01b) is the live process with that pid. The host rewrites
+/// the file every time it finds the database unreadable. File times are not used: the clock
+/// may have moved, and a copied file carries its old time.
+///
+/// The writer is taken only from a body the store would accept (W8 r10 P2-01c): a broken body
+/// with a valid writer is a broken file, waited out like one, as atm.exe does.
+pub fn damaged_by_the_running_host(root: &std::path::Path) -> Option<String> {
+    let bytes = std::fs::read(root.join("runtime").join("damaged.json")).ok()?;
+    let (reason, writer) = damaged_state(&bytes)?;
+    let (pid, started) = writer?;
+    (crate::process::pid_alive(pid) && crate::identity::started_at_ms(pid)? == started)
+        .then_some(reason)
+}
+
+/// `runtime/damaged.json` read by the same code the store uses (`atm_damaged_state`, W8 r11
+/// P2-01d), so atm.exe and this bridge judge every file alike. `None` is a broken file; else the
+/// reason and, from that same body, the writer if it names one.
+fn damaged_state(bytes: &[u8]) -> Option<(String, Option<(u32, u64)>)> {
+    let state = atm_damaged_state::DamagedState::parse(bytes)?;
+    Some((state.reason, state.writer.map(|w| (w.pid, w.started_at_ms))))
+}
+
+/// `N/runtime/damaged.json` says the published database cannot be read (W8h): the host serves
+/// nothing until the user restores a backup with `atm recover --offline`. Returns the reason to
+/// report. A file that exists but cannot be read or parsed still counts, like the host's own
+/// reading of it.
+fn damaged_in(root: &std::path::Path) -> Option<String> {
+    let path = root.join("runtime").join("damaged.json");
+    let bytes = match std::fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return None,
+        Err(_) => return Some("the damaged state cannot be read".to_owned()),
+    };
+    Some(
+        damaged_state(&bytes)
+            .map(|(reason, _)| reason)
+            .unwrap_or_else(|| "the damaged state is corrupt".to_owned()),
+    )
 }
 
 pub fn load() -> Result<Runtime, RuntimeError> {
@@ -89,11 +186,21 @@ pub fn parse(value: &Value) -> Result<Runtime, RuntimeError> {
         .get("version")
         .and_then(Value::as_str)
         .is_some_and(|v| !v.is_empty());
-    let started_ok = map
-        .get("startedAt")
-        .and_then(Value::as_str)
-        .is_some_and(parses_as_date);
-    if !version_ok || !started_ok {
+    // Optional in 3.x; validated when present.
+    let started_ok = match map.get("startedAt") {
+        None => true,
+        Some(v) => v.as_str().is_some_and(parses_as_date),
+    };
+    // 3.x: one process that is host and service, one generation (setup checks the same).
+    let layout_ok = match map.get("layout") {
+        None => true,
+        Some(v) => v.as_str() == Some("single"),
+    };
+    let generation_ok = match map.get("generation") {
+        None => true,
+        Some(v) => safe_positive_integer(v).is_some(),
+    };
+    if !version_ok || !started_ok || !layout_ok || !generation_ok {
         return Err(invalid);
     }
 
@@ -258,6 +365,108 @@ mod tests {
         d
     }
 
+    fn scratch(name: &str) -> std::path::PathBuf {
+        // Under this crate's target directory, not %TEMP%.
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("target")
+            .join(format!("atm-mcp-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("runtime")).unwrap();
+        root
+    }
+
+    fn leave_damaged(root: &std::path::Path, reason: &str, writer: Option<(u32, u64)>) {
+        let mut state = json!({ "state": "DATABASE_DAMAGED", "since": "s", "generation": "G", "reason": reason });
+        if let Some((pid, started)) = writer {
+            state["writer"] = json!({ "pid": pid, "startedAtMs": started });
+        }
+        std::fs::write(root.join("runtime").join("damaged.json"), state.to_string()).unwrap();
+    }
+
+    /// W8 r8 P2-01, r9 P2-01b: after a wake, a damaged state is reported while there is time left
+    /// only when the host that wrote it is still running; with no desktop to wake, or when time
+    /// is up, what is there is reported. File times play no part.
+    #[test]
+    fn a_leftover_damaged_state_counts_only_once_the_running_host_writes_it() {
+        use crate::process::Wake;
+        let root = scratch("damaged-host");
+        leave_damaged(&root, "old", None);
+        // No writer recorded: left by an earlier run, reported only when there is nothing to wait for.
+        assert_eq!(damaged_report_in(&root, Wake::Started, false), None);
+        assert_eq!(
+            damaged_report_in(&root, Wake::Started, true).as_deref(),
+            Some("old")
+        );
+        assert_eq!(
+            damaged_report_in(&root, Wake::Impossible, false).as_deref(),
+            Some("old")
+        );
+        // A time in the future does not make it current.
+        std::fs::File::options()
+            .write(true)
+            .open(root.join("runtime").join("damaged.json"))
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + std::time::Duration::from_secs(3_600))
+            .unwrap();
+        assert_eq!(damaged_report_in(&root, Wake::Started, false), None);
+
+        // This test process plays the running host.
+        let me = std::process::id();
+        let started = crate::identity::started_at_ms(me).unwrap();
+        leave_damaged(&root, "fresh", Some((me, started)));
+        assert_eq!(
+            damaged_report_in(&root, Wake::Started, false).as_deref(),
+            Some("fresh")
+        );
+        // The same pid with another start time is a reused pid.
+        leave_damaged(&root, "fresh", Some((me, started - 1)));
+        assert_eq!(damaged_report_in(&root, Wake::Started, false), None);
+        // W8 r10 P2-01c: a broken body with a valid writer is a broken file, waited out like
+        // one (atm.exe reads it the same way), and reported as corrupt when there is nothing
+        // to wait for.
+        let writer = json!({ "pid": me, "startedAtMs": started });
+        for body in [
+            json!({ "writer": writer }),
+            json!({ "state": "OTHER", "since": "s", "generation": "G", "reason": "r", "writer": writer }),
+            json!({ "state": "DATABASE_DAMAGED", "generation": "G", "reason": "r", "writer": writer }),
+            json!({ "state": "DATABASE_DAMAGED", "since": "s", "generation": "G", "reason": 7, "writer": writer }),
+        ] {
+            std::fs::write(root.join("runtime").join("damaged.json"), body.to_string()).unwrap();
+            assert_eq!(
+                damaged_report_in(&root, Wake::Started, false),
+                None,
+                "{body}"
+            );
+            assert_eq!(
+                damaged_report_in(&root, Wake::Impossible, false).as_deref(),
+                Some("the damaged state is corrupt"),
+                "{body}"
+            );
+        }
+        // W8 r11 P2-01d: the bytes the store's test also reads (atm_damaged_state::corpus) read
+        // the same here, straight and through the file.
+        for (bytes, expect) in atm_damaged_state::corpus::cases(me, started) {
+            let shown = String::from_utf8_lossy(&bytes).into_owned();
+            assert_eq!(damaged_state(&bytes), expect, "{shown}");
+            std::fs::write(root.join("runtime").join("damaged.json"), &bytes).unwrap();
+            let current = matches!(&expect, Some((_, Some(_))));
+            assert_eq!(
+                damaged_report_in(&root, Wake::Started, false),
+                expect.as_ref().filter(|_| current).map(|(r, _)| r.clone()),
+                "{shown}"
+            );
+            assert_eq!(
+                damaged_report_in(&root, Wake::Impossible, false),
+                Some(expect.map_or("the damaged state is corrupt".to_owned(), |(r, _)| r)),
+                "{shown}"
+            );
+        }
+        // The host deleted it: nothing to report even when time is up.
+        std::fs::remove_file(root.join("runtime").join("damaged.json")).unwrap();
+        assert_eq!(damaged_report_in(&root, Wake::Started, true), None);
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
     #[test]
     fn accepts_what_the_daemon_publishes() {
         assert_eq!(
@@ -335,6 +544,9 @@ mod tests {
             ("version", json!("")),
             ("startedAt", json!("yesterday")),
             ("startedAt", json!("2026-13-01T00:00:00Z")),
+            ("layout", json!("host-and-core")),
+            ("generation", json!(0)),
+            ("generation", json!("1")),
         ];
         for (key, value) in cases {
             assert_eq!(
@@ -347,6 +559,12 @@ mod tests {
         assert!(parse(&with("token", json!("x".repeat(512)))).is_ok());
         assert!(parse(&with("token", json!("😀".repeat(257)))).is_err());
         assert!(parse(&with("pid", json!(42.0))).is_ok());
+        // What the 3.x host adds is accepted; startedAt may be absent.
+        assert!(parse(&with("layout", json!("single"))).is_ok());
+        assert!(parse(&with("generation", json!(3))).is_ok());
+        let mut bare = descriptor();
+        bare.as_object_mut().unwrap().remove("startedAt");
+        assert!(parse(&bare).is_ok());
     }
 
     #[test]

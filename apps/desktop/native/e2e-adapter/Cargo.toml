@@ -1,0 +1,29 @@
+[package]
+name = "atm-e2e-adapter"
+version = "0.0.0"
+description = "ATM 3 e2e adapter: serves the in-process UI API over loopback HTTP for the Playwright suite (test builds only)"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+# 只给 Playwright 用例（W5d，09 §2）：浏览器里的界面经它进 ui-bridge，主体是 User/E2eTest。
+# 不进安装包；没有 `e2e` feature 就不构建这个二进制（发布守卫核对安装包里没有它）。
+[[bin]]
+name = "atm-core-e2e"
+path = "src/main.rs"
+required-features = ["e2e"]
+
+[features]
+e2e = ["atm-domain/e2e", "atm-ui-bridge/e2e"]
+
+[dependencies]
+atm-domain = { path = "../domain" }
+atm-install-state = { path = "../install-state" }
+atm-runtime = { path = "../runtime" }
+atm-store = { path = "../store" }
+atm-ui-bridge = { path = "../ui-bridge" }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+serde_json = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }

@@ -1,8 +1,6 @@
-import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { copyFile, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
-import Database from "better-sqlite3";
 import {
   createReleaseResumeEvidence,
   identifyReleaseArtifact,
@@ -24,9 +22,18 @@ import {
   type StageDecisions,
 } from "./release-report.js";
 import { verifyReleaseSource, type ReleaseFingerprint } from "./release-fingerprint.js";
-import { APP_LAYOUT } from "./app-layout.js";
 import { MIN_WEBVIEW2, portableZipName } from "./package-native.js";
-import { releaseNoticesStatus } from "./third-party-notices.js";
+import { buildSbom, releaseNoticesStatus, shippedComponents } from "./third-party-notices.js";
+import {
+  candidateBindingMismatches,
+  readCandidateBinaries,
+  zipBinaries,
+  type BinarySet,
+  type BoundReports,
+} from "./candidate-binaries.js";
+import { budgetReportProblems } from "./budget-verdicts.js";
+import { powerLossReportProblems, type PowerLossReport } from "./power-loss-report.js";
+import { isV3 } from "./version-sites.js";
 
 type Artifact = ReleaseArtifactIdentity;
 type Verification = {
@@ -47,10 +54,15 @@ type SmokeReport = {
   passed: boolean;
   completedAt: string;
   checks: Array<{ passed: boolean }>;
+  /** 这份报告测的那份 exe 的哈希（候选绑定 L6）。 */
+  binaries?: Partial<BinarySet>;
 };
 
-/** distribution-smoke 记下安装验收是做了还是因为机器上已有安装而显式跳过。 */
-type DistributionReport = SmokeReport & { installed: "verified" | "skipped" };
+/** distribution-smoke 记下安装验收是做了还是因为不是声明过的干净机器而跳过。 */
+type DistributionReport = Omit<SmokeReport, "binaries"> & {
+  installed: "verified" | "skipped";
+  binaries?: Partial<BinarySet> | null;
+};
 
 const assembleArguments = process.argv.slice(2);
 const unknownArguments = assembleArguments.filter((argument) => argument !== "--local-only");
@@ -68,8 +80,6 @@ const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"
   productName: string;
   version: string;
   license: string;
-  dependencies: Record<string, string>;
-  devDependencies: Record<string, string>;
 };
 
 async function digest(path: string): Promise<string> {
@@ -80,7 +90,7 @@ async function readJson<T>(path: string): Promise<T> {
   return JSON.parse(await readFile(path, "utf8")) as T;
 }
 
-function assertSmokeReport(name: string, report: SmokeReport): void {
+function assertSmokeReport(name: string, report: Pick<SmokeReport, "passed" | "checks">): void {
   if (
     report.passed !== true ||
     report.checks.length === 0 ||
@@ -104,31 +114,18 @@ function latestSchema(directory: string): number {
 }
 
 /**
- * 发布清单描述的是实际交付的运行时：直接问包里那个改了名的 node（runtime\atm-core.exe），
- * 它也是已经通过烟测的那一份。开发机上的 node 不是交付物。
+ * 3.0 的包里没有 Node（W8a）：SQLite 是 rusqlite 静态链接进各个 exe 的那一份，版本以 `--locked`
+ * 构建所用的 Cargo.lock 为准（libsqlite3-sys 的 bundled 版本）。
  */
-function runtimeVersions(): Record<string, string> {
-  const executable = join(
-    root,
-    "output",
-    "package",
-    `app-${packageJson.version}`,
-    APP_LAYOUT.coreExe,
-  );
-  const probe = spawnSync(executable, ["-p", "JSON.stringify(process.versions)"], {
-    encoding: "utf8",
-    windowsHide: true,
-  });
-  if (probe.error) throw new Error(`无法启动发行包里的运行时：${probe.error.message}`);
-  if (probe.status !== 0) {
-    throw new Error(`无法读取运行时版本：${String(probe.stderr ?? "").slice(0, 500)}`);
-  }
-  return JSON.parse(probe.stdout.trim()) as Record<string, string>;
+function bundledSqliteCrate(): string {
+  const lock = readFileSync(join(root, "apps", "desktop", "native", "Cargo.lock"), "utf8");
+  const match = /\[\[package\]\]\r?\nname = "libsqlite3-sys"\r?\nversion = "([^"]+)"/u.exec(lock);
+  if (!match) throw new Error("RELEASE_SQLITE_CRATE_MISSING: Cargo.lock 里没有 libsqlite3-sys");
+  return `libsqlite3-sys ${match[1]}`;
 }
 
-function spdxId(name: string): string {
-  return `SPDXRef-Package-${name.replace(/[^A-Za-z0-9.-]+/gu, "-")}`;
-}
+// 3.x 的升级、转换与保活都按主版本认 3.x（install-state `is_v3`）：2.x 号的候选装上去会被当成 2.x。
+if (!isV3(packageJson.version)) throw new Error(`RELEASE_VERSION_NOT_V3: ${packageJson.version}`);
 
 const output = join(root, "output");
 const verification = await readJson<Verification>(join(output, "release-verification.json"));
@@ -139,11 +136,13 @@ const requiredCommands = [
   "typecheck",
   "test",
   "e2e",
-  "benchmark",
   "build",
   "package",
   "packaged-smoke",
   "distribution-smoke",
+  "install-drill",
+  "budget",
+  "power-loss",
 ] as const;
 const commandNames = verification.commands.map((command) => command.name);
 if (
@@ -156,9 +155,29 @@ if (
 }
 const source = await verifyReleaseSource(root, verification.fingerprint);
 const e2e = await readJson<{ stats: Record<string, number> }>(join(output, "e2e", "results.json"));
-const benchmark = await readJson<{ passed: boolean; metrics: Record<string, unknown> }>(
-  join(output, "benchmark-report.json"),
+// 2.x 的 benchmark（测的是 Node 服务）不在 3.0 的链上：原生的内存、冷启动与 Agent 负载由 budget 量。
+type DrillReport = BoundReports["drill"] & { passed: boolean; total: number; failed: number };
+type BudgetReport = BoundReports["budget"] & {
+  completedAt?: string;
+  error?: string;
+  /** 08 §3 逐条判定（budget-verdicts.ts）：全部达标才组装；预算不放宽，除非用户同意。 */
+  summary?: { allPass?: boolean; verdicts?: Array<{ item: string; pass: boolean }> };
+};
+const drill = await readJson<DrillReport>(join(output, "drill", "report.json"));
+const budget = await readJson<BudgetReport>(join(output, "budget-report.json"));
+if (drill.passed !== true || !(drill.total > 0) || drill.failed !== 0)
+  throw new Error("DRILL_REPORT_INPUT_FAILED");
+// 不只看 allPass：十条一条不少、每条达标、样本数够（budget-verdicts.ts，W8 关口 peer r1 P2-02）。
+const budgetProblems = budgetReportProblems(budget);
+if (budgetProblems.length > 0)
+  throw new Error(`BUDGET_REPORT_INPUT_FAILED: ${budgetProblems.join(" | ")}`);
+// 掉电演练（W8f）：三个场景都跑过、每项通过（power-loss-report.ts）；二进制下面与候选一起对。
+const powerLoss = await readJson<BoundReports["powerLoss"] & PowerLossReport>(
+  join(output, "power-loss", "report.json"),
 );
+const powerLossProblems = powerLossReportProblems(powerLoss);
+if (powerLossProblems.length > 0)
+  throw new Error(`POWER_LOSS_REPORT_INPUT_FAILED: ${powerLossProblems.join(" | ")}`);
 const packagedSmoke = await readJson<SmokeReport>(join(output, "packaged-smoke-report.json"));
 const portableSmoke = await readJson<SmokeReport>(join(output, "portable-smoke-report.json"));
 const distributionSmoke = await readJson<DistributionReport>(
@@ -173,7 +192,6 @@ const installedSmoke =
     ? await readJson<SmokeReport>(join(output, "installed-smoke-report.json"))
     : null;
 if (
-  !benchmark.passed ||
   !packagedSmoke.passed ||
   !portableSmoke.passed ||
   (installedSmoke !== null && !installedSmoke.passed) ||
@@ -197,9 +215,38 @@ const portableName = portableZipName(packageJson.version);
 const releaseNames = [setupName, packageName, manifestName, portableName];
 const missing = releaseNames.filter((name) => !existsSync(join(packageDir, name)));
 if (missing.length > 0) throw new Error(`打包产物不完整：缺少 ${missing.join("、")}`);
-// 声明从将要发出去的归档里取，不看旁边的松散目录。缺 Node 许可证原文（NODE_LICENSE_PENDING）
+// 声明从将要发出去的归档里取，不看旁边的松散目录。有组件缺许可文本（LICENSE_TEXT_PENDING）
 // 的候选不可分发：只有本机安装验收（--local-only，release-and-install 传）能继续组装，
 // release.json 记 distributable:false，发布入口见到就拒绝。
+// 候选绑定（09 §3，L6）：打包阶段记下的五个 exe 就是归档里发出去的那份，每份验收报告测的也是它。
+const candidateBinaries = readCandidateBinaries(root);
+if (candidateBinaries.version !== packageJson.version)
+  throw new Error(`CANDIDATE_BINARY_MISMATCH: version ${candidateBinaries.version}`);
+const archived = [
+  ["package", zipBinaries(readFileSync(join(packageDir, packageName)))],
+  [
+    "portable",
+    zipBinaries(
+      readFileSync(join(packageDir, portableName)),
+      `AyanamiTaskManager-${packageJson.version}/`,
+    ),
+  ],
+] as const;
+for (const [label, set] of archived)
+  for (const [key, sha] of Object.entries(set))
+    if (candidateBinaries.release[key as keyof typeof set] !== sha)
+      throw new Error(`CANDIDATE_BINARY_MISMATCH: ${label}.${key}`);
+const unbound = candidateBindingMismatches(candidateBinaries, {
+  packaged: packagedSmoke,
+  portable: portableSmoke,
+  distribution: distributionSmoke,
+  installed: installedSmoke,
+  drill,
+  budget,
+  powerLoss,
+});
+if (unbound.length > 0) throw new Error(`CANDIDATE_BINARY_MISMATCH: ${unbound.join(", ")}`);
+
 const notices = releaseNoticesStatus({
   packageZip: readFileSync(join(packageDir, packageName)),
   portableZip: readFileSync(join(packageDir, portableName)),
@@ -212,7 +259,7 @@ const notices = releaseNoticesStatus({
 });
 if (!notices.distributable && !localOnly)
   throw new Error(
-    "RELEASE_NOTICES_INCOMPLETE: 归档里的第三方声明没有随包 Node 的许可证（third_party/node/）；" +
+    "RELEASE_NOTICES_INCOMPLETE: 归档里的第三方声明有组件缺许可文本（LICENSE_TEXT_PENDING）；" +
       "只做本机安装验收时用 --local-only",
   );
 
@@ -247,7 +294,10 @@ if (githubActionsRun && process.env.GITHUB_SHA?.toLowerCase() !== candidate.gitH
 
 const reportInputs = [
   ["e2e/results.json", "e2e-results.json"],
-  ["benchmark-report.json", "benchmark-report.json"],
+  ["budget-report.json", "budget-report.json"],
+  ["drill/report.json", "install-drill-report.json"],
+  ["power-loss/report.json", "power-loss-report.json"],
+  ["package/candidate-binaries.json", "candidate-binaries.json"],
   ["packaged-smoke-report.json", "packaged-smoke-report.json"],
   ["portable-smoke-report.json", "portable-smoke-report.json"],
   ...(installedSmoke
@@ -359,7 +409,9 @@ const summary = {
       checks: distributionSmoke.checks.length,
       reused: reused("distribution-smoke"),
     },
-    benchmark: { metrics: benchmark.metrics, reused: reused("benchmark") },
+    installDrill: { checks: drill.total },
+    budget: { completedAt: budget.completedAt },
+    powerLoss: { checks: powerLoss.total },
   },
   screenshots: screenshots.map((name) => `screenshots/${name}`),
   stages: verification.stages ?? {},
@@ -389,31 +441,27 @@ await writeFile(
     `- portable smoke：${portableSmoke.checks.length} 项通过\n` +
     `- installed smoke：${installedSmoke ? `${installedSmoke.checks.length} 项通过` : "跳过（机器上已有安装）"}\n` +
     `- distribution smoke：${distributionSmoke.checks.length} 项通过${provenance("distribution-smoke")}\n` +
-    `- benchmark：全部阈值通过${provenance("benchmark")}\n` +
+    `- install-drill：${drill.total} 项通过\n` +
+    `- budget：已量（${String(budget.completedAt)}）\n` +
+    `- power-loss：${String(powerLoss.total)} 项通过\n` +
     `- 已知非阻塞剩余项：${remaining.length === 0 ? "无" : `${remaining.length} 条\n${remaining.map((item) => `  - ${item}`).join("\n")}`}\n\n` +
     `原始 JSON、命令日志和 1366/1920/3440 截图均位于本目录。\n`,
   "utf8",
 );
 
-const versions = runtimeVersions();
-const sqlite = new Database(":memory:");
-const sqliteVersion = String(
-  (sqlite.prepare("SELECT sqlite_version() AS version").get() as { version: string }).version,
-);
-sqlite.close();
 const release = {
   product: packageJson.productName,
   version: packageJson.version,
   distributable: notices.distributable,
   platform: "win32-x64",
-  node: versions.node,
-  nodeAbi: versions.modules,
-  napi: versions.napi,
+  runtime: "native",
   webview2Min: MIN_WEBVIEW2,
-  sqlite: sqliteVersion,
+  sqlite: bundledSqliteCrate(),
   schema: {
-    registry: latestSchema(join(root, "migrations", "registry")),
-    project: latestSchema(join(root, "migrations", "project")),
+    v3: latestSchema(join(root, "apps", "desktop", "native", "store", "migrations")),
+    // 2.x 数据根里转换器认得的最新迁移（转换时只读打开 L）。
+    legacyRegistry: latestSchema(join(root, "migrations", "registry")),
+    legacyProject: latestSchema(join(root, "migrations", "project")),
   },
   commit: source.gitHead,
   source,
@@ -428,50 +476,15 @@ const release = {
 };
 await writeFile(join(releaseDir, "release.json"), `${JSON.stringify(release, null, 2)}\n`, "utf8");
 
-const dependencies = Object.entries({
-  ...packageJson.dependencies,
-  ...packageJson.devDependencies,
-}).sort(([a], [b]) => a.localeCompare(b));
 const namespace = `https://ayanami.local/spdx/${packageJson.name}/${packageJson.version}/${artifacts[0]!.sha256.slice(0, 16).toLowerCase()}`;
-const sbom = {
-  spdxVersion: "SPDX-2.3",
-  dataLicense: "CC0-1.0",
-  SPDXID: "SPDXRef-DOCUMENT",
-  name: `${packageJson.productName}-${packageJson.version}`,
-  documentNamespace: namespace,
-  creationInfo: {
-    created: new Date().toISOString().replace(/\.\d{3}Z$/u, "Z"),
-    creators: ["Tool: AyanamiTaskManager release assembler"],
-  },
-  documentDescribes: ["SPDXRef-Package-AyanamiTaskManager"],
-  packages: [
-    {
-      name: packageJson.productName,
-      SPDXID: "SPDXRef-Package-AyanamiTaskManager",
-      versionInfo: packageJson.version,
-      downloadLocation: "NOASSERTION",
-      filesAnalyzed: false,
-      licenseConcluded: packageJson.license,
-      licenseDeclared: packageJson.license,
-      copyrightText: "NOASSERTION",
-    },
-    ...dependencies.map(([name, version]) => ({
-      name,
-      SPDXID: spdxId(name),
-      versionInfo: version,
-      downloadLocation: "NOASSERTION",
-      filesAnalyzed: false,
-      licenseConcluded: "NOASSERTION",
-      licenseDeclared: "NOASSERTION",
-      copyrightText: "NOASSERTION",
-    })),
-  ],
-  relationships: dependencies.map(([name]) => ({
-    spdxElementId: "SPDXRef-Package-AyanamiTaskManager",
-    relationshipType: "DEPENDS_ON",
-    relatedSpdxElement: spdxId(name),
-  })),
-};
+const sbom = buildSbom({
+  product: packageJson.productName,
+  version: packageJson.version,
+  license: packageJson.license,
+  namespace,
+  created: new Date().toISOString().replace(/\.\d{3}Z$/u, "Z"),
+  components: shippedComponents(root),
+});
 await writeFile(join(releaseDir, "sbom.spdx.json"), `${JSON.stringify(sbom, null, 2)}\n`, "utf8");
 
 const checksumNames = [...releaseNames, "release.json", "sbom.spdx.json"];

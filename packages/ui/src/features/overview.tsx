@@ -18,7 +18,6 @@ import type { Notify } from "../contracts.js";
 import { useCursorCollections } from "../cursor-collection.js";
 import { useFirstScreen } from "../hooks/use-first-screen.js";
 import { useProjectOrder } from "../project-order.js";
-import { ProjectionStatusBadge } from "../projection-health-panel.js";
 import { Status, formatTime, progressSourceLabels, sidebarProjectHint } from "../presentation.js";
 import { isSystemTimelineEvent, presentTimelineEvent } from "../timeline-events.js";
 import { NeedsYouPanel, needsYouHeadline, useNeedsYou } from "./overview-inbox.js";
@@ -123,13 +122,6 @@ export function OverviewPage({
     if (project.lifecycle === "MIGRATION_FAILED") items.push(`${project.code} 数据库迁移失败`);
     return items;
   });
-  for (const failure of data.projectionFailures ?? []) {
-    const code = failure.project.code;
-    if (failure.reason === "MISSING") attention.push(`${code} 缺少数据投影状态`);
-    else if (failure.reason === "INVERTED")
-      attention.push(`${code} 数据投影序列倒挂（lag ${failure.lag}）`);
-    else attention.push(`${code} 数据投影等待重试（lag ${failure.lag}）`);
-  }
   for (const project of trashQuery.data ?? []) {
     if (project.restoreRequest)
       attention.push(
@@ -293,10 +285,6 @@ export function OverviewPage({
                   <span>Agent {Number(project.active_agent_count ?? 0)}</span>
                 </div>
                 <div className="atm-row-sub">最近活动 {formatTime(project.last_activity_at)}</div>
-                <div className="atm-projection-summary">
-                  <ProjectionStatusBadge status={project.projection?.status ?? "MISSING"} />
-                  <span className="atm-row-sub">lag {project.projection?.lag ?? "—"}</span>
-                </div>
               </button>
             ))}
           </div>

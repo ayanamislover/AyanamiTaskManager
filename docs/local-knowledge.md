@@ -1,8 +1,9 @@
 # 本地共享知识库
 
 ATM 的本地共享知识库为同一数据根下的多个项目提供可版本化的参考资料。在线事实源是
-`<ATM_DATA_DIR>/knowledge/knowledge.sqlite`；Markdown 导入/导出是副本，不是第二个事实源。
-知识库与项目库独立，来源项目归档或删除不会使已经发布的知识修订失效。
+3.0 数据根（`%LOCALAPPDATA%\AyanamiTaskManager3`，可由 `ATM3_DATA_DIR` 覆盖）下 `data\atm.sqlite` 中的知识表；
+Markdown 导入/导出是副本，不是第二个事实源。知识与项目数据同库，但是独立的范围，不属于任何项目，
+来源项目归档或删除不会使已经发布的知识修订失效。
 
 ## Agent 读取流程
 
@@ -28,7 +29,7 @@ MCP 参数统一使用 `snake_case`：
 ```
 
 `atm_knowledge_get` 的输入为 `id`，可选不可变 `revision_id`、`section`、`max_chars` 和 `cursor`。`section` 可用目录中的章节 ID，或唯一的章节标题；重名时明确返回候选 ID，不猜测。
-输入由 `packages/protocol/src/inputs/knowledge.ts` 的 canonical Zod 契约校验。
+输入的形状由原生服务 `atm-http` 的工具参数表校验（别名改成规范名、未知键给出 `did_you_mean`），业务规则在服务层校验；逐字的工具说明见 [`generated/mcp-tool-contracts.md`](./generated/mcp-tool-contracts.md)。
 
 `bodyMarkdown` 与搜索 `query` 不接受 U+0000（NUL）。短于三字的查询用不了 trigram FTS，只能用 LIKE 扫正文，而 SQLite 的 LIKE 把 NUL 当作字符串终点——含 NUL 的正文会保存成功、读回逐字相等、三字以上的 FTS 查询照常命中，唯独短查询搜不到 NUL 之后的内容。与其让一条存进去的知识有一半搜不着，契约在入口就拒绝它；NUL 在 Markdown 里不承载任何内容。
 
@@ -65,11 +66,11 @@ Agent 首屏目录也是摘要：最多 40 项、每个标题最多 120 字符�
 
 更新前 `atm_knowledge_get(id, for_edit=true)` 获取正文及 `edit`（slug、summary、tags、aliases）；首屏还包含 title/useWhen/appliesTo/sourceRefs。沿固定 revision_id 与 cursor 读完整篇，不使用 section 裁片覆盖正文。合并后提交完整内容及 `id/expected_revision_id`；省略可选字段会重置，不是 PATCH。普通只读查询保持原有紧凑输出。
 
-保存生成不可变修订，旧引用仍然有效。服务验证 project 下的活动 Session，作者 `publishedBy` 从数据库读取，不能声明自己为 USER。知识库事务原子提交正文、索引和幂等回执，不伪称同时提交项目库。相同会话相同 op_id 的完全相同请求返回原结果；改内容复用 op_id 被拒绝。更新基线过期返回 VERSION_CONFLICT，必须重读合并；归档条目不能通过此工具静默恢复。
+保存生成不可变修订，旧引用仍然有效。服务验证 project 下的活动 Session，作者 `publishedBy` 从数据库读取，不能声明自己为 USER。一次保存在一个写事务里原子提交正文、索引和幂等回执；它不写项目数据，也不走项目写入回执。相同会话相同 op_id 的完全相同请求返回原结果；改内容复用 op_id 被拒绝。更新基线过期返回 VERSION_CONFLICT，必须重读合并；归档条目不能通过此工具静默恢复。
 
 回执为 `ok/op_id/id/revisionId/version/reference/publishedBy`，不回传正文，不走项目 mutation ACK。`reference` 可直接记为长期引用。会话已关闭时仍可用原 project/session/op_id 与原规范化载荷只读重放已提交结果；不改变会话状态，异内容仍报幂等冲突。只有确需新写入、没有原回执时才要求活动会话。只读 search/get 仍然不需要会话。旧客户端看不到工具时升级 ATM 并重载 MCP。
 
-新持久回执采用带格式标识的紧凑引用，原操作 version/archive 状态单独保留，正文与作者从不可变 revisionId 读取；旧完整回执仍可重放，不批量改写生产旧数据。历史列表用 SQLite JSON 投影去掉 bodyMarkdown 后再传入 JS。升级前备份照常保留；不要将新版本产生的回执交给不支持该格式的旧版本重放，回退需恢复对应备份。
+新持久回执采用带格式标识的紧凑引用，原操作 version/archive 状态单独保留，正文与作者从不可变 revisionId 读取；旧完整回执仍可重放，不批量改写生产旧数据。历史列表在 SQLite 里先用 JSON 函数去掉 bodyMarkdown 再返回。升级前备份照常保留；不要将新版本产生的回执交给不支持该格式的旧版本重放，回退需恢复对应备份。
 
 知识正文不因发布自动执行，不授予额外权限；不写入密钥或无关隐私。未验证的部分必须保留适用前提与不确定性。Markdown 导入当前支持 `---json` 元数据头；YAML 头不会被解析为元数据，Agent 应直接传结构化字段，不再依赖文件搬运。
 
@@ -78,6 +79,6 @@ Agent 首屏目录也是摘要：最多 40 项、每个标题最多 120 字符�
 知识正文是参考材料。正文中的命令片段不会自动执行，也不会授予执行脚本、访问额外目录、读取
 任意文件或覆盖当前用户要求的权限；当前任务的明确指令和项目约束优先于通用知识。
 
-`knowledge.sqlite`、导入资料和导出文件属于用户数据，不进入安装包的 Agent 文档/Skill manifest，
+知识数据（`atm.sqlite` 中的知识表）、导入资料和导出文件属于用户数据，不进入安装包的 Agent 文档/Skill manifest，
 也不会因升级或修复内置 Skill 被覆盖。安装包只携带 `ATM_AGENT_GUIDE.md`、文档和通用
 `atm-knowledge` Skill。用户引用应使用 `entryId@revisionId`，不能只记录会在恢复后重用的数字 revision。

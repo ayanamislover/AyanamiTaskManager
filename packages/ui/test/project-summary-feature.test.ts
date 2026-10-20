@@ -42,7 +42,6 @@ function client(): AyanamiClient {
       agents: vi.fn(),
       updates: vi.fn(),
       reconciliation: vi.fn(),
-      reconcileProjection: vi.fn(),
       engineeringMetrics: vi.fn(),
     },
     overview: vi.fn(),
@@ -65,15 +64,6 @@ function renderSummary() {
         progress_source: "TASKS",
         next_target_date: "2026-08-29",
         last_project_update_at: "2026-08-28T01:00:00.000Z",
-        projection: {
-          status: "APPLIED",
-          sourceSeq: 20,
-          projectedSeq: 20,
-          lag: 0,
-          retryCount: 0,
-          updatedAt: "2026-08-28T01:00:00.000Z",
-          lastError: null,
-        },
       },
     ],
   });
@@ -163,7 +153,6 @@ function missingProjectContracts(source: string): string[] {
     'queryKey: ["project-updates", projectCode]',
     'queryKey: ["reconciliation", projectCode]',
     "useState(true)",
-    "<ProjectProjectionPanel",
     "<EngineeringMetricsPanel",
     'aria-label="项目管理摘要"',
     'aria-label="任务对账"',
@@ -197,9 +186,10 @@ describe("Project summary feature", () => {
       expect(markup).not.toContain(moved);
   });
 
-  it("保持摘要/Reconcile 查询、Projection/Metrics 组合与模块边界", () => {
+  it("保持摘要/Reconcile 查询、Metrics 组合与模块边界；投影面板已随单库删除（00 §6）", () => {
     const source = projectFeatureSource();
     expect(missingProjectContracts(source)).toEqual([]);
+    expect(source).not.toMatch(/projection/iu);
     expect(source).not.toMatch(/from\s+["']\.\.\/app\.js["']/u);
     expect(readFileSync(summaryPath, "utf8").split(/\r?\n/u).length).toBeLessThan(600);
     expect(readFileSync(reconcilePath, "utf8").split(/\r?\n/u).length).toBeLessThan(600);
@@ -211,7 +201,6 @@ describe("Project summary feature", () => {
       'queryKey: ["overview"]',
       'queryKey: ["reconciliation", projectCode]',
       "useState(true)",
-      "<ProjectProjectionPanel",
       "<EngineeringMetricsPanel",
     ]) {
       expect(missingProjectContracts(source.replaceAll(contract, "MUTATED"))).toContain(contract);

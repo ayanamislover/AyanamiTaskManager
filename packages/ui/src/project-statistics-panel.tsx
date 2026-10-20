@@ -2,7 +2,29 @@ import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { CaretDownIcon as CaretDown } from "@phosphor-icons/react/dist/icons/CaretDown";
 import type { AyanamiClient } from "@ayanami-task/client";
-import { MutationErrorAlert } from "./components/async-state.js";
+import { MutationErrorAlert, SectionLoadError } from "./components/async-state.js";
+
+/**
+ * 读不出项目指标时说什么（W8g，W2 peer r3 P2-02）。读（`metrics.read`）从不当场扫：
+ * - `NO_SOURCE_PATH`：项目没有源码目录，刷新也没用；
+ * - `NO_DATA`，或只有任务指标、还没有项目指标（`available` 为真而 `project` 为空）：还没统计过，去点「刷新统计」；
+ * - 刷新时 git 失败（`METRICS_FAILED`）等：服务端给的说明。
+ */
+export function engineeringUnavailable(data: {
+  available?: boolean;
+  reason?: string | null;
+  message?: string | null;
+  project?: unknown;
+}): { title: string; detail: string } {
+  if (data.reason === "NO_SOURCE_PATH")
+    return { title: "此项目暂不可统计", detail: "项目没有源码目录" };
+  if (data.reason === "NO_DATA" || (data.available && !data.project))
+    return { title: "还没有统计", detail: "点「刷新统计」，按本地 Git 与文件算一次" };
+  return {
+    title: "此项目暂不可统计",
+    detail: data.message ?? "源码目录不是可读取的 Git 仓库",
+  };
+}
 
 export function EngineeringMetricsPanel({
   client,
@@ -63,7 +85,14 @@ export function EngineeringMetricsPanel({
               <div className="atm-skeleton" key={index} />
             ))}
           </div>
-        ) : engineering.data?.available ? (
+        ) : engineering.isError ? (
+          <div className="atm-panel-body">
+            <SectionLoadError
+              message="工程统计没能读出来。"
+              onRetry={() => void engineering.refetch()}
+            />
+          </div>
+        ) : engineering.data?.available && engineering.data.project ? (
           <div className="atm-engineering-body">
             <div className="atm-engineering-kpis">
               <div>
@@ -121,16 +150,12 @@ export function EngineeringMetricsPanel({
               {formatCapturedAt(engineering.data.project.capturedAt)}
             </div>
           </div>
-        ) : (
+        ) : engineering.data ? (
           <div className="atm-panel-body">
-            <div className="atm-row-title">此项目暂不可统计</div>
-            <div className="atm-row-sub">
-              {engineering.data?.reason === "NO_SOURCE_PATH"
-                ? "项目没有源码目录"
-                : (engineering.data?.message ?? "源码目录不是可读取的 Git 仓库")}
-            </div>
+            <div className="atm-row-title">{engineeringUnavailable(engineering.data).title}</div>
+            <div className="atm-row-sub">{engineeringUnavailable(engineering.data).detail}</div>
           </div>
-        )}
+        ) : null}
       </div>
     </section>
   );

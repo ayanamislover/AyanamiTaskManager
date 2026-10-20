@@ -45,7 +45,16 @@ jobs:
       - name: Install the Playwright browser
         run: pnpm exec playwright install chromium
 
-      - name: Run full E2E, benchmark, package, and distribution validation
+      # install-drill's 2.x ⇄ 3.0 scenarios need a 2.0-era drill package (its setup has the sandbox);
+      # it is built from the 2.0.0 commit in a temporary worktree under output/.
+      - name: Build the 2.0 drill package
+        run: pnpm exec tsx scripts/build-drill-package-20.ts
+
+      # A fresh runner is a clean machine: the installed half of distribution-smoke registers the real
+      # uninstall entry, Start menu and keepalive task, so it runs only where this is declared.
+      - name: Run full E2E, package, distribution, install drill, budget and power-loss validation
+        env:
+          ATM_DISTRIBUTION_CLEAN_MACHINE: "1"
         run: pnpm release --full
 
       - name: Upload release validation evidence
@@ -60,7 +69,10 @@ jobs:
             output/release-verification.json
             output/release-logs/
             output/e2e/results.json
-            output/benchmark-report.json
+            output/package/candidate-binaries.json
+            output/drill/report.json
+            output/budget-report.json
+            output/power-loss/report.json
             output/packaged-smoke-report.json
             output/portable-smoke-report.json
             output/installed-smoke-report.json

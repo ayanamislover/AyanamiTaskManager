@@ -41,7 +41,7 @@ await probe.windows(process.pid);
 const startedAt = Date.now();
 const host = startSmokeHost({
   executable,
-  dataDir: sandbox.dataDir,
+  v3Dir: sandbox.v3Dir,
   env: sandbox.env,
   args: ["--background", "--random-startup-delay"],
 });
@@ -78,13 +78,13 @@ try {
         `${runtime.version} / ${sourceVersion}`,
       );
       const hostRecord = JSON.parse(
-        readFileSync(join(sandbox.dataDir, "runtime", "host.json"), "utf8"),
+        readFileSync(join(sandbox.v3Dir, "runtime", "host.json"), "utf8"),
       ) as { pid: number };
       check("host.json 记的是这个宿主", hostRecord.pid === host.pid, JSON.stringify(hostRecord));
       check("登录启动全程不建应用窗口", windowsSeen === 0, String(windowsSeen));
     } finally {
       log.record("--smoke-quit 干净退出", await stopSmokeHost(host), host.stderr.join(""));
-      log.record("退出后运行时文件已清理", !existsSync(runtimeFile(sandbox.dataDir)));
+      log.record("退出后运行时文件已清理", !existsSync(runtimeFile(sandbox.v3Dir)));
     }
   });
 } catch (caught) {
@@ -96,7 +96,7 @@ const passed = error === undefined && log.failed.length === 0;
 const report = {
   passed,
   executable,
-  dataDir: sandbox.dataDir,
+  v3Dir: sandbox.v3Dir,
   elapsedMs,
   timeoutMs,
   version: (runtime as SmokeRuntime | null)?.version ?? null,

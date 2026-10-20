@@ -279,15 +279,20 @@ describe("过期判定", () => {
         true,
       ),
     ).toBe(false);
-    // 宿主只在没有继承覆盖、LOCALAPPDATA 等于系统已知文件夹时才设它，并清掉继承来的同名变量。
-    const core = readFileSync(
-      join(process.cwd(), "apps/desktop/native/host/src/core_process.rs"),
-      "utf8",
+    // 3.0 没有 Node core（W8a）：判定留在宿主自己（Agent 配置修复在 agents.rs），只在没有继承覆盖、
+    // LOCALAPPDATA 等于系统已知文件夹时成立；这个标记不再设给任何子进程，继承来的同名变量照样清掉。
+    const hostSource = (name: string) =>
+      readFileSync(join(process.cwd(), "apps/desktop/native/host/src", name), "utf8");
+    const childEnv = hostSource("child_env.rs");
+    expect(childEnv).toContain(
+      "pub(crate) fn product_default_data_root(data_dir: &Path) -> bool {",
     );
-    expect(core).toContain('process.env("ATM_DATA_DIR", data_dir);');
-    expect(core).toContain("if product_default_data_root(data_dir) {");
-    expect(core).toContain("crate::win::known_local_app_data()");
-    expect(core).toContain("|| upper == PRODUCT_DATA_ROOT");
+    expect(childEnv).toContain("crate::win::known_local_app_data()");
+    expect(childEnv).toContain("|| upper == PRODUCT_DATA_ROOT");
+    expect(childEnv).not.toMatch(/\.env\(\s*(?:PRODUCT_DATA_ROOT|"ATM_PRODUCT_DATA_ROOT")/u);
+    expect(hostSource("agents.rs")).toContain(
+      "crate::child_env::product_default_data_root(&layout.data_dir)",
+    );
   });
 
   it("开发态默认数据根不覆盖正式 current 与 Agent 配置", () => {
@@ -518,8 +523,9 @@ describe("原生 shim 优先", () => {
     const shimPath = `%LOCALAPPDATA%\\AyanamiTaskManager\\${MCP_RUNTIME_LINK}\\resources\\${MCP_SHIM_FILENAME}`;
     const guide = readFileSync("ATM_AGENT_GUIDE.md", "utf8");
     const commands = guide.match(/^claude mcp add-json .*$/gmu) ?? [];
-    expect(commands).toHaveLength(3);
-    for (const [index, profile] of ["core", "memory", "actions"].entries()) {
+    // surface v6 只登记 core 与 memory；actions 是 core 的别名，只为旧配置保留。
+    expect(commands).toHaveLength(2);
+    for (const [index, profile] of ["core", "memory"].entries()) {
       const json = /'(\{.*\})'/u.exec(commands[index] ?? "")?.[1] ?? "{}";
       expect(JSON.parse(json)).toEqual({ command: "<atm-mcp.exe>", args: ["--profile", profile] });
     }
@@ -528,11 +534,8 @@ describe("原生 shim 优先", () => {
     const portable = readFileSync("docs/portable-usage.md", "utf8");
     expect(portable).toContain(`命令指向解压目录下的 \`resources\\${MCP_SHIM_FILENAME}\``);
     expect(portable).not.toContain(shimPath);
-    // shim 缺失时的回落就是 mcpLaunch 的另一支：宿主自己的 --mcp-stdio，不带环境变量。
-    expect(guide).toContain(
-      '`{"command":"<ATM.exe>","args":["--mcp-stdio","--profile","core"]}`，`<ATM.exe>` 是 ' +
-        `\`%LOCALAPPDATA%\\AyanamiTaskManager\\${MCP_RUNTIME_LINK}\\AyanamiTaskManager.exe\``,
-    );
+    // 3.0 没有 Node 宿主，Guide 不再教 --mcp-stdio 回落。
+    expect(guide).not.toContain("--mcp-stdio");
     expect(readFileSync("docs/troubleshooting.md", "utf8")).toContain(
       `使用 \`${shimPath}\`，参数只有 \`--profile <name>\`，不带环境变量`,
     );

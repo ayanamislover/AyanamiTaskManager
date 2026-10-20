@@ -1,24 +1,12 @@
-import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { format } from "prettier";
 import type { AyanamiTaskService } from "@ayanami-task/application";
 import { createAtmTaskPatchTool } from "../src/tools/actions/task-patch.js";
 import {
   compositeTaskPatchOperationNames,
-  generateCompositeTaskPatchDocumentation,
   TASK_PATCH_COMPOSITE_DOCS,
-  TASK_PATCH_COMPOSITE_DOCUMENTATION_BEGIN,
-  TASK_PATCH_COMPOSITE_DOCUMENTATION_END,
 } from "../src/task-patch-composite-contract.js";
 
 const tool = createAtmTaskPatchTool({} as AyanamiTaskService);
-
-function markedSection(content: string): string {
-  const start = content.indexOf(TASK_PATCH_COMPOSITE_DOCUMENTATION_BEGIN);
-  const finish = content.indexOf(TASK_PATCH_COMPOSITE_DOCUMENTATION_END);
-  if (start < 0 || finish < start) throw new Error("TASK_PATCH_COMPOSITE_MARKERS_MISSING");
-  return content.slice(start, finish + TASK_PATCH_COMPOSITE_DOCUMENTATION_END.length);
-}
 
 describe("composite 任务操作契约", () => {
   it("registry 里每个 composite 操作都有文档条目", () => {
@@ -56,17 +44,6 @@ describe("composite 任务操作契约", () => {
       items: [withoutItems],
     });
     expect(result.success).toBe(false);
-  });
-
-  it("生成物与生成器保持一致", async () => {
-    // 生成脚本写入前过了一道 prettier，这里必须用同一道，否则比的是排版差异而非内容漂移。
-    const expected = markedSection(
-      (await format(generateCompositeTaskPatchDocumentation(), { parser: "markdown" })).trim(),
-    );
-    expect(markedSection(readFileSync("docs/generated/work-item-operations.md", "utf8"))).toBe(
-      expected,
-    );
-    expect(markedSection(readFileSync("ATM_AGENT_GUIDE.md", "utf8"))).toBe(expected);
   });
 });
 

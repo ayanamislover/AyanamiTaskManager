@@ -28,6 +28,9 @@ windows = { version = "0.61", features = [
   "Win32_Foundation",
   "Win32_System_Com",
   "Win32_System_Com_StructuredStorage",
+  # 保活计划任务（ITaskService）。
+  "Win32_System_TaskScheduler",
+  "Win32_System_Ole",
   "Win32_System_Variant",
   "Win32_UI_Shell",
   "Win32_UI_Shell_PropertiesSystem",
@@ -36,6 +39,7 @@ windows = { version = "0.61", features = [
 ] }
 windows-sys = { workspace = true, features = [
   "Win32_Foundation",
+  "Win32_NetworkManagement_IpHelper",
   "Win32_Security",
   "Win32_Storage_FileSystem",
   "Win32_System_Console",

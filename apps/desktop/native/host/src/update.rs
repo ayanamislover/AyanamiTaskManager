@@ -1,21 +1,20 @@
-//! Installing a delivered update (de-electron §8 update bridge): the core finds the
-//! package in `<dataDir>\updates` and asks; the host starts the stable installer.
+//! Installing a delivered update (de-electron §8 update bridge; W5g): the update coordinator
+//! (`atm_jobs::update`) finds the package in `<N>\updates` and the user asks; the host starts
+//! the stable installer from the UI thread.
 //!
-//! The host, not the core, starts it. The core runs on Node, whose children inherit every
-//! inheritable handle — the core's own protocol pipes included. A setup holding the core's
-//! stdout keeps the host from ever seeing the core exit during QUIESCE, while setup waits
-//! for the host: both stall until the timeout. The host's pipe ends are not inheritable
-//! and its std handles were made non-inheritable at start.
+//! The host's std handles were made non-inheritable at start: a setup holding one of our
+//! pipes would keep us from looking exited during QUIESCE while setup waits for us.
 //!
-//! The core is trusted to pick the version, not the paths: the installer is always this
-//! install root's `atm-setup.exe`, and the manifest must be a plainly named file directly
+//! The coordinator is trusted to pick the version, not the paths: the installer is always
+//! this install root's `atm-setup.exe`, and the manifest must be a plainly named file directly
 //! in the data root's `updates` folder.
 
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const DETACHED_PROCESS: u32 = 0x0000_0008;
+/// Not `DETACHED_PROCESS`: a detached console program opens a window for each console child (W8k).
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
 /// `atm-<version>-win-x64.json`, the version as the packager writes it.
@@ -88,7 +87,7 @@ pub fn install(app_dir: &Path, data_dir: &Path, manifest: &str) -> Result<(), St
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .creation_flags(DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP)
+        .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
         .spawn()
         .map(|_| ())
         .map_err(|error| format!("UPDATE_START_FAILED: {error}"))

@@ -164,6 +164,7 @@ pub fn commit(
             &RawValue::string(&format!("{} {arguments}", quoted(&env.launcher()))),
         )?;
     }
+    crate::keepalive::settle(env, version);
     Ok(())
 }
 
@@ -209,7 +210,7 @@ pub fn remove_entries(env: &Env) -> Result<(), String> {
         }
     }
     let _ = fs::remove_dir(&env.start_menu_dir);
-    Ok(())
+    crate::keepalive::remove(env)
 }
 
 /// Uninstall, last: the Apps-list entry, only when it is this install's (it stays until
@@ -246,10 +247,12 @@ mod tests {
         let env = Env {
             install_root: PathBuf::from(r"C:\Users\u\AppData\Local\AyanamiTaskManagerDesktop"),
             data_dir: PathBuf::from(r"C:\Users\u\AppData\Local\AyanamiTaskManager"),
+            v3_root: PathBuf::from(r"C:\Users\u\AppData\Local\AyanamiTaskManager3"),
             start_menu_dir: PathBuf::new(),
             desktop_dir: PathBuf::new(),
             uninstall_key: String::new(),
             run_key: String::new(),
+            scheduler_dir: None,
             sandbox: true,
         };
         for mine in [

@@ -1,23 +1,29 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
-//! AyanamiTaskManager desktop host: a WebView2 window, the tray and the core supervisor.
-//! Replaces the Electron main process (de-electron plan).
+//! AyanamiTaskManager desktop host: a WebView2 window, the tray and the ATM 3 service in this
+//! same process (W5a: `atm-runtime` is linked, no Node core). Replaces the Electron main process.
 
+mod agents;
 mod app;
 mod args;
 mod assets;
 mod bridge;
-mod core_process;
-mod dpapi;
+mod child_env;
+mod frame;
 mod headless;
 mod health;
-mod identity;
+#[cfg(test)]
+mod keepalive_guard;
+mod lifecycle;
 mod notify;
 mod paths;
 mod probe;
+mod service;
 mod session_end;
 mod single_instance;
 mod tray;
+mod ui_api;
 mod update;
+mod watchdog;
 mod webview_frames;
 mod win;
 
@@ -29,27 +35,43 @@ use std::time::{Duration, Instant};
 
 use atm_install_state::{Admission, Context, LaunchIntent};
 
+// 正式宿主永远不带 e2e 的界面来源（09 §2）：e2e 适配器只在测试构建里，特性一旦被合并进宿主的构建就编译失败。
+const _: () = assert!(
+    !atm_domain::principal::E2E_SURFACE,
+    "atm-host must never be built with atm-domain/e2e"
+);
+
 const INSTALLER_WAIT: Duration = Duration::from_secs(60);
 const MAX_HOST_LOG_BYTES: u64 = 512 * 1024;
+const HOST_LOG_FILES: usize = 3;
 
+/// 宿主日志 `<N>\logs\host.log`：一行一条，令牌脱敏（`lifecycle::redact_line`），512 KiB × 3 轮换（W5g）。
 pub fn log(data_dir: &Path, line: &str) {
     let dir = data_dir.join("logs");
     let _ = fs::create_dir_all(&dir);
-    let path = dir.join("host.log");
-    if fs::metadata(&path).is_ok_and(|metadata| metadata.len() > MAX_HOST_LOG_BYTES) {
-        let _ = fs::rename(&path, dir.join("host.1.log"));
-    }
-    if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(&path) {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|elapsed| elapsed.as_secs())
-            .unwrap_or_default();
-        let _ = writeln!(
-            file,
-            "{secs} pid={} {}",
-            std::process::id(),
-            line.replace('\n', " ")
-        );
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| elapsed.as_secs())
+        .unwrap_or_default();
+    let text = format!(
+        "{secs} pid={} {}\n",
+        std::process::id(),
+        lifecycle::redact_line(line)
+    );
+    lifecycle::rotate(
+        &dir,
+        "host",
+        "log",
+        text.len() as u64,
+        MAX_HOST_LOG_BYTES,
+        HOST_LOG_FILES,
+    );
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("host.log"))
+    {
+        let _ = file.write_all(text.as_bytes());
     }
 }
 
@@ -69,8 +91,8 @@ fn message_box(text: &str) {
 
 /// WebView2 and Node read these from the environment and would override what the host
 /// configures (debug ports, browser args, user data folders). Remove them before any
-/// thread or child exists.
-fn scrub_own_environment() {
+/// thread or child exists. Returns the names it removed (never the values), for host.log.
+fn scrub_own_environment() -> Vec<String> {
     let keys: Vec<_> = std::env::vars_os()
         .filter_map(|(key, _)| key.into_string().ok())
         .filter(|key| {
@@ -78,10 +100,11 @@ fn scrub_own_environment() {
             upper.starts_with("WEBVIEW2_") || upper == "NODE_OPTIONS"
         })
         .collect();
-    for key in keys {
+    for key in &keys {
         // SAFETY: single-threaded at this point, nothing else reads the environment.
         unsafe { std::env::remove_var(key) };
     }
+    keys
 }
 
 fn relaunch_through(launcher: &Path, argv: &[String], headless: bool) -> i32 {
@@ -194,7 +217,7 @@ fn admit(layout: &paths::Layout, parsed: &args::Args, argv: &[String]) -> Result
                 return Err(3);
             }
             Admission::Reject(reason) => {
-                log(&layout.data_dir, &format!("admission rejected: {reason}"));
+                log(&layout.v3_root, &format!("admission rejected: {reason}"));
                 return Err(2);
             }
         }
@@ -210,10 +233,10 @@ fn autostart_target(layout: &paths::Layout, context: &Context) -> PathBuf {
     }
 }
 
-/// `runtime\host.json`: who holds the primary mutex, so setup can stop this host by
-/// identity even before (or between) core leases. Stale records are harmless: setup checks
-/// pid *and* start time.
-fn publish_host_record(data_dir: &Path) {
+/// `N\runtime\host.json`: who holds the primary mutex, so setup can stop this host by
+/// identity even before the service lease exists (login delay, a long conversion). Stale
+/// records are harmless: setup checks pid *and* start time.
+fn publish_host_record(v3_root: &Path) {
     let pid = std::process::id();
     let record = atm_install_state::ipc::HostRecord {
         pid,
@@ -222,13 +245,41 @@ fn publish_host_record(data_dir: &Path) {
     let Ok(body) = serde_json::to_value(&record) else {
         return;
     };
-    if let Err(error) = health::write_atomically(&data_dir.join("runtime"), "host.json", &body) {
-        log(data_dir, &format!("host record not written: {error}"));
+    if let Err(error) = health::write_atomically(&v3_root.join("runtime"), "host.json", &body) {
+        log(v3_root, &format!("host record not written: {error}"));
     }
 }
 
+/// 用户自己启动：托盘「退出」留下的标记作废，熔断复位。熔断过的，用通知说明自动恢复为什么停过
+/// （方案 §5：「下次由用户启动时，用通知说明原因」）。
+fn keepalive_user_started(v3_root: &Path, lifecycle: &lifecycle::Lifecycle) {
+    use atm_install_state::keepalive;
+    keepalive::clear_user_quit(v3_root);
+    let Some(breaker) = keepalive::reset_breaker(v3_root) else {
+        return;
+    };
+    let exits = breaker.exits.len();
+    lifecycle.record(
+        lifecycle::Event::KeepaliveReset,
+        &[("abnormalExits", serde_json::json!(exits))],
+    );
+    keepalive::log(
+        v3_root,
+        atm_install_state::handoff::now_ms(),
+        &format!("Reset by the user's start ({exits} abnormal exits)"),
+    );
+    notify::show(
+        v3_root,
+        "AyanamiTaskManager 曾停止自动恢复",
+        &format!(
+            "30 分钟内异常退出了 {exits} 次，所以没有再自动拉起。这次由你启动，自动恢复已重新打开；\
+             如果还反复退出，请按排障指南查看日志。"
+        ),
+    );
+}
+
 fn real_main() -> i32 {
-    scrub_own_environment();
+    let scrubbed = scrub_own_environment();
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let electron_as_node =
         std::env::var_os("ELECTRON_RUN_AS_NODE").is_some_and(|value| value == "1");
@@ -285,37 +336,47 @@ fn real_main() -> i32 {
         let command = if parsed.smoke_quit {
             single_instance::Command::SmokeQuit
         } else {
-            command
+            parsed.smoke_command.clone().unwrap_or(command)
         };
         single_instance::send(&layout.data_dir, &command, Duration::from_secs(5));
         return 0;
     };
-    publish_host_record(&layout.data_dir);
+    publish_host_record(&layout.v3_root);
+    // 主实例记下清掉了哪些变量（只记名字）：安装态的验收凭它确认注入的 WebView2 参数真送到了宿主
+    // （W8 关口 peer r15 P2-01）。
+    if !scrubbed.is_empty() {
+        log(
+            &layout.v3_root,
+            &format!("scrubbed from the environment: {}", scrubbed.join(", ")),
+        );
+    }
     notify::set_process_identity();
     let version =
-        atm_install_state::app_dir_version(&layout.app_dir).unwrap_or_else(|| "dev".into());
+        atm_install_state::product_version(&layout.app_dir).unwrap_or_else(|| "dev".into());
+    // lifecycle（W5g）：只有主实例记；上次没有干净退出就在这里报出来。
+    let lifecycle = lifecycle::install(layout.v3_root.join("logs"), &version);
+    lifecycle::install_panic_hook();
+    lifecycle.start(parsed.background, parsed.agent_wake);
+    // 保活（方案 §5、B1）：只有用户自己的启动才算数。登录自启与保活任务都是 `--background`，
+    // Agent 唤醒和 setup 拉起也不是用户的意思。
+    if !parsed.background && !parsed.agent_wake && !matches!(context, Context::TxnStart { .. }) {
+        keepalive_user_started(&layout.v3_root, lifecycle);
+    }
     let target = autostart_target(&layout, &context);
-    let witness = match &context {
+    // setup 拉起（`--txn-start`）：SERVICE_HEALTHY 见证由 runtime 在入口开好之后写。
+    let handoff = match &context {
         Context::TxnStart {
             install_root, txn, ..
-        } => Some(health::Witness {
+        } => Some(atm_runtime::Handoff {
             install_root: install_root.clone(),
             txn: txn.clone(),
         }),
         _ => None,
     };
-    app::run(layout, parsed, primary, target, version, witness)
+    app::run(layout, parsed, primary, target, version, handoff)
 }
 
 fn main() {
-    // Read-only query for the core and daemon; nothing else of the host runs (identity.rs).
-    let mut argv = std::env::args().skip(1);
-    match argv.next().as_deref() {
-        Some(identity::FLAG) => std::process::exit(identity::run(argv.next().as_deref())),
-        // Sealing the phone-sync secrets for the core (dpapi.rs); also nothing else of the host.
-        Some(dpapi::FLAG) => std::process::exit(dpapi::run(argv.next().as_deref())),
-        _ => {}
-    }
     atm_install_state::stop_std_handle_inheritance();
     std::process::exit(real_main());
 }

@@ -4,7 +4,6 @@
 use std::ffi::OsStr;
 use std::os::windows::ffi::OsStrExt;
 use std::path::Path;
-use std::process::Command;
 use std::ptr::null_mut;
 
 use windows_sys::Win32::Foundation::{ERROR_FILE_NOT_FOUND, ERROR_SUCCESS, GlobalFree, HANDLE};
@@ -32,22 +31,27 @@ const MAX_CLIPBOARD_CHARS: usize = 1 << 20;
 /// The user's Local AppData from the shell (FOLDERID_LocalAppData), not from the
 /// environment: tests and sandboxes redirect LOCALAPPDATA, the known folder they do not.
 pub fn known_local_app_data() -> Option<std::path::PathBuf> {
+    known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_LocalAppData)
+}
+
+/// Roaming AppData (FOLDERID_RoamingAppData): where APPDATA points unless something redirected it.
+pub fn known_roaming_app_data() -> Option<std::path::PathBuf> {
+    known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_RoamingAppData)
+}
+
+/// The user profile (FOLDERID_Profile): where USERPROFILE points unless something redirected it.
+pub fn known_profile() -> Option<std::path::PathBuf> {
+    known_folder(&windows_sys::Win32::UI::Shell::FOLDERID_Profile)
+}
+
+fn known_folder(id: &windows_sys::core::GUID) -> Option<std::path::PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     use windows_sys::Win32::System::Com::CoTaskMemFree;
-    use windows_sys::Win32::UI::Shell::{
-        FOLDERID_LocalAppData, KF_FLAG_DEFAULT, SHGetKnownFolderPath,
-    };
+    use windows_sys::Win32::UI::Shell::{KF_FLAG_DEFAULT, SHGetKnownFolderPath};
 
     let mut raw: windows_sys::core::PWSTR = null_mut();
     // SAFETY: the out pointer is ours; the shell allocates and we free it below either way.
-    let status = unsafe {
-        SHGetKnownFolderPath(
-            &FOLDERID_LocalAppData,
-            KF_FLAG_DEFAULT as u32,
-            null_mut(),
-            &mut raw,
-        )
-    };
+    let status = unsafe { SHGetKnownFolderPath(id, KF_FLAG_DEFAULT as u32, null_mut(), &mut raw) };
     let path = (status >= 0 && !raw.is_null()).then(|| {
         // SAFETY: on success the shell returns a NUL-terminated wide string.
         let length = (0..)
@@ -70,6 +74,27 @@ pub fn shown_normal(hwnd: isize) -> bool {
     let hwnd = hwnd as windows_sys::Win32::Foundation::HWND;
     // SAFETY: both only read the state of a window handle this process owns.
     unsafe { IsZoomed(hwnd) == 0 && IsIconic(hwnd) == 0 }
+}
+
+/// Puts the window behind every other window without activating it (the background window
+/// of test runs, [`crate::app::background_window`]).
+pub fn send_to_back(hwnd: isize) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        HWND_BOTTOM, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SetWindowPos,
+    };
+    let hwnd = hwnd as windows_sys::Win32::Foundation::HWND;
+    // SAFETY: only reorders a window handle this process owns.
+    unsafe {
+        SetWindowPos(
+            hwnd,
+            HWND_BOTTOM,
+            0,
+            0,
+            0,
+            0,
+            SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+        );
+    }
 }
 
 pub fn wide(value: impl AsRef<OsStr>) -> Vec<u16> {
@@ -116,22 +141,6 @@ pub fn set_clipboard_text(text: &str) -> bool {
         CloseClipboard();
         ok
     }
-}
-
-/// `explorer /select,<path>` for an existing absolute path; anything else is ignored.
-pub fn show_item_in_folder(path: &str) -> bool {
-    use std::os::windows::process::CommandExt;
-    let candidate = Path::new(path);
-    if !candidate.is_absolute() || path.len() > 4096 || path.contains('"') || !candidate.exists() {
-        return false;
-    }
-    let explorer = std::env::var_os("SystemRoot")
-        .map(|root| Path::new(&root).join("explorer.exe"))
-        .unwrap_or_else(|| "explorer.exe".into());
-    Command::new(explorer)
-        .raw_arg(format!("/select,\"{path}\""))
-        .spawn()
-        .is_ok()
 }
 
 struct Key(HKEY);

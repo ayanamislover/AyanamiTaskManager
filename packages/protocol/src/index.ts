@@ -15,12 +15,9 @@ export * from "./views/session.js";
 export * from "./views/task.js";
 export {
   COMPLETION_GATE_REQUIRED_STATUSES,
-  generateWorkItemOperationTable,
   legalWorkItemOperations,
   resolveWorkItemOperation,
   WORK_ITEM_OPERATION_NAMES,
-  WORK_ITEM_OPERATION_TABLE_BEGIN,
-  WORK_ITEM_OPERATION_TABLE_END,
   WorkItemOperations,
   workItemOperationHasEffect,
 } from "./work-item-operations.js";

@@ -38,6 +38,7 @@ function client(): AyanamiClient {
       previewRecord: vi.fn(),
     },
     backups: { list: vi.fn(), createKnowledge: vi.fn(), restore: vi.fn() },
+    data: { importSources: vi.fn(), previewImport: vi.fn(), applyImport: vi.fn() },
   } as unknown as AyanamiClient;
 }
 
@@ -157,6 +158,81 @@ describe("Knowledge feature", () => {
     expect(styles).toContain(".atm-knowledge-layout");
     expect(styles).toContain(".atm-knowledge-markdown");
     expect(styles).toContain(".atm-knowledge-body-editor");
+  });
+
+  it("lists whole-store backups as restorable knowledge backups instead of an empty state that never fills", () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(
+      ["backups", "knowledge"],
+      [
+        {
+          id: "store-1",
+          scope: "STORE",
+          reason: "DAILY",
+          sizeBytes: 4096,
+          createdAt: "2026-10-09T00:00:00.000Z",
+          verifiedAt: "2026-10-09T00:00:01.000Z",
+        },
+      ],
+    );
+    const markup = renderToStaticMarkup(
+      createElement(
+        QueryClientProvider,
+        { client: queryClient },
+        createElement(KnowledgeBackupPanel, { client: client(), notify: vi.fn() }),
+      ),
+    );
+    // peer W5 r2：3.0 的备份是整库的（STORE），按知识库范围恢复；文案对 2.0、3.0 都成立。
+    expect(markup).toContain("整库备份 · DAILY");
+    expect(markup).toContain(">恢复<");
+    expect(markup).not.toContain("没有知识库备份");
+    expect(markup).toContain("备份包含本地共享知识库");
+    expect(markup).not.toContain("仅备份本地共享知识数据库");
+  });
+
+  it("lists 2.x knowledge backups with a merge entry and nothing else from the legacy catalog", () => {
+    const queryClient = new QueryClient();
+    queryClient.setQueryData(["backups", "knowledge"], []);
+    queryClient.setQueryData(["import-sources"], {
+      packages: [],
+      legacyBackups: [
+        {
+          id: "lb-k",
+          scope: "KNOWLEDGE",
+          importable: "AS_KNOWLEDGE",
+          reason: "KNOWLEDGE_DAILY",
+          sizeBytes: 2048,
+          createdAt: "2026-09-01T00:00:00.000Z",
+        },
+        {
+          id: "lb-p",
+          scope: "PROJECT",
+          importable: "AS_PROJECT",
+          reason: "DAILY",
+          sizeBytes: 4096,
+          createdAt: "2026-09-01T00:00:00.000Z",
+        },
+      ],
+    });
+    const markup = renderToStaticMarkup(
+      createElement(
+        QueryClientProvider,
+        { client: queryClient },
+        createElement(KnowledgeBackupPanel, { client: client(), notify: vi.fn() }),
+      ),
+    );
+    expect(markup).toContain("2.x 知识库备份");
+    expect(markup).toContain("KNOWLEDGE_DAILY");
+    expect(markup).toContain(">合并进知识库<");
+    expect(markup).not.toContain(">DAILY ·");
+    const source = readFileSync(
+      join(process.cwd(), "packages", "ui", "src", "features", "knowledge-backup-panel.tsx"),
+      "utf8",
+    );
+    // 合并前先预览、确认，提示新增与保持不变的条数。
+    expect(source).toContain("client.data.previewImport(source)");
+    expect(source).toContain("dialogs.confirm(");
+    expect(source).toContain("client.data.applyImport(source)");
   });
 
   it("exposes the global KNOWLEDGE backup and restore entry in settings", () => {

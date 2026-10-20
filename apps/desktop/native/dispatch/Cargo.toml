@@ -1,0 +1,42 @@
+[package]
+name = "atm-dispatch"
+version = "0.0.0"
+description = "ATM 3 Claude Code dispatch: request ledger, headless claude sessions, process identity and tracking"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+atm-agents = { path = "../agents" }
+atm-domain = { path = "../domain" }
+atm-service = { path = "../service" }
+atm-sync = { path = "../sync" }
+atm-sync-protocol = { path = "../sync-protocol" }
+serde_json = { workspace = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Globalization",
+  "Win32_Security",
+  "Win32_Storage_FileSystem",
+  "Win32_System_Console",
+  "Win32_System_Pipes",
+  "Win32_System_Threading",
+  "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+# 用例用真实的服务（一个空库）驱动派单器。
+atm-store = { path = "../store" }
+rusqlite = "0.39"
+
+# 用例里当作 claude 拉起的假程序：照参数与 stdin 写 stream-json 日志，按环境变量决定结局。
+# 只给用例用；发布物只复制宿主、atm、atm-mcp 等指定的几个 exe。
+[[bin]]
+name = "atm-fake-claude"
+path = "src/bin/fake_claude.rs"
+test = false
+doc = false

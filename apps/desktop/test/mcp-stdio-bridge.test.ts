@@ -15,13 +15,14 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { replaceFileAtomically } from "../../daemon/src/runtime-discovery.js";
-import { ensureNativeShim, SHIM_CRATE, SHIM_EXE, WAKE_RECORDER_EXE } from "./native-shim.js";
+import { ensureNativeShim, SHIM_CRATE, WAKE_RECORDER_EXE } from "./native-shim.js";
 
 /**
- * One stdio contract, two implementations. The native shim replaces the JavaScript
- * bridge on every Agent session, so anything a client or the daemon can observe is
- * asserted against both from the same test body; a case that only one of them passes
- * is a behaviour change, not a detail.
+ * The stdio contract of the 2.x JavaScript bridge (mcp-stdio.cjs), which still ships with
+ * 2.x installs. The 3.x native bridge (atm-mcp.exe) no longer shares it: it reads the 3.x
+ * data root, has no legacy all-tools endpoint and signs write calls (10 R11 A3), so its
+ * black-box suite lives next to the service it talks to, in
+ * apps/desktop/native/http/tests/bridge.rs.
  */
 const JS_BRIDGE = join(process.cwd(), "apps", "desktop", "resources", "mcp-stdio.cjs");
 
@@ -38,12 +39,6 @@ const implementations: Implementation[] = [
     prepare: () => undefined,
     command: () => process.execPath,
     args: (extra) => [JS_BRIDGE, ...extra],
-  },
-  {
-    name: "native shim (atm-mcp.exe)",
-    prepare: () => void ensureNativeShim(),
-    command: () => SHIM_EXE,
-    args: (extra) => extra,
   },
 ];
 
@@ -749,8 +744,8 @@ describe.each(implementations)("stdio bridge contract: $name", (implementation) 
 /**
  * Waking the desktop. The JS bridge keys the wake off its own execPath (it runs as the
  * desktop exe), so it is driven through its exported `wakeDesktop` with an execPath
- * that points at the recorder; the shim is driven end to end from a layout that puts a
- * recorder where AyanamiTaskManager.exe would be. Both are held to the same record.
+ * that points at the recorder (built with the native crate, which owns the test double).
+ * The 3.x native bridge's wake is covered in apps/desktop/native/http/tests/bridge.rs.
  *
  * Fixture executables live under the crate's target directory, never in %TEMP%.
  */
@@ -870,53 +865,5 @@ describe("waking the desktop", () => {
     }
     expect(crashed).toEqual([]);
     expect(existsSync(relativeRecord)).toBe(false);
-  });
-
-  it("native shim：没有 daemon 时只唤醒一次同级桌面，发布后完成请求", async () => {
-    const { root, record } = layout("shim");
-    const shim = join(root, "resources", "atm-mcp.exe");
-    copyFileSync(SHIM_EXE, shim);
-    const dir = dataDir("wake-shim");
-    const { port } = await listen((incoming, response) => {
-      incoming.resume();
-      incoming.once("end", () => {
-        response.writeHead(200, { "content-type": "application/json" });
-        response.end(reply(51));
-      });
-    });
-
-    const bridge = start({ ...implementations[1]!, command: () => shim }, ["--profile", "core"], {
-      ...process.env,
-      ATM_DATA_DIR: dir,
-      ATM_WAKE_RECORD: record,
-      ELECTRON_RUN_AS_NODE: "1",
-    });
-    bridge.send(request(51));
-    const [woken] = await records(record, 1);
-    expect(woken).toMatchObject({
-      args: ["--background", "--agent-wake"],
-      electronRunAsNode: null,
-      dataDir: dir,
-    });
-    // It keeps polling every 100 ms; it must not keep relaunching the desktop.
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 600));
-    expect(readFileSync(record, "utf8").split("\n").filter(Boolean)).toHaveLength(1);
-
-    publish(dir, `http://127.0.0.1:${port}`, "woken-token");
-    expect(await bridge.next()).toBe(reply(51));
-  });
-
-  it("native shim：目录布局里没有桌面 exe 时不唤醒任何东西", async () => {
-    // target/release has no AyanamiTaskManager.exe one level up; nothing may be started.
-    const dir = dataDir("wake-none");
-    const record = join(dir, "wake.ndjson");
-    const bridge = start(implementations[1]!, ["--profile", "core"], {
-      ...process.env,
-      ATM_DATA_DIR: dir,
-      ATM_WAKE_RECORD: record,
-    });
-    bridge.send(request(52));
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 500));
-    expect(existsSync(record)).toBe(false);
   });
 });

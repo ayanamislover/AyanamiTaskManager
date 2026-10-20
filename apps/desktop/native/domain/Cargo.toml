@@ -1,0 +1,17 @@
+[package]
+name = "atm-domain"
+version = "0.0.0"
+description = "AyanamiTaskManager 3 domain rules: principals, capabilities, errors, work-item state machine, completion gate, progress"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[features]
+# 只在 e2e 测试构建里打开：带上 `UiSurface::E2eTest`（03 P-012）。
+e2e = []
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }

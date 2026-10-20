@@ -1,0 +1,37 @@
+[package]
+name = "atm-sync"
+version = "0.0.0"
+description = "ATM 3 phone sync on the desktop: sync secrets sealed with Windows DPAPI (byte-compatible with 2.x), relay client and connector"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[dependencies]
+atm-domain = { path = "../domain" }
+atm-service = { path = "../service" }
+atm-sync-protocol = { path = "../sync-protocol" }
+serde_json = { workspace = true }
+url = "2"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Networking_WinHttp",
+  "Win32_Security_Cryptography",
+  "Win32_System_SystemInformation",
+  "Win32_System_Time",
+] }
+
+[target.'cfg(windows)'.dev-dependencies]
+# 用例里独立写一份 2.x 宿主的 DPAPI 调用（tests/secrets.rs 的 `legacy`）。
+windows-sys = { workspace = true, features = [
+  "Win32_Foundation",
+  "Win32_Security_Cryptography",
+] }
+
+[dev-dependencies]
+# 用例用真实的服务（一个空库）驱动连接器。
+atm-store = { path = "../store" }
+rusqlite = "0.39"

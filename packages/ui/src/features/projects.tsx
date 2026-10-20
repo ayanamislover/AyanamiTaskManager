@@ -323,7 +323,7 @@ export function ProjectsPage({
     <>
       <PageHead
         title="项目"
-        description="每个正式项目拥有独立 SQLite 文件和可移动的路径别名。"
+        description="正式项目各有自己的任务、记录和可移动的路径别名，全部存在同一个本地数据库里。"
         actions={
           <button className="atm-button primary" onClick={() => setWizard(true)}>
             <Plus size={16} />

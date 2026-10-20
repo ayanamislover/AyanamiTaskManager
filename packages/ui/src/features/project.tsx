@@ -120,7 +120,6 @@ export function ProjectPage({
     <ProjectDiagnostics
       client={client}
       projectCode={project.code}
-      notify={notify}
       openTask={openTask}
       diagnostics={diagnostics}
     />

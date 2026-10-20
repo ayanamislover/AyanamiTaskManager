@@ -26,11 +26,12 @@ describe("desktop E2E fixture contract", () => {
     const source = readFileSync(sourcePath, "utf8");
     const readySignals = source.match(/notifyRendererReady:\s*\(\)\s*=>\s*undefined/gu) ?? [];
 
-    expect(source.match(/ayanamiDesktop\s*=/gu)).toHaveLength(1);
+    // 两处直接赋值（设置页、顶栏与窗口外框），一处 defineProperty（MCP bridge 观测）：每个都要有就绪信号。
+    expect(source.match(/ayanamiDesktop\s*=/gu)).toHaveLength(2);
     expect(source.match(/Object\.defineProperty\(window,\s*"ayanamiDesktop"/gu)).toHaveLength(1);
-    expect(readySignals).toHaveLength(2);
+    expect(readySignals).toHaveLength(3);
 
     const mutated = source.replace("notifyRendererReady: () => undefined,", "");
-    expect(mutated.match(/notifyRendererReady:\s*\(\)\s*=>\s*undefined/gu)).toHaveLength(1);
+    expect(mutated.match(/notifyRendererReady:\s*\(\)\s*=>\s*undefined/gu)).toHaveLength(2);
   });
 });

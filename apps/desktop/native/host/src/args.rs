@@ -11,12 +11,16 @@ pub struct Args {
     pub headless: Option<Headless>,
     #[cfg(feature = "smoke")]
     pub smoke_quit: bool,
+    /// lifecycle / 看门狗冒烟要发给主实例的命令（W5g）。
+    #[cfg(feature = "smoke")]
+    pub smoke_command: Option<atm_install_state::ipc::Command>,
 }
 
 /// Modes that run a Node entry with inherited stdio instead of the GUI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Headless {
-    /// `--cli <args…>` and `--doctor`
+    /// `--cli <args…>` and `--doctor`: handed to atm.exe (06 §6, W6a); the host itself no
+    /// longer carries a CLI.
     Cli(Vec<String>),
     /// `--mcp-stdio [--profile p]`, or the Electron-as-node legacy form
     /// `<dataDir>\mcp-stdio.cjs [--profile p]` with ELECTRON_RUN_AS_NODE=1.
@@ -61,7 +65,7 @@ pub fn parse(argv: &[String], electron_run_as_node: bool) -> Result<Args, String
             return Ok(args);
         }
         Some("--doctor") if argv.len() == 1 => {
-            args.headless = Some(Headless::Cli(vec!["--doctor".into()]));
+            args.headless = Some(Headless::Cli(vec!["doctor".into()]));
             return Ok(args);
         }
         Some("--mcp-stdio") => {
@@ -97,6 +101,27 @@ pub fn parse(argv: &[String], electron_run_as_node: bool) -> Result<Args, String
             },
             #[cfg(feature = "smoke")]
             "--smoke-quit" => args.smoke_quit = true,
+            #[cfg(feature = "smoke")]
+            "--smoke-session-end" => {
+                args.smoke_command = Some(atm_install_state::ipc::Command::SmokeSessionEnd)
+            }
+            #[cfg(feature = "smoke")]
+            "--smoke-stall-ui" => {
+                args.smoke_command = Some(atm_install_state::ipc::Command::SmokeStallUi)
+            }
+            #[cfg(feature = "smoke")]
+            "--smoke-stall-writer" => {
+                args.smoke_command = Some(atm_install_state::ipc::Command::SmokeStallWriter)
+            }
+            // 保活冒烟（W8c）：托盘「完全退出」的分支，与 setup 发的那条 QUIT。
+            #[cfg(feature = "smoke")]
+            "--smoke-tray-quit" => {
+                args.smoke_command = Some(atm_install_state::ipc::Command::SmokeTrayQuit)
+            }
+            #[cfg(feature = "smoke")]
+            "--smoke-setup-quit" => {
+                args.smoke_command = Some(atm_install_state::ipc::Command::Quit)
+            }
             other => return Err(format!("ARGUMENT_UNKNOWN: {other}")),
         }
     }
@@ -163,7 +188,7 @@ mod tests {
         assert!(parse(&v(&[r"C:\evil.js"]), true).is_err());
         assert_eq!(
             parse(&v(&["--doctor"]), false).unwrap().headless,
-            Some(Headless::Cli(v(&["--doctor"])))
+            Some(Headless::Cli(v(&["doctor"])))
         );
         assert_eq!(
             parse(&v(&["--cli", "project", "list"]), false)

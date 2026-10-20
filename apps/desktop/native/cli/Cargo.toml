@@ -1,0 +1,38 @@
+[package]
+name = "atm-cli"
+version = "0.0.0"
+description = "AyanamiTaskManager 3 command line (atm.exe): Agent REST client and offline maintenance"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "atm"
+path = "src/main.rs"
+
+# 03 §2.5（A6）：离线子命令不构造 Principal，整个 atm.exe 也不链接 atm-http、ui-bridge、atm-service；
+# 在线命令只是 Agent REST 的客户端。tests/deps_guard.rs 沿 path 依赖走一遍，越界就变红。
+[dependencies]
+# 只用 Capability::user_entry 的入口文字（本地拒绝时给出），不构造主体。
+atm-domain = { path = "../domain" }
+# doctor --offline 读转换清单与启动状态，与宿主同一套解析。
+atm-store = { path = "../store" }
+atm-install-state = { path = "../install-state" }
+# doctor --offline 只读打开整库（与 store 同一个版本，不新增下载）。
+rusqlite = { version = "0.39", features = ["bundled"] }
+serde_json = { workspace = true }
+# 回环探活要关掉 SYN 重传（与 atm-mcp 同一个做法，见 src/http.rs）。
+socket2 = "0.6"
+
+# 版本资源（与宿主、setup 同一套）：打包要求 atm.exe 带本版本的 ProductVersion（W8a）。
+[build-dependencies]
+atm-build-support = { path = "../build-support" }
+
+[dev-dependencies]
+# 黑盒用例：真实服务 + 真实 Agent HTTP，atm.exe 作为子进程连它（与 http/tests/support 同一套夹具）。
+atm-http = { path = "../http" }
+atm-service = { path = "../service" }
+atm-jobs = { path = "../jobs" }
+tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "time", "macros"] }

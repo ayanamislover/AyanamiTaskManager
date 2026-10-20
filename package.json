@@ -1,7 +1,7 @@
 {
   "name": "ayanami-task-manager",
   "productName": "AyanamiTaskManager",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "description": "Local-first Windows project progress control plane for AI agents.",
   "author": "ayanami",
   "private": true,
@@ -27,7 +27,7 @@
     "test": "vitest run --maxWorkers=1 --no-file-parallelism",
     "test:unit": "vitest run packages/protocol packages/domain",
     "test:integration": "vitest run packages/storage-sqlite packages/application apps/daemon",
-    "test:e2e": "playwright test",
+    "test:e2e": "tsx scripts/build-e2e.ts && playwright test",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "atm": "tsx packages/cli/src/bin.ts",
@@ -40,8 +40,6 @@
     "benchmark:blur-packaged": "tsx scripts/packaged-blur-benchmark.ts",
     "smoke:history": "tsx scripts/default-history-smoke.ts",
     "benchmark": "tsx scripts/benchmark.ts",
-    "generate:mcp-contracts": "tsx scripts/generate-mcp-contracts.ts",
-    "generate:operation-contracts": "tsx scripts/generate-operation-contracts.ts",
     "migrate:data-root": "tsx scripts/migrate-data-root.ts"
   },
   "dependencies": {

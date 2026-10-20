@@ -35,18 +35,18 @@ describe("关窗后释放内存", () => {
     expect(release).toHaveBeenCalledTimes(2);
   });
 
-  it("core 收到宿主的开关窗事件就驱动它，释放时让各连接还页缓存并做完整 GC；宿主只给 core 开 GC", () => {
+  it("core 收到宿主的开关窗事件就驱动它，释放时让各连接还页缓存并做完整 GC；3.0 宿主不再起带 GC 开关的 Node", () => {
     const core = readFileSync("apps/desktop/src/core-main.ts", "utf8");
     expect(core).toContain("windowMemory.windowShown();");
     expect(core).toContain("windowMemory.windowClosed();");
     expect(core).toContain("windowMemory.cancel();");
     expect(core).toContain("runtime?.service.databases.releaseMemory();");
     expect(core).toContain("(globalThis as { gc?: () => void }).gc?.();");
+    // 3.0（W8a）：服务在宿主进程里，关窗释放内存由 Rust 的 MemoryRelease 作业做；宿主的布局里没有 Node 入口，
+    // CLI 是 atm.exe（W6a）。
     const paths = readFileSync("apps/desktop/native/host/src/paths.rs", "utf8");
-    expect(paths).toContain('const CORE_NODE_FLAGS: [&str; 1] = ["--expose-gc"];');
-    expect(paths).toContain("core: with_core_flags(node_entry(&node, packaged_core, Vec::new())),");
-    expect(paths).toContain(
-      'cli: node_entry(&node, app_dir.join("runtime").join("cli.mjs"), Vec::new()),',
-    );
+    expect(paths).not.toMatch(/CORE_NODE_FLAGS|--expose-gc|node_entry|with_core_flags/u);
+    expect(paths).toContain("cli: cli_entry(&app_dir, true),");
+    expect(paths).not.toContain("cli.mjs");
   });
 });

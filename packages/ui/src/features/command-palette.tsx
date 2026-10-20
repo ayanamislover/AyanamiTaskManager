@@ -23,7 +23,8 @@ export function CommandPalette({
     queryFn: () => client.search(query),
     enabled: query.trim().length > 0,
   });
-  const hits = ((result.data as any)?.hits ?? []) as any[];
+  // 搜索页是 camelCase（protocol 的 SearchHit）；2.0 这里读成了 entity_key，点开任务永远走不到。
+  const hits = result.data?.hits ?? [];
   return (
     <div
       className="atm-modal-backdrop"
@@ -57,10 +58,10 @@ export function CommandPalette({
             {hits.map((hit, index) => (
               <button
                 className="atm-row"
-                key={`${hit.entity_key}:${index}`}
+                key={`${hit.entityKey}:${index}`}
                 onClick={() => {
-                  if (hit.entity_type === "WORK_ITEM" && hit.project)
-                    onTask(hit.project, hit.entity_key);
+                  if (hit.entityType === "WORK_ITEM" && hit.project)
+                    onTask(hit.project, hit.entityKey);
                   else if (hit.project) onProject(hit.project);
                   close();
                 }}
@@ -68,7 +69,7 @@ export function CommandPalette({
                 <div>
                   <div className="atm-row-title">{hit.title}</div>
                   <div className="atm-row-sub">
-                    {hit.entity_key} · {hit.project ?? "临时任务"}
+                    {hit.entityKey} · {hit.project ?? "临时任务"}
                   </div>
                 </div>
                 <ArrowRight size={16} />

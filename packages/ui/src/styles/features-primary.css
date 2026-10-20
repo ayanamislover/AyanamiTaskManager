@@ -148,48 +148,6 @@
   text-align: center;
   white-space: nowrap;
 }
-.atm-projection-summary {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 8px;
-  margin-top: 10px;
-}
-.atm-projection-panel {
-  margin-top: 18px;
-}
-.atm-settings-grid > .atm-projection-panel {
-  margin-top: 0;
-}
-.atm-projection-panel .atm-panel-head > div:first-child {
-  min-width: 0;
-}
-.atm-projection-body {
-  display: grid;
-  gap: 10px;
-}
-.atm-projection-body > .atm-project-stats {
-  margin-top: 0;
-}
-.atm-projection-failure {
-  min-width: 0;
-  border: 1px solid var(--atm-border);
-  border-radius: var(--atm-radius-row);
-  overflow: hidden;
-}
-.atm-projection-failure .atm-row {
-  border: 0;
-}
-.atm-projection-failure .atm-projection-error {
-  margin: 0 12px 12px;
-}
-.atm-projection-error {
-  display: -webkit-box;
-  overflow: hidden;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-  line-clamp: 2;
-}
 .atm-attention-grid {
   display: grid;
   grid-template-columns: 1fr;
@@ -282,6 +240,10 @@
   gap: 7px 12px;
   color: var(--atm-text-muted);
   font-size: 12px;
+}
+/* 第二列被「未检测到，安装/卸载不可用」这类长说明撑宽时，状态胶囊不跟着拉长：靠右、按内容宽。 */
+.atm-integration-checks > .atm-integration-status {
+  justify-self: end;
 }
 .atm-integration-status {
   display: inline-flex;

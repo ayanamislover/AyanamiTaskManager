@@ -68,4 +68,29 @@ describe("Knowledge client surface", () => {
     expect(calls[5]?.body).toMatchObject({ id: "k/1", archived: true });
     expect(calls[7]?.body).toEqual({ scope: "KNOWLEDGE" });
   });
+
+  it("names the scope when restoring a backup and sends no body without one", async () => {
+    const calls: Array<{ url: string; body?: unknown }> = [];
+    const fetchImpl = vi.fn<typeof fetch>(async (input, init) => {
+      calls.push({
+        url: String(input),
+        ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }),
+      });
+      return new Response("{}", { status: 200, headers: { "content-type": "application/json" } });
+    });
+    const client = new AyanamiClient({ endpoint: "http://127.0.0.1:4393", token: "t", fetchImpl });
+
+    await client.backups.restore("b/1", { scope: "KNOWLEDGE" });
+    await client.backups.restore("b2", { scope: "PROJECT", project: "ATM" });
+    await client.backups.restore("b3");
+
+    expect(calls).toEqual([
+      { url: "http://127.0.0.1:4393/api/v1/backups/b%2F1/restore", body: { scope: "KNOWLEDGE" } },
+      {
+        url: "http://127.0.0.1:4393/api/v1/backups/b2/restore",
+        body: { scope: "PROJECT", project: "ATM" },
+      },
+      { url: "http://127.0.0.1:4393/api/v1/backups/b3/restore" },
+    ]);
+  });
 });

@@ -1,3 +1,5 @@
+// 先于一切：这里拉起的宿主窗口不抢焦点、压在最底层（scripts/test-windows.ts）。
+import "./test-windows.js";
 import { execFileSync, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -18,6 +20,7 @@ import {
   type ReleaseFingerprint,
   type ReleaseResumeDecision,
 } from "./release-fingerprint.js";
+import { isV3 } from "./version-sites.js";
 
 type CommandResult = {
   name: string;
@@ -39,11 +42,24 @@ const commands: Array<{ name: string; args: string[] }> = [
   { name: "typecheck", args: ["typecheck"] },
   { name: "test", args: ["test"] },
   { name: "e2e", args: ["test:e2e"] },
-  { name: "benchmark", args: ["benchmark"] },
   { name: "build", args: ["build"] },
+  // 打包阶段最后记下候选五个 exe 的哈希（candidate-binaries.json）；之后每份报告都对它（L6）。
   { name: "package", args: ["exec", "tsx", "scripts/package-native.ts", "--release"] },
   { name: "packaged-smoke", args: ["smoke:packaged"] },
   { name: "distribution-smoke", args: ["exec", "tsx", "scripts/distribution-smoke.ts"] },
+  // 安装、更新、回滚、2.x→3.0 转换与保活的沙箱演练；2.x 场景要 output/drill/package-2.0.0。
+  // 演练包从这次构建重打：上回留下的包里是旧的 exe，演练就不是在测候选。
+  {
+    name: "install-drill",
+    args: ["exec", "tsx", "scripts/install-drill.ts", "--rebuild-packages"],
+  },
+  // 3.0 预算（08 §3）：体积、内存、冷启动，量的是生产便携包与 smoke 构建。
+  {
+    name: "budget",
+    args: ["exec", "tsx", "scripts/budget-measure.ts", "--json", "output/budget-report.json"],
+  },
+  // 掉电演练（W8f）：转换各阶段、日常写入时强杀，坏库与 recover --offline；用 budget 留下的样本库。
+  { name: "power-loss", args: ["exec", "tsx", "scripts/power-loss-drill.ts"] },
 ];
 
 await mkdir(logDir, { recursive: true });
@@ -56,6 +72,11 @@ assertStageInputsResolve(
     .split("\0")
     .filter(Boolean),
 );
+// 3.x 的升级、转换与保活都按主版本认 3.x（install-state `is_v3`）：先拒，不白跑一遍流水线。
+const productVersion = (
+  JSON.parse(await readFile(join(root, "package.json"), "utf8")) as { version: string }
+).version;
+if (!isV3(productVersion)) throw new Error(`RELEASE_VERSION_NOT_V3: ${productVersion}`);
 const releaseMode = parseReleaseRunMode(process.argv.slice(2));
 const fingerprint = await computeReleaseFingerprint(root);
 // 在十阶段开始前就拒绝脏工作树或「HEAD 还是旧版本」的升版输入，避免花完流水线

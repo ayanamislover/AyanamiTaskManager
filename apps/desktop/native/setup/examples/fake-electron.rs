@@ -60,8 +60,7 @@ fn main() {
     // The old app's installMcpRuntimeLink: current → its own app directory.
     let link = data.join("current");
     let _ = fs::remove_dir(&link);
-    let _ = Command::new("cmd.exe")
-        .args(["/d", "/c", "mklink", "/J"])
+    let _ = hidden(Command::new("cmd.exe").args(["/d", "/c", "mklink", "/J"]))
         .arg(&link)
         .arg(&app_dir)
         .output();
@@ -94,8 +93,15 @@ fn main() {
         "{{\"endpoint\":\"http://127.0.0.1:{port}\",\"token\":\"drill-not-a-secret\",\"pid\":{pid},\"instanceId\":\"{nonce}\",\"version\":\"{version}\",\"startedAt\":\"{started_ms}\"}}"
     );
     fs::write(runtime.join("daemon.json"), descriptor).expect("publish");
-    let _helper = Command::new(&me).arg("--type=renderer").spawn();
+    let _helper = hidden(Command::new(&me).arg("--type=renderer")).spawn();
     for stream in listener.incoming() {
         drop(stream);
     }
+}
+
+/// The drill starts this stand-in detached (no console): its own console children would each open a
+/// visible window. Give them a console without one (W8k).
+fn hidden(command: &mut Command) -> &mut Command {
+    use std::os::windows::process::CommandExt;
+    command.creation_flags(0x0800_0000)
 }

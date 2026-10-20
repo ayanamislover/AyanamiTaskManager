@@ -1,0 +1,43 @@
+{
+  "content": {
+    "bodyMarkdown": "# 标题\n\n正文 ✓",
+    "title": "  备份策略  ",
+    "slug": " backup-policy ",
+    "summary": "每天两份",
+    "tags": [
+      " ops ",
+      "备份"
+    ],
+    "sourceRefs": [
+      {
+        "reference": " ATM-D-1 ",
+        "type": "manual"
+      }
+    ]
+  },
+  "user": [
+    {
+      "name": "user new",
+      "opId": "u-new",
+      "fp": "7f042f3972a75682bd29c1ded541654572b404041353921f1c96cf618e30e83f",
+      "payload": "{\"operation\":\"save\",\"slug\":\"backup-policy\",\"title\":\"备份策略\",\"summary\":\"每天两份\",\"useWhen\":\"\",\"tags\":[\"ops\",\"备份\"],\"aliases\":[],\"appliesTo\":[],\"bodyMarkdown\":\"# 标题\\n\\n正文 ✓\",\"sourceRefs\":[{\"type\":\"manual\",\"reference\":\"ATM-D-1\"}],\"opId\":\"u-new\",\"expectedVersion\":0}"
+    },
+    {
+      "name": "user update",
+      "opId": "u-upd",
+      "fp": "402ac46d8ce7bf2d010fe1ba9b06578720201db602a58614b5ad4c4d7e911cf4",
+      "payload": "{\"operation\":\"save\",\"slug\":\"backup-policy\",\"title\":\"备份策略\",\"summary\":\"每天两份\",\"useWhen\":\"改备份时\",\"tags\":[\"ops\",\"备份\"],\"aliases\":[\"保留策略\"],\"appliesTo\":[\"ATM\"],\"bodyMarkdown\":\"# 标题\\n\\n正文 ✓\",\"sourceRefs\":[{\"type\":\"manual\",\"reference\":\"ATM-D-1\"}],\"opId\":\"u-upd\",\"id\":\"01KENTRY000000000000000000\",\"expectedVersion\":3,\"expectedRevisionId\":\"01KREV00000000000000000003\"}"
+    }
+  ],
+  "archive": {
+    "opId": "u-arc",
+    "fp": "73f065cf6c0768321ea93b98dce4776c7fdffc83b1611321396d1d2bc48e3c50",
+    "payload": "{\"operation\":\"archive\",\"opId\":\"u-arc\",\"id\":\"01KENTRY000000000000000000\",\"expectedVersion\":4,\"expectedRevisionId\":\"01KREV00000000000000000003\",\"archived\":true}"
+  },
+  "agent": {
+    "opId": "a-new",
+    "key": "agent:3cb01b0aa1c64b9adc2f8fc587dfc669b78cc139a2a99012e8d3bc95ea66e809",
+    "fp": "abb6fd9c381967590177d17a4a022e5dc9834d6ce4552e001535b35e5d21150e",
+    "payload": "{\"operation\":\"agent.save\",\"slug\":\"backup-policy\",\"title\":\"备份策略\",\"summary\":\"每天两份\",\"useWhen\":\"\",\"tags\":[\"ops\",\"备份\"],\"aliases\":[],\"appliesTo\":[],\"bodyMarkdown\":\"# 标题\\n\\n正文 ✓\",\"sourceRefs\":[{\"type\":\"manual\",\"reference\":\"ATM-D-1\"}],\"project\":\"PA\",\"session\":\"S1\",\"opId\":\"a-new\",\"author\":{\"type\":\"AGENT\",\"agentId\":\"claude\",\"sessionId\":\"S1\",\"projectId\":\"PA\"}}"
+  }
+}

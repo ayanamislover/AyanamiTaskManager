@@ -1,5 +1,6 @@
-import { mkdirSync } from "node:fs";
-import { resolve } from "node:path";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 import {
   expect,
   request as createRequest,
@@ -7,12 +8,20 @@ import {
   type APIRequestContext,
   type Page,
 } from "@playwright/test";
-import Database from "better-sqlite3";
+import { agentApi, agentContext } from "./agent.js";
 
 const apiUrl = "http://127.0.0.1:4394/api/v1";
 // 分离凭证（ATM-T-0503）：场景搭建与界面走用户 token；daemon.json 里的是 Agent token。
 const headers = { authorization: "Bearer e2e-user-token" };
-const agentHeaders = { authorization: "Bearer e2e-test-token" };
+
+/** Agent 建任务的回执（atm_task_create 的 ACK）里新任务的 key。 */
+function workItemKey(ack: any): string {
+  const entity = (ack.entities as Array<{ entity_type: string; key: string }>).find(
+    (e) => e.entity_type === "WORK_ITEM",
+  );
+  if (!entity) throw new Error(`no WORK_ITEM in ${JSON.stringify(ack)}`);
+  return entity.key;
+}
 const longSidebarProjectName =
   "Codex Agent Permission Preflight And Deployment Readiness Verification";
 
@@ -431,10 +440,10 @@ test("Agent 的恢复请求经用户在垃圾箱授权后才恢复", async ({ pa
   const suffix = Date.now().toString(36);
   const code = `RQ${suffix.slice(-4).toUpperCase()}`;
   const name = `请求恢复验收 ${suffix}`;
-  // Agent 只有 daemon.json 里的那份 token。
-  const agent = await createRequest.newContext({ extraHTTPHeaders: agentHeaders });
+  // Agent 只有 daemon.json 里的那份 token，走的是 Agent HTTP，不是界面的入口。
+  const agent = await agentContext();
   const agentBegin = () =>
-    agent.post(`${apiUrl}/sessions`, {
+    agent.post(`${agentApi()}/sessions`, {
       data: { mode: "project", projectCode: code, agentId: "e2e-restore-agent" },
     });
   const caret = page.locator(".atm-project-trash .atm-engineering-toggle > svg");
@@ -448,15 +457,16 @@ test("Agent 的恢复请求经用户在垃圾箱授权后才恢复", async ({ pa
 
     const blocked = await agentBegin();
     expect(blocked.ok()).toBeFalsy();
+    // 3.0 的 Agent 信封是平的（02 §4）：`{ok: false, code, message, details, fix, …}`。
     const blockedBody = (await blocked.json()) as {
-      error: { details: { recovery: { request_id: string } } };
+      details: { recovery: { request_id: string } };
     };
-    expect(blockedBody.error.details.recovery).toMatchObject({
+    expect(blockedBody.details.recovery).toMatchObject({
       action: "await_user_restore_authorization",
     });
     // ATM-T-0503：拿着 daemon.json 令牌直接调授权接口，也过不去。
     const selfApproved = await agent.post(
-      `${apiUrl}/trash/restore-requests/${blockedBody.error.details.recovery.request_id}/approve`,
+      `${agentApi()}/trash/restore-requests/${blockedBody.details.recovery.request_id}/approve`,
     );
     expect(selfApproved.status()).toBe(403);
     expect(await selfApproved.text()).toContain("USER_AUTHORIZATION_REQUIRED");
@@ -567,6 +577,53 @@ test("在缓存新鲜期内切回项目，任务列表立刻还在", async ({ pa
   }
 });
 
+type Reveal = {
+  opacity: number;
+  transitionProperty: string;
+  transitions: Array<{ property: string; duration: number }>;
+  focusVisible: boolean;
+};
+
+/**
+ * 折叠内容一显示（`hidden` 去掉的那一刻，同一个任务里）就记下它的动效，{@link revealed} 取回。
+ * 事后在另一次 evaluate 里读会赶上过渡已经播完：token 时长 0.14 s，CI 的 runner 上 click 返回到
+ * evaluate 执行就超过了它（W8 关口第四次 CI，读到 opacity 1）。在这里读，样式在这一刻才算出来，
+ * @starting-style 的过渡从起点开始，与机器快慢无关。
+ */
+async function recordReveal(page: Page, selector: string): Promise<void> {
+  await page.evaluate((selector) => {
+    const body = document.querySelector(selector);
+    if (!body) throw new Error(`缺少折叠内容 ${selector}`);
+    if (!body.hasAttribute("hidden")) throw new Error(`折叠内容 ${selector} 已经是展开的`);
+    const store = window as unknown as { __reveal?: Reveal };
+    delete store.__reveal;
+    const observer = new MutationObserver(() => {
+      if (body.hasAttribute("hidden")) return;
+      observer.disconnect();
+      const style = getComputedStyle(body);
+      store.__reveal = {
+        opacity: Number(style.opacity),
+        transitionProperty: style.transitionProperty,
+        transitions: body.getAnimations().map((animation) => ({
+          property:
+            (animation as unknown as { transitionProperty?: string }).transitionProperty ?? "",
+          duration: Number(animation.effect?.getComputedTiming().duration ?? 0),
+        })),
+        // 焦点所在的元素（触发器）是不是键盘焦点态。
+        focusVisible: Boolean(document.activeElement?.matches(":focus-visible")),
+      };
+    });
+    observer.observe(body, { attributes: true, attributeFilter: ["hidden"] });
+  }, selector);
+}
+
+async function revealed(page: Page): Promise<Reveal> {
+  const handle = await page.waitForFunction(
+    () => (window as unknown as { __reveal?: Reveal }).__reveal ?? null,
+  );
+  return (await handle.jsonValue()) as Reveal;
+}
+
 test("折叠区展开有入场过渡，项目页不因分批返回而抖动", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.addInitScript(() => {
@@ -590,32 +647,23 @@ test("折叠区展开有入场过渡，项目页不因分批返回而抖动", as
 
   // 折叠区展开：以前是硬切，现在与弹层同一套 token 时长的淡入。
   const diagnostics = page.getByRole("region", { name: "项目诊断" });
+  await recordReveal(page, "#project-diagnostics-content");
   await diagnostics.getByRole("button", { name: "展开项目诊断" }).click();
-  const motion = await page.evaluate(() => {
-    const body = document.querySelector("#project-diagnostics-content");
-    if (!body) return null;
-    return {
-      // 时长取设计 token，不写死毫秒数：token 调了，用例跟着 token 走。
-      tokenDuration: Number.parseFloat(
-        getComputedStyle(document.documentElement).getPropertyValue("--atm-duration-hover"),
-      ),
-      opacity: Number(getComputedStyle(body).opacity),
-      transitions: body.getAnimations().map((animation) => ({
-        property:
-          (animation as unknown as { transitionProperty?: string }).transitionProperty ?? "",
-        duration: Number(animation.effect?.getComputedTiming().duration ?? 0),
-      })),
-    };
-  });
-  expect(motion).not.toBeNull();
-  expect(motion!.opacity).toBeLessThan(1);
-  expect(motion!.transitions.map((transition) => transition.property).sort()).toEqual([
+  const motion = await revealed(page);
+  // 时长取设计 token，不写死毫秒数：token 调了，用例跟着 token 走。
+  const tokenDuration = await page.evaluate(() =>
+    Number.parseFloat(
+      getComputedStyle(document.documentElement).getPropertyValue("--atm-duration-hover"),
+    ),
+  );
+  expect(motion.opacity).toBeLessThan(1);
+  expect(motion.transitions.map((transition) => transition.property).sort()).toEqual([
     "opacity",
     "transform",
   ]);
-  expect(motion!.tokenDuration).toBeGreaterThan(0);
-  expect(new Set(motion!.transitions.map((transition) => transition.duration))).toEqual(
-    new Set([motion!.tokenDuration]),
+  expect(tokenDuration).toBeGreaterThan(0);
+  expect(new Set(motion.transitions.map((transition) => transition.duration))).toEqual(
+    new Set([tokenDuration]),
   );
   await expect(page.getByRole("region", { name: "工程统计" })).toBeVisible();
 });
@@ -629,26 +677,18 @@ test("键盘展开折叠区即时呈现，鼠标展开仍有过渡", async ({ pa
       await expect(workspace).toHaveAttribute("aria-expanded", "false");
     }
   };
-  const bodyMotion = () =>
-    page.evaluate(() => {
-      const body = document.querySelector("#atm-workspace-navigation");
-      if (!body) throw new Error("缺少工作区折叠内容");
-      return {
-        animations: body.getAnimations().length,
-        transitionProperty: getComputedStyle(body).transitionProperty,
-        opacity: Number(getComputedStyle(body).opacity),
-        focusVisible: Boolean(document.querySelector(".atm-nav-disclosure:focus-visible")),
-      };
-    });
+  // 展开那一刻的动效（recordReveal）；之后再读会赶上过渡已经播完。
+  const body = "#atm-workspace-navigation";
 
   // 鼠标展开：页面刚打开、没有任何键盘交互，:focus-visible 不成立，过渡照旧。
   await page.goto("/#overview");
   await collapse();
+  await recordReveal(page, body);
   await workspace.click();
   await expect(workspace).toHaveAttribute("aria-expanded", "true");
-  const mouse = await bodyMotion();
+  const mouse = await revealed(page);
   expect(mouse.focusVisible, "鼠标点击不进入键盘焦点态").toBe(false);
-  expect(mouse.animations, "鼠标展开保留过渡").toBeGreaterThan(0);
+  expect(mouse.transitions.length, "鼠标展开保留过渡").toBeGreaterThan(0);
 
   // 键盘展开：必须是真键盘，程序 focus() 不一定成立 :focus-visible。
   await page.reload();
@@ -662,11 +702,12 @@ test("键盘展开折叠区即时呈现，鼠标展开仍有过渡", async ({ pa
     );
   }
   expect(reached, "键盘能走到工作区折叠按钮").toBe(true);
+  await recordReveal(page, body);
   await page.keyboard.press("Enter");
   await expect(workspace).toHaveAttribute("aria-expanded", "true");
-  const keyboard = await bodyMotion();
+  const keyboard = await revealed(page);
   expect(keyboard.focusVisible, "触发器处于键盘焦点").toBe(true);
-  expect(keyboard.animations, "键盘展开不播动效").toBe(0);
+  expect(keyboard.transitions.length, "键盘展开不播动效").toBe(0);
   expect(keyboard.transitionProperty).toBe("none");
   expect(keyboard.opacity, "内容立刻就位").toBe(1);
 });
@@ -849,6 +890,62 @@ test("工程统计可点击折叠并用键盘展开", async ({ page }) => {
   expect(engineeringRequests).toBe(1);
 });
 
+// W8g（W2 peer r3 P2-02）：读从不当场扫。有源码目录、还没统计过的项目显示「还没有统计」并指向刷新，
+// 不说目录有问题；用户点「刷新统计」才当场扫一次（refresh=true 只出现在这一次请求里）。
+test("有源码目录但还没统计过：提示去刷新，点「刷新统计」当场算出来", async ({ page }) => {
+  const code = `EM${Date.now().toString(36).slice(-4).toUpperCase()}`;
+  const repo = resolve("output", `e2e-metrics-${code}`);
+  rmSync(repo, { recursive: true, force: true });
+  mkdirSync(join(repo, "src"), { recursive: true });
+  writeFileSync(join(repo, "src", "main.rs"), "fn main() {}\nfn other() {}\n");
+  const git = (...args: string[]) =>
+    execFileSync("git", ["-c", "user.name=e2e", "-c", "user.email=e2e@example.invalid", ...args], {
+      cwd: repo,
+      stdio: "ignore",
+      windowsHide: true,
+    });
+  git("init", "-q");
+  git("add", ".");
+  git("commit", "-q", "-m", "init");
+  const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  try {
+    const created = await api.post(`${apiUrl}/projects`, {
+      data: { name: "工程统计验收", sourcePath: repo, code, description: "" },
+    });
+    expect(created.ok(), await created.text()).toBeTruthy();
+
+    const metricsRequests: string[] = [];
+    page.on("request", (request) => {
+      if (request.url().includes("/engineering-metrics")) metricsRequests.push(request.url());
+    });
+    await page.goto(`/#project:${code}`);
+    const diagnostics = page.getByRole("region", { name: "项目诊断" });
+    await diagnostics.getByRole("button", { name: "展开项目诊断" }).click();
+    const region = page.getByRole("region", { name: "工程统计" });
+    await region.getByRole("button", { name: "展开工程统计" }).click();
+    await expect(region.getByText("还没有统计", { exact: true })).toBeVisible();
+    await expect(region.getByText("点「刷新统计」，按本地 Git 与文件算一次")).toBeVisible();
+    await expect(region.getByText("此项目暂不可统计")).toHaveCount(0);
+    expect(metricsRequests).toHaveLength(1);
+    expect(metricsRequests[0]).not.toContain("refresh");
+    await region.screenshot({
+      path: resolve("output", "playwright", "e2e-engineering-no-data.png"),
+    });
+
+    await region.getByRole("button", { name: "刷新统计" }).click();
+    await expect(region.getByText("Source LOC")).toBeVisible();
+    await expect(region.getByText(/^HEAD [0-9a-f]{10}/u)).toBeVisible();
+    expect(metricsRequests).toHaveLength(2);
+    expect(metricsRequests[1]).toContain("refresh=true");
+    await region.screenshot({
+      path: resolve("output", "playwright", "e2e-engineering-refreshed.png"),
+    });
+  } finally {
+    await api.dispose();
+    rmSync(repo, { recursive: true, force: true });
+  }
+});
+
 test("MCP bridge 观测默认折叠、按需读取并使用 30 秒刷新", async ({ page }) => {
   await page.addInitScript(
     ({ endpoint, token }) => {
@@ -978,6 +1075,8 @@ test("MCP bridge 观测默认折叠、按需读取并使用 30 秒刷新", async
 
 test("全局与项目时间线展示真实任务、进度和记录语义", async ({ page }) => {
   const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  // Agent 专用的路由（begin、建任务、改任务、进度、end）走真实的 Agent HTTP（daemon.json）。
+  const agent = await agentContext();
   const suffix = Date.now().toString(36);
   const projectCode = `TL${suffix.toUpperCase()}`;
   const projectName = `时间线语义验收 ${suffix}`;
@@ -993,7 +1092,7 @@ test("全局与项目时间线展示真实任务、进度和记录语义", async
   };
   const patchTask = async (key: string, operation: string, opId: string) => {
     const current = await task(key);
-    const response = await api.post(`${apiUrl}/projects/${projectCode}/work-items/patch`, {
+    const response = await agent.post(`${agentApi()}/projects/${projectCode}/work-items/patch`, {
       data: {
         session: sessionId,
         opId,
@@ -1024,7 +1123,7 @@ test("全局与项目时间线展示真实任务、进度和记录语义", async
     expect(objective.ok()).toBeTruthy();
     const objectiveId = String(((await objective.json()) as Record<string, any>).id);
 
-    const begin = await api.post(`${apiUrl}/sessions`, {
+    const begin = await agent.post(`${agentApi()}/sessions`, {
       data: {
         cwd: process.cwd(),
         projectCode,
@@ -1040,7 +1139,7 @@ test("全局与项目时间线展示真实任务、进度和记录语义", async
     expect(begin.ok()).toBeTruthy();
     sessionId = String((await begin.json()).session);
 
-    const created = await api.post(`${apiUrl}/projects/${projectCode}/work-items`, {
+    const created = await agent.post(`${agentApi()}/projects/${projectCode}/work-items`, {
       data: {
         session: sessionId,
         opId: `e2e-timeline-create-${suffix}`,
@@ -1061,11 +1160,11 @@ test("全局与项目时间线展示真实任务、进度和记录语义", async
       },
     });
     expect(created.ok()).toBeTruthy();
-    const key = String(((await created.json()) as any).items[0].key);
+    const key = String(workItemKey(await created.json()));
 
     await patchTask(key, "claim", `e2e-timeline-claim-${suffix}`);
     await patchTask(key, "start", `e2e-timeline-start-${suffix}`);
-    const progress = await api.post(`${apiUrl}/projects/${projectCode}/progress-updates`, {
+    const progress = await agent.post(`${agentApi()}/projects/${projectCode}/progress-updates`, {
       data: {
         project: projectCode,
         session: sessionId,
@@ -1127,7 +1226,7 @@ test("全局与项目时间线展示真实任务、进度和记录语义", async
     });
   } finally {
     if (sessionId) {
-      const close = await api.post(`${apiUrl}/sessions/${sessionId}/close`, {
+      const close = await agent.post(`${agentApi()}/sessions/${sessionId}/close`, {
         data: {
           project: projectCode,
           opId: `e2e-timeline-close-${suffix}`,
@@ -1469,8 +1568,137 @@ test("forced-colors 与 reduced-transparency 保留焦点并关闭透明材质",
   }
 });
 
+test("桌面顶栏停在顶部时与彩雾一体，顶沿是拖动区，Windows 10 的缩放把手交给宿主", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.addInitScript(
+    ({ endpoint, token }) => {
+      const state = window as any;
+      state.__resizeCalls = [];
+      state.__maximizedListeners = new Set();
+      state.ayanamiDesktop = {
+        notifyRendererReady: () => undefined,
+        // 界面的数据照常走真实的 e2e 服务（换上用户凭证），总览要有内容才滚得动。
+        runtimeRequest: async (input: {
+          path: string;
+          method?: string;
+          headers?: Record<string, string>;
+          body?: string;
+        }) => {
+          const response = await fetch(`${endpoint}${input.path}`, {
+            method: input.method ?? "GET",
+            headers: { ...input.headers, authorization: `Bearer ${token}` },
+            ...(input.body === undefined ? {} : { body: input.body }),
+          });
+          return {
+            status: response.status,
+            statusText: response.statusText,
+            headers: Object.fromEntries(response.headers.entries()),
+            body: await response.text(),
+          };
+        },
+        minimizeWindow: async () => undefined,
+        toggleMaximizeWindow: async () => false,
+        isWindowMaximized: async () => false,
+        closeWindow: async () => undefined,
+        onWindowMaximizedChange: (listener: (value: boolean) => void) => {
+          state.__maximizedListeners.add(listener);
+          return () => state.__maximizedListeners.delete(listener);
+        },
+        onNavigate: () => () => undefined,
+        getWindowFrame: async () => "client",
+        startWindowResize: async (edge: string) => {
+          state.__resizeCalls.push(edge);
+          return true;
+        },
+      };
+    },
+    { endpoint: apiUrl.replace(/\/api\/v1$/u, ""), token: headers.authorization.slice(7) },
+  );
+  for (const theme of ["light", "dark"] as const) {
+    await page.emulateMedia({ colorScheme: theme });
+    await page.goto("/#overview");
+    await expect(page.locator("html")).toHaveAttribute("data-atm-desktop", "true");
+    await page.locator(".atm-page-head, .atm-content h1").first().waitFor();
+    const main = page.locator(".atm-main");
+    const veil = () =>
+      page
+        .locator(".atm-topbar")
+        .evaluate((element) => getComputedStyle(element, "::before").opacity);
+    // 停在顶部：磨砂底完全透明，顶栏和彩雾是一整块，不出现压在标题上的色带。
+    await main.evaluate((element) => (element.scrollTop = 0));
+    await expect.poll(veil).toBe("0");
+    await page.screenshot({
+      path: resolve("output", "playwright", `e2e-topbar-at-rest-${theme}.png`),
+    });
+    expect(await main.evaluate((element) => element.scrollHeight > element.clientHeight + 80)).toBe(
+      true,
+    );
+    // 内容滚到顶栏下面：磨砂底浮出来。
+    await main.evaluate((element) => (element.scrollTop = 200));
+    await expect.poll(veil).toBe("1");
+    await page.screenshot({
+      path: resolve("output", "playwright", `e2e-topbar-scrolled-${theme}.png`),
+    });
+    await main.evaluate((element) => (element.scrollTop = 0));
+    await expect.poll(veil).toBe("0");
+  }
+
+  const region = (selector: string) =>
+    page
+      .locator(selector)
+      .first()
+      .evaluate((element) => getComputedStyle(element).getPropertyValue("-webkit-app-region"));
+  // 顶沿那一条贴着窗口上沿、和顶栏上内边距一样高；外壳气口拖、主区域与顶栏本身不拖。
+  expect(await region(".atm-shell")).toBe("drag");
+  expect(await region(".atm-main")).toBe("no-drag");
+  expect(await region(".atm-topbar")).toBe("no-drag");
+  expect(await region(".atm-titlebar-edge")).toBe("drag");
+  const edge = await page.locator(".atm-titlebar-edge").evaluate((element) => ({
+    box: element.getBoundingClientRect().toJSON(),
+    paddingTop: getComputedStyle(element.parentElement!).paddingTop,
+  }));
+  expect(edge.box.y).toBe(0);
+  expect(`${edge.box.height}px`).toBe(edge.paddingTop);
+  expect(await region('[data-testid="window-minimize"]')).toBe("no-drag");
+
+  // Windows 10（宿主报 "client"）：七个贴边把手，排在整个界面后面，按下交给宿主。
+  const handles = page.locator(".atm-window-edge");
+  await expect(handles).toHaveCount(7);
+  expect(await region(".atm-window-edge")).toBe("no-drag");
+  expect(
+    await page.evaluate(() => {
+      const shell = document.querySelector(".atm-shell")!;
+      const edges = document.querySelector(".atm-window-edges")!;
+      return Boolean(shell.compareDocumentPosition(edges) & Node.DOCUMENT_POSITION_FOLLOWING);
+    }),
+  ).toBe(true);
+  const left = await page.locator('.atm-window-edge[data-edge="left"]').boundingBox();
+  expect(left?.x).toBe(0);
+  await page.mouse.move(left!.x + left!.width / 2, left!.y + left!.height / 2);
+  await page.mouse.down();
+  await page.mouse.up();
+  const bottomRight = await page.locator('.atm-window-edge[data-edge="bottomRight"]').boundingBox();
+  await page.mouse.move(bottomRight!.x + 6, bottomRight!.y + 6);
+  await page.mouse.down({ button: "right" });
+  await page.mouse.up({ button: "right" });
+  await page.mouse.down();
+  await page.mouse.up();
+  await expect
+    .poll(() => page.evaluate(() => (window as any).__resizeCalls as string[]))
+    .toEqual(["left", "bottomRight"]);
+  // 最大化时没有缩放把手。
+  await page.evaluate(() => {
+    for (const listener of (window as any).__maximizedListeners) listener(true);
+  });
+  await expect(handles).toHaveCount(0);
+});
+
 test("两张任务表格行与项目 tabs 可完整键盘操作并恢复焦点", async ({ page }) => {
   const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  // Agent 专用的路由（begin、建任务、改任务、进度、end）走真实的 Agent HTTP（daemon.json）。
+  const agent = await agentContext();
   const suffix = Date.now().toString(36);
   const title = `表格键盘验收 ${suffix}`;
   let sessionId = "";
@@ -1480,7 +1708,7 @@ test("两张任务表格行与项目 tabs 可完整键盘操作并恢复焦点",
     const objectives = (await objectivesResponse.json()) as Array<{ id: string }>;
     expect(objectives.length).toBeGreaterThan(0);
 
-    const begin = await api.post(`${apiUrl}/sessions`, {
+    const begin = await agent.post(`${agentApi()}/sessions`, {
       data: {
         cwd: process.cwd(),
         projectCode: "E2E",
@@ -1496,7 +1724,7 @@ test("两张任务表格行与项目 tabs 可完整键盘操作并恢复焦点",
     expect(begin.ok()).toBeTruthy();
     sessionId = String((await begin.json()).session);
 
-    const created = await api.post(`${apiUrl}/projects/E2E/work-items`, {
+    const created = await agent.post(`${agentApi()}/projects/E2E/work-items`, {
       data: {
         session: sessionId,
         opId: `e2e-table-keyboard-create-${suffix}`,
@@ -1517,12 +1745,12 @@ test("两张任务表格行与项目 tabs 可完整键盘操作并恢复焦点",
       },
     });
     expect(created.ok()).toBeTruthy();
-    const taskKey = String(((await created.json()) as any).items[0].key);
+    const taskKey = String(workItemKey(await created.json()));
     const patchTask = async (operation: "claim" | "start") => {
       const currentResponse = await api.get(`${apiUrl}/projects/E2E/work-items/${taskKey}`);
       expect(currentResponse.ok()).toBeTruthy();
       const current = (await currentResponse.json()) as { version: number };
-      const response = await api.post(`${apiUrl}/projects/E2E/work-items/patch`, {
+      const response = await agent.post(`${agentApi()}/projects/E2E/work-items/patch`, {
         data: {
           session: sessionId,
           opId: `e2e-table-keyboard-${operation}-${suffix}`,
@@ -1583,7 +1811,7 @@ test("两张任务表格行与项目 tabs 可完整键盘操作并恢复焦点",
     });
   } finally {
     if (sessionId) {
-      const close = await api.post(`${apiUrl}/sessions/${sessionId}/close`, {
+      const close = await agent.post(`${agentApi()}/sessions/${sessionId}/close`, {
         data: {
           project: "E2E",
           opId: `e2e-table-keyboard-close-${suffix}`,
@@ -1666,13 +1894,139 @@ test("四类项目 Modal 保持自绘控件、焦点恢复与数据工具入口"
   await expect(openData).toBeFocused();
 });
 
+// W6c：数据工具里导出 .aytproj，再从「导入项目包」把它导入为新项目（代码被占时预填空着的代码）。
+test("数据工具导出项目包后，从导入项目包导入为新项目", async ({ page }) => {
+  const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  try {
+    const existing = (await (await api.get(`${apiUrl}/projects`)).json()) as Array<{
+      code: string;
+    }>;
+    if (!existing.some((project) => project.code === "PKGUI")) {
+      const created = await api.post(`${apiUrl}/projects`, {
+        data: { name: "项目包验收", sourcePath: null, code: "PKGUI", description: "e2e" },
+      });
+      expect(created.ok()).toBeTruthy();
+    }
+    await page.goto("/#project:PKGUI");
+    await page.getByRole("button", { name: "数据工具", exact: true }).click();
+    const dataDialog = page.getByRole("dialog", { name: "备份、恢复与数据交换" });
+    await dataDialog.getByRole("button", { name: "导出 .aytproj" }).click();
+    const exported = page.getByText(/导出完成：.*PKGUI-.*\.aytproj/u);
+    await expect(exported).toBeVisible();
+    const path = ((await exported.textContent()) ?? "").replace(/^.*导出完成：/u, "").trim();
+    const name = path.split(/[\\/]/u).pop() ?? "";
+    expect(name).toMatch(/^PKGUI-.*\.aytproj$/u);
+
+    const row = dataDialog.locator(".atm-row", { hasText: name });
+    await expect(row).toBeVisible();
+    await row.getByRole("button", { name: "预览" }).click();
+    const preview = dataDialog.getByTestId("package-preview");
+    await expect(preview).toContainText("PKGUI · 项目包验收");
+    await expect(preview).toContainText("已被占用");
+    const code = dataDialog.getByLabel("导入后的项目代码");
+    await expect(code).toHaveValue("PKGUI2");
+    await page.screenshot({
+      path: resolve("output", "playwright", "e2e-project-package-import.png"),
+      fullPage: true,
+    });
+    await code.fill("pkgcopy");
+    await expect(code).toHaveValue("PKGCOPY");
+    await preview.getByRole("button", { name: "导入为新项目" }).click();
+    await expect(page.getByText("已导入为新项目 PKGCOPY")).toBeVisible();
+    await expect(preview).toBeHidden();
+
+    const projects = (await (await api.get(`${apiUrl}/projects`)).json()) as Array<{
+      code: string;
+      name: string;
+    }>;
+    expect(projects.find((project) => project.code === "PKGCOPY")?.name).toBe("项目包验收");
+    expect(projects.some((project) => project.code === "PKGUI")).toBeTruthy();
+  } finally {
+    await api.dispose();
+  }
+});
+
+// peer W5 r2：3.0 的备份是整库的，恢复必须指明范围。两个备份入口都要真的能备份、列出、按自己的范围恢复。
+test("项目与知识库的备份入口：立即备份后列出，并按项目、按知识库恢复", async ({ page }) => {
+  const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  try {
+    const existing = (await (await api.get(`${apiUrl}/projects`)).json()) as Array<{
+      code: string;
+    }>;
+    if (!existing.some((project) => project.code === "BACKUPUI")) {
+      const created = await api.post(`${apiUrl}/projects`, {
+        data: { name: "备份验收项目", sourcePath: null, code: "BACKUPUI", description: "e2e" },
+      });
+      expect(created.ok()).toBeTruthy();
+    }
+
+    await page.goto("/#project:BACKUPUI");
+    await page.getByRole("button", { name: "数据工具", exact: true }).click();
+    const dataDialog = page.getByRole("dialog", { name: "备份、恢复与数据交换" });
+    await dataDialog.getByRole("button", { name: "立即备份" }).click();
+    await expect(page.getByText("项目备份已创建并校验")).toBeVisible();
+    const projectRestore = dataDialog.getByRole("button", { name: "恢复", exact: true }).first();
+    await expect(projectRestore).toBeVisible();
+    await projectRestore.click();
+    const confirmProject = page.getByRole("alertdialog", { name: "恢复项目" });
+    await confirmProject.getByRole("button", { name: "恢复", exact: true }).click();
+    await expect(page.getByText("项目已从备份恢复")).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(dataDialog).toBeHidden();
+
+    // 备份里要有知识库：先存一条（kept），备份之后再存一条（dropped），恢复后只剩前一条。
+    const suffix = Date.now().toString(36);
+    const saveKnowledge = async (slug: string, title: string) => {
+      const saved = await api.post(`${apiUrl}/knowledge`, {
+        data: {
+          opId: `backup-ui-${slug}`,
+          expectedVersion: 0,
+          slug,
+          title,
+          summary: "备份入口验收",
+          bodyMarkdown: "# body",
+        },
+      });
+      expect(saved.ok()).toBeTruthy();
+    };
+    const kept = `备份前的知识 ${suffix}`;
+    const dropped = `备份后的知识 ${suffix}`;
+    await saveKnowledge(`backup-kept-${suffix}`, kept);
+
+    // 只改 hash 的 goto 不会重新载入，先离开再进设置页。
+    await page.goto("about:blank");
+    await page.goto("/#settings");
+    const panel = page.getByTestId("knowledge-backup-panel");
+    await expect(panel.getByText("备份包含本地共享知识库")).toBeVisible();
+    await panel.getByRole("button", { name: "立即备份" }).click();
+    await expect(page.getByText("备份已创建并校验", { exact: true })).toBeVisible();
+    await saveKnowledge(`backup-dropped-${suffix}`, dropped);
+    const knowledgeRestore = panel.getByRole("button", { name: "恢复", exact: true }).first();
+    await expect(knowledgeRestore).toBeVisible();
+    await knowledgeRestore.click();
+    const confirmKnowledge = page.getByRole("alertdialog", { name: "恢复知识库" });
+    await confirmKnowledge.getByRole("button", { name: "恢复", exact: true }).click();
+    await expect(page.getByText("知识库已从备份恢复")).toBeVisible();
+
+    await page.goto("about:blank");
+    await page.goto("/#knowledge");
+    const list = page.locator(".atm-knowledge-list-item");
+    await expect(list.filter({ hasText: kept })).toHaveCount(1);
+    await expect(list.filter({ hasText: dropped })).toHaveCount(0);
+  } finally {
+    await api.dispose();
+  }
+});
+
 test("Agent 页按身份聚合重复 Session 并保留历史数量", async ({ page }) => {
   const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  // Agent 专用的路由（begin、建任务、改任务、进度、end）走真实的 Agent HTTP（daemon.json）。
+  const agent = await agentContext();
   const suffix = Date.now().toString(36);
   const agentId = `e2e-dedupe-${suffix}`;
   const displayName = `E2E Duplicate Agent ${suffix}`;
   const begin = async () => {
-    const response = await api.post(`${apiUrl}/sessions`, {
+    const response = await agent.post(`${agentApi()}/sessions`, {
       data: {
         cwd: process.cwd(),
         projectCode: "E2E",
@@ -1689,7 +2043,7 @@ test("Agent 页按身份聚合重复 Session 并保留历史数量", async ({ pa
     return String((await response.json()).session);
   };
   const close = async (sessionId: string) => {
-    const response = await api.post(`${apiUrl}/sessions/${sessionId}/close`, {
+    const response = await agent.post(`${agentApi()}/sessions/${sessionId}/close`, {
       data: {
         project: "E2E",
         opId: `e2e-close-${crypto.randomUUID()}`,
@@ -1734,10 +2088,12 @@ test("Agent 页按身份聚合重复 Session 并保留历史数量", async ({ pa
 
 test("Agent Git context、冲突警告、刷新与项目执行 Session 可读", async ({ page }) => {
   const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  // Agent 专用的路由（begin、建任务、改任务、进度、end）走真实的 Agent HTTP（daemon.json）。
+  const agent = await agentContext();
   const suffix = Date.now().toString(36);
   const sessions: string[] = [];
   const begin = async (label: string) => {
-    const response = await api.post(`${apiUrl}/sessions`, {
+    const response = await agent.post(`${agentApi()}/sessions`, {
       data: {
         cwd: process.cwd(),
         projectCode: "E2E",
@@ -1756,7 +2112,7 @@ test("Agent Git context、冲突警告、刷新与项目执行 Session 可读", 
     return sessionId;
   };
   const close = async (sessionId: string) => {
-    const response = await api.post(`${apiUrl}/sessions/${sessionId}/close`, {
+    const response = await agent.post(`${agentApi()}/sessions/${sessionId}/close`, {
       data: {
         project: "E2E",
         opId: `e2e-git-context-close-${crypto.randomUUID()}`,
@@ -1776,7 +2132,7 @@ test("Agent Git context、冲突警告、刷新与项目执行 Session 可读", 
   const taskList = ((await listedTasks.json()) as { items: Array<Record<string, any>> }).items;
   const task = taskList.find((item) => item.title === "验证键盘与焦点");
   expect(task).toBeTruthy();
-  const claim = await api.post(`${apiUrl}/projects/E2E/work-items/patch`, {
+  const claim = await agent.post(`${agentApi()}/projects/E2E/work-items/patch`, {
     data: {
       session: primarySession,
       opId: `e2e-git-context-claim-${suffix}`,
@@ -1991,7 +2347,6 @@ test("设置页展示 Agent 规则与 Skill 状态并可预览 managed block", a
           version: "9.0.1",
         }),
         copyText: async () => true,
-        showItemInFolder: async () => undefined,
         minimizeWindow: async () => undefined,
         toggleMaximizeWindow: async () => false,
         isWindowMaximized: async () => false,
@@ -2093,19 +2448,22 @@ test("项目视图、全局搜索和保存视图走真实 API", async ({ page },
     [...ascendingTaskNumbers].sort((left, right) => left - right),
   );
   await taskSort.click();
-  // 投影与对账面板收在默认折叠的诊断区里，量间距前先展开。
+  // 对账与工程统计收在默认折叠的诊断区里，量间距前先展开。两块都在展开体内量，不受入场位移影响
+  // （3.0 没有投影面板：原来量投影到对账，现在量对账到工程统计）。
   await page
     .getByRole("region", { name: "项目诊断" })
     .getByRole("button", { name: "展开项目诊断" })
     .click();
   await expect(page.locator(".atm-project-reconcile")).toBeVisible();
   const spacing = await page.evaluate(() => {
-    const projection = document.querySelector(".atm-projection-panel")?.getBoundingClientRect();
+    const engineering = document
+      .querySelector('.atm-diagnostics-body [aria-label="工程统计"]')
+      ?.getBoundingClientRect();
     const reconcile = document.querySelector(".atm-project-reconcile")?.getBoundingClientRect();
     const metrics = document.querySelector(".atm-metrics")?.getBoundingClientRect();
     const taskPanel = document.querySelector("#project-task-panel")?.getBoundingClientRect();
     return {
-      reconcileGap: projection && reconcile ? reconcile.top - projection.bottom : -1,
+      reconcileGap: engineering && reconcile ? engineering.top - reconcile.bottom : -1,
       // 加载状态条只在出错或续读时出现，改用指标卡与任务面板之间的间距。
       taskPanelGap: metrics && taskPanel ? taskPanel.top - metrics.bottom : -1,
     };
@@ -2246,7 +2604,8 @@ test("系统通知可在全部、仅严重和不通知三档间持久化切换",
   await expect(critical).toBeFocused();
   await expect(page.getByRole("radio", { checked: true })).toHaveCount(1);
 
-  await page.getByRole("button", { name: "保存设置" }).click();
+  // 「Claude 自动开工」面板也有一个「保存设置」（派单可用时才出现），这里点的是维护区的那个。
+  await page.locator(".atm-settings-maintenance").getByRole("button", { name: "保存设置" }).click();
   await expect(page.getByText("设置已保存", { exact: true })).toBeVisible();
   await page.reload();
   await expect(critical).toHaveAttribute("aria-checked", "true");
@@ -2282,93 +2641,32 @@ test("新品牌、抽屉空间层与 reduced motion 降级可用", async ({ page
   await page.keyboard.press("Escape");
 });
 
-test("投影健康状态可在总览、项目和设置中查看并安全重试", async ({ page }) => {
+// 3.0 是单库，没有数据投影（00 §6）：2.0 的投影健康面板、「立即重试」与 registry 触发器用例随之退役。
+// 这里守的是它确实不在了：总览卡片、项目诊断、设置页都不再出现投影状态，诊断区也不因缺投影自动展开。
+test("单库没有数据投影：总览、项目诊断和设置都不再显示投影状态", async ({ page }) => {
   await page.emulateMedia({ colorScheme: "dark" });
   await page.goto("/#overview");
   const overviewProject = page.locator(".atm-overview-project").filter({ hasText: "E2E 验收项目" });
-  await expect(overviewProject.locator(".atm-projection-summary")).toContainText("已追平");
-  await expect(overviewProject.locator(".atm-projection-summary")).toContainText("lag 0");
-  const api = await createRequest.newContext({ extraHTTPHeaders: headers });
-  const projectResponse = await api.get(`${apiUrl}/projects/E2E`);
-  expect(projectResponse.ok()).toBeTruthy();
-  const project = (await projectResponse.json()) as { id: string };
-  const escapedProjectId = project.id.replaceAll("'", "''");
-  const registry = new Database(resolve("output", "e2e", "data", "registry", "registry.sqlite"));
-  const trigger = "fail_e2e_projection_health";
+  await expect(overviewProject).toBeVisible();
+  await expect(page.locator(".atm-projection-summary")).toHaveCount(0);
+  await expect(page.getByText(/数据投影/u)).toHaveCount(0);
 
-  try {
-    registry.exec(`DROP TRIGGER IF EXISTS ${trigger}`);
-    registry.exec(`
-      CREATE TRIGGER ${trigger}
-      BEFORE UPDATE OF project_sequence ON project_summary_cache
-      WHEN NEW.project_id = '${escapedProjectId}'
-      BEGIN
-        SELECT RAISE(ABORT, 'injected E2E projection failure');
-      END;
-    `);
-    const record = await api.post(`${apiUrl}/projects/E2E/ui/records`, {
-      data: {
-        opId: "e2e-projection-deferred",
-        kind: "FACT",
-        title: "Projection E2E failure injection",
-        summary: "A committed project write remains durable while Registry projection is deferred.",
-      },
-    });
-    expect(record.status()).toBe(201);
-    expect(await record.json()).toMatchObject({
-      projection: {
-        status: "DEFERRED",
-        retryScheduled: true,
-        lastError: expect.stringContaining("injected E2E projection failure"),
-      },
-    });
+  await page.locator(".atm-sidebar").getByRole("button", { name: "E2E 验收项目" }).click();
+  const diagnostics = page.getByRole("region", { name: "项目诊断" });
+  await expect(diagnostics).toBeVisible();
+  await expect(diagnostics).not.toHaveAttribute("data-attention", "true");
+  await expect(diagnostics.getByRole("button", { name: "展开项目诊断" })).toHaveAttribute(
+    "aria-expanded",
+    "false",
+  );
+  await expect(diagnostics.getByText("任务对账与工程统计")).toBeVisible();
+  await expect(page.getByRole("region", { name: "数据投影" })).toHaveCount(0);
 
-    await page.reload();
-    await expect(overviewProject.locator(".atm-projection-summary")).toContainText("等待重试");
-    await expect(overviewProject.locator(".atm-projection-summary")).toContainText("lag 1");
-    await expect(page.getByText("E2E 数据投影等待重试（lag 1）", { exact: true })).toBeVisible();
-    await page.screenshot({
-      path: resolve("output", "playwright", "e2e-projection-deferred-overview-dark.png"),
-      fullPage: true,
-    });
-
-    await page.locator(".atm-sidebar").getByRole("button", { name: "E2E 验收项目" }).click();
-    const projectPanel = page.getByRole("region", { name: "数据投影" });
-    await expect(projectPanel).toBeVisible();
-    await expect(projectPanel.getByText("等待重试", { exact: true })).toBeVisible();
-    await expect(projectPanel.getByText("lag 1", { exact: true })).toBeVisible();
-    await expect(projectPanel.getByText(/injected E2E projection failure/u)).toBeVisible();
-    await page.screenshot({
-      path: resolve("output", "playwright", "e2e-projection-deferred-project-dark.png"),
-      fullPage: true,
-    });
-
-    registry.exec(`DROP TRIGGER ${trigger}`);
-    await projectPanel.getByRole("button", { name: "立即重试" }).click();
-    await expect(page.getByText("E2E 数据投影已追平", { exact: true })).toBeVisible();
-    await expect(projectPanel.getByText("已追平", { exact: true })).toBeVisible();
-    await expect(projectPanel.getByText("lag 0", { exact: true })).toBeVisible();
-    await page.screenshot({
-      path: resolve("output", "playwright", "e2e-projection-recovered-project-dark.png"),
-      fullPage: true,
-    });
-
-    await page.locator(".atm-sidebar").getByRole("button", { name: "设置" }).click();
-    const systemPanel = page.getByRole("region", { name: "全局投影状态" });
-    await expect(systemPanel).toBeVisible();
-    await expect(systemPanel.getByText("已追平", { exact: true })).toBeVisible();
-    await expect(systemPanel.getByText("待重试 0", { exact: true })).toBeVisible();
-  } finally {
-    try {
-      registry.exec(`DROP TRIGGER IF EXISTS ${trigger}`);
-    } finally {
-      registry.close();
-      await api.dispose();
-    }
-  }
+  await page.locator(".atm-sidebar").getByRole("button", { name: "设置" }).click();
+  await expect(page.getByRole("region", { name: "全局投影状态" })).toHaveCount(0);
+  await expect(page.getByText(/数据投影|投影状态/u)).toHaveCount(0);
 });
 
-// ATM-T-0517 复审：首屏读取失败时「重试」曾是空操作——首屏失败被当成续读，续读要求已有行。
 test("总览「等你处理」首屏读取失败后点重试会真的重新读取", async ({ page }) => {
   let failing = true;
   let requests = 0;
@@ -2917,8 +3215,10 @@ for (const { route, done, status, conclusion } of [
 test("Agent 首屏等满上限时还有项目没读完：已读到的卡片先出来，并说明还在读", async ({ page }) => {
   await ensureSwitchTargetProject();
   const api = await createRequest.newContext({ extraHTTPHeaders: headers });
+  // Agent 专用的路由（begin、建任务、改任务、进度、end）走真实的 Agent HTTP（daemon.json）。
+  const agent = await agentContext();
   const agentId = `e2e-partial-${Date.now().toString(36)}`;
-  const begun = await api.post(`${apiUrl}/sessions`, {
+  const begun = await agent.post(`${agentApi()}/sessions`, {
     data: {
       cwd: process.cwd(),
       projectCode: "E2E",
@@ -2950,7 +3250,7 @@ test("Agent 首屏等满上限时还有项目没读完：已读到的卡片先�
     await expect(status).toHaveCount(0);
     await expect(card).toBeVisible();
   } finally {
-    await api.post(`${apiUrl}/sessions/${session}/close`, {
+    await agent.post(`${agentApi()}/sessions/${session}/close`, {
       data: {
         project: "E2E",
         opId: `e2e-close-${crypto.randomUUID()}`,

@@ -2,7 +2,9 @@
  * 安装/更新/迁移/回滚演练（ATM-T-0554，de-electron §6、§9）。全部在沙箱里：
  *
  *   output/drill/<场景>/install     安装根（ATM_SETUP_SANDBOX 把它、快捷方式目录一起换走）
- *   output/drill/<场景>/data        数据根（ATM_DATA_DIR）
+ *   output/drill/<场景>/data        数据根 L（ATM_DATA_DIR）
+ *   output/drill/<场景>/v3-data     3.x 根 N（ATM3_DATA_DIR；不设的话 3.x 宿主会落到真实的
+ *                                   %LOCALAPPDATA%\AyanamiTaskManager3）
  *   HKCU\Software\AyanamiTaskManagerDrill\<hash>\  Uninstall 与 Run（结束时删掉）
  *
  * 用的是 drill 构建的 setup（带沙箱与故障注入）；真实安装根、真实注册表和用户正在跑的 ATM
@@ -11,7 +13,14 @@
  *
  *   pnpm exec tsx scripts/install-drill.ts            # 需要已构建的原生产物与 renderer/core
  *   pnpm exec tsx scripts/install-drill.ts --only update,faults
+ *
+ * 2.0 ⇄ 3.0 的场景（v2-v3、v2-v3-faults）还要一份 2.0 时代 drill 构建的包：
+ * output/drill/package-2.0.0/{atm-setup.exe, atm-2.0.0-win-x64.json, atm-2.0.0-win-x64.zip}。
+ * 它不在仓库里：`pnpm exec tsx scripts/build-drill-package-20.ts` 从 2.0.0 的提交打一份（CI 在
+ * release 之前跑它）。生产 2.0 的 setup 没有沙箱，不能用。
  */
+// 先于一切：这里拉起的宿主窗口不抢焦点、压在最底层（scripts/test-windows.ts）。
+import "./test-windows.js";
 import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
 import {
   closeSync,
@@ -24,9 +33,36 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { get as httpGet } from "node:http";
 import { join, resolve } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { setTimeout as sleep } from "node:timers/promises";
-import { NATIVE_CRATE_DIR, packageNative } from "./package-native.js";
+import { legacyBusiness, sameBusiness, v3Business, type Business } from "./business-summary.js";
+import {
+  BINARY_KEYS,
+  binariesOf,
+  sha256File,
+  staleBinaryKeys,
+  type BinarySet,
+} from "./candidate-binaries.js";
+import { MCP_SHIM_RELEASE_EXE } from "./mcp-shim-build.js";
+import {
+  buildDrillSetup,
+  drillSetup,
+  NATIVE_CRATE_DIR,
+  nativeRelease,
+  packageNative,
+} from "./package-native.js";
+import { resolveSystemTool } from "./system-tar.js";
+import {
+  powershellArgs,
+  powershellText,
+  readShortcut,
+  readShortcutIdentity,
+  registryValues,
+  writeShortcut,
+  type ShortcutFields,
+} from "./windows-text.js";
 
 const root = resolve(process.cwd());
 const drillRoot = resolve(root, "output", "drill");
@@ -95,11 +131,14 @@ class Sandbox {
   readonly dir: string;
   readonly install: string;
   readonly data: string;
+  /** N: the 3.x root. */
+  readonly v3: string;
   readonly registry: string;
   constructor(name: string) {
     this.dir = join(drillRoot, name);
     this.install = join(this.dir, "install");
     this.data = join(this.dir, "data");
+    this.v3 = join(this.dir, "v3-data");
     this.registry = registryBase(this.dir);
   }
   env(extra: Record<string, string> = {}): NodeJS.ProcessEnv {
@@ -107,6 +146,10 @@ class Sandbox {
       ...process.env,
       ATM_SETUP_SANDBOX: this.dir,
       ATM_DATA_DIR: this.data,
+      ATM3_DATA_DIR: this.v3,
+      // 合成的 LOCALAPPDATA / APPDATA：宿主、WebView2 与任何按已知文件夹找东西的代码都落在沙箱里。
+      LOCALAPPDATA: join(this.dir, "localappdata"),
+      APPDATA: join(this.dir, "appdata"),
       ...extra,
     };
     for (const key of [
@@ -115,6 +158,7 @@ class Sandbox {
       "ATM_SETUP_FAIL_UNDO",
       "ATM_SETUP_SQUIRREL_ADDS",
       "ATM_SETUP_PAUSE_UNLOCKED",
+      "ATM_SETUP_WAIT_SECS",
     ])
       if (!(key in extra)) delete env[key];
     return env;
@@ -127,15 +171,27 @@ class Sandbox {
     const path = join(this.install, "state", "install.json");
     return existsSync(path) ? (JSON.parse(readFileSync(path, "utf8")) as Journal) : null;
   }
-  /** Version the running service publishes (daemon.json; the token field is never read out). */
+  /**
+   * Version the running service publishes: a 2.x core in `L\runtime\daemon.json`, a 3.x
+   * host in `N\runtime\daemon.json`. Only a descriptor whose pid is alive in the sandbox
+   * counts (the other root may keep a stale one). The token field is never read out.
+   */
   serviceVersion(): string | null {
-    const path = join(this.data, "runtime", "daemon.json");
-    if (!existsSync(path)) return null;
-    const { version, pid } = JSON.parse(readFileSync(path, "utf8")) as {
-      version: string;
-      pid: number;
-    };
-    return processes(this.dir).some((proc) => proc.pid === pid) ? version : null;
+    const alive = processes(this.dir);
+    for (const runtime of [join(this.v3, "runtime"), join(this.data, "runtime")]) {
+      const path = join(runtime, "daemon.json");
+      if (!existsSync(path)) continue;
+      try {
+        const { version, pid } = JSON.parse(readFileSync(path, "utf8")) as {
+          version: string;
+          pid: number;
+        };
+        if (alive.some((proc) => proc.pid === pid)) return version;
+      } catch {
+        // Being rewritten; the next poll reads it.
+      }
+    }
+    return null;
   }
   log(lines = 12): string {
     const path = join(this.install, "state", "setup.log");
@@ -155,16 +211,8 @@ class Sandbox {
 }
 
 function processes(prefix: string): Array<{ pid: number; path: string }> {
-  const script =
-    "Get-Process | Where-Object { $_.Path } | ForEach-Object { [pscustomobject]@{ pid = $_.Id; path = $_.Path } } | ConvertTo-Json -Compress";
-  const result = spawnSync(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-Command", script],
-    {
-      encoding: "utf8",
-      windowsHide: true,
-      maxBuffer: 16 * 1024 * 1024,
-    },
+  const result = powershellText(
+    "Get-Process | Where-Object { $_.Path } | ForEach-Object { [pscustomobject]@{ pid = $_.Id; path = $_.Path } } | ConvertTo-Json -Compress",
   );
   const parsed = JSON.parse(result.stdout.trim() || "[]") as unknown;
   const list = (Array.isArray(parsed) ? parsed : [parsed]) as Array<{ pid: number; path: string }>;
@@ -216,55 +264,27 @@ function reg(args: string[]): SpawnSyncReturns<string> {
   return spawnSync("reg.exe", args, { encoding: "utf8", windowsHide: true });
 }
 
+/** 值名不分大小写，与注册表一样。 */
 function regValue(key: string, name: string): string | null {
-  const result = reg(["query", key, "/v", name]);
-  if (result.status !== 0) return null;
-  const line = result.stdout.split(/\r?\n/u).find((row) => row.trim().startsWith(name));
-  return line
-    ? line
-        .trim()
-        .split(/\s{4,}/u)
-        .slice(2)
-        .join("    ")
-    : null;
+  const values = registryValues(key) ?? {};
+  const found = Object.keys(values).find(
+    (candidate) => candidate.toLowerCase() === name.toLowerCase(),
+  );
+  return found === undefined ? null : values[found]!.data;
 }
 
-function shortcut(path: string): Record<string, string> | null {
-  if (!existsSync(path)) return null;
-  const literal = path.replaceAll("'", "''");
-  const script = `$s = (New-Object -ComObject WScript.Shell).CreateShortcut('${literal}'); [pscustomobject]@{ target = $s.TargetPath; args = $s.Arguments; workdir = $s.WorkingDirectory } | ConvertTo-Json -Compress`;
-  const result = spawnSync(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-Command", script],
-    { encoding: "utf8", windowsHide: true },
-  );
-  return JSON.parse(result.stdout.trim() || "null") as Record<string, string> | null;
+/** The shortcut's target, arguments and working directory (Shell.Application, see windows-text.ts). */
+function shortcut(path: string): ShortcutFields | null {
+  return existsSync(path) ? readShortcut(path) : null;
 }
 
 /** AppUserModel.ID and ToastActivatorCLSID via the Shell property system. */
-function shortcutIdentity(path: string): { aumid: string; toast: string } {
-  const literal = path.replaceAll("'", "''");
-  const script =
-    `$shell = New-Object -ComObject Shell.Application; $folder = $shell.Namespace((Split-Path '${literal}')); ` +
-    `$item = $folder.ParseName((Split-Path '${literal}' -Leaf)); ` +
-    `[pscustomobject]@{ aumid = [string]$item.ExtendedProperty('System.AppUserModel.ID'); toast = [string]$item.ExtendedProperty('System.AppUserModel.ToastActivatorCLSID') } | ConvertTo-Json -Compress`;
-  const result = spawnSync(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-Command", script],
-    { encoding: "utf8", windowsHide: true },
-  );
-  return JSON.parse(result.stdout.trim() || '{"aumid":"","toast":""}') as {
-    aumid: string;
-    toast: string;
-  };
-}
+const shortcutIdentity = readShortcutIdentity;
 
 function junctionTarget(link: string): string | null {
-  const script = `$i = Get-Item '${link.replaceAll("'", "''")}' -Force -ErrorAction SilentlyContinue; if ($i -and $i.LinkType) { [string]$i.Target }`;
-  const result = spawnSync(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-Command", script],
-    { encoding: "utf8", windowsHide: true },
+  const result = powershellText(
+    "$i = Get-Item -LiteralPath $env:ATM_DRILL_LINK -Force -ErrorAction SilentlyContinue; if ($i -and $i.LinkType) { [string]$i.Target }",
+    { vars: { ATM_DRILL_LINK: link } },
   );
   return result.stdout.trim() || null;
 }
@@ -280,7 +300,8 @@ function reset(sandbox: Sandbox): void {
   killAll(sandbox.dir);
   reg(["delete", sandbox.registry, "/f"]);
   rmSync(sandbox.dir, { recursive: true, force: true });
-  mkdirSync(sandbox.dir, { recursive: true });
+  mkdirSync(join(sandbox.dir, "localappdata"), { recursive: true });
+  mkdirSync(join(sandbox.dir, "appdata"), { recursive: true });
 }
 
 function teardown(sandbox: Sandbox): void {
@@ -288,13 +309,40 @@ function teardown(sandbox: Sandbox): void {
   reg(["delete", sandbox.registry, "/f"]);
 }
 
+/**
+ * 演练包里该有的五个 exe：当前构建出的宿主、启动器、CLI、shim（就是候选那份，L6 拿报告里的哈希对它），
+ * 加这份源码的 drill setup。
+ */
+function currentDrillBinaries(): BinarySet {
+  const release = nativeRelease(root);
+  const paths = {
+    host: release.host,
+    launcher: release.launcher,
+    setup: drillSetup(root),
+    cli: release.cli,
+    mcpShim: join(root, MCP_SHIM_RELEASE_EXE),
+  };
+  return Object.fromEntries(BINARY_KEYS.map((key) => [key, sha256File(paths[key])])) as BinarySet;
+}
+
 function packages(rebuild: boolean): {
   a: { setup: string; manifest: string };
   b: { setup: string; manifest: string };
 } {
   const out = (version: string) => join(drillRoot, `package-${version}`);
-  for (const version of [VERSION_A, VERSION_B])
-    if (rebuild || !existsSync(join(out(version), `atm-${version}-win-x64.json`)))
+  // 上回留下的包可能是旧构建打的：那样演练测的就不是这次的候选（W8d-5 全链实测，绑定对不上）。
+  // drill setup 每次增量构建一遍，包里的 exe 与当前构建逐个比哈希，对不上就重打。
+  buildDrillSetup(root);
+  const expected = currentDrillBinaries();
+  for (const version of [VERSION_A, VERSION_B]) {
+    const stale = staleBinaryKeys(join(out(version), `app-${version}`), expected);
+    if (stale.length > 0)
+      process.stdout.write(`package ${version} is stale: ${stale.join(", ")}\n`);
+    if (
+      rebuild ||
+      stale.length > 0 ||
+      !existsSync(join(out(version), `atm-${version}-win-x64.json`))
+    )
       packageNative({
         root,
         build: false,
@@ -302,6 +350,7 @@ function packages(rebuild: boolean): {
         drillVersion: version,
         outDir: out(version),
       });
+  }
   const at = (version: string) => ({
     setup: join(out(version), "atm-setup.exe"),
     manifest: join(out(version), `atm-${version}-win-x64.json`),
@@ -310,6 +359,416 @@ function packages(rebuild: boolean): {
 }
 
 type Packages = ReturnType<typeof packages>;
+
+// ---------------------------------------------------------------- 保活任务（W8c，方案 §5、B1）
+
+const KEEPALIVE_TASK = "AyanamiTaskManager 保活";
+
+/** The sandbox's scheduler: setup's drill build registers the task here, never in the real Task Scheduler. */
+function scheduledTask(sandbox: Sandbox): string | null {
+  try {
+    return readFileSync(join(sandbox.dir, "scheduler", `${KEEPALIVE_TASK}.xml`), "utf8");
+  } catch {
+    return null;
+  }
+}
+
+type TaskRegistration = { registered: boolean; at: string; reason?: string };
+
+/** What setup last did with the task (`<install>\state\keepalive-task.json`). */
+function taskRegistration(sandbox: Sandbox): TaskRegistration | null {
+  try {
+    return JSON.parse(
+      readFileSync(join(sandbox.install, "state", "keepalive-task.json"), "utf8"),
+    ) as TaskRegistration;
+  } catch {
+    return null;
+  }
+}
+
+/** The task is there and runs this install's root launcher `--ensure-running`, both triggers every 5 min. */
+function taskRunsLauncher(sandbox: Sandbox): boolean {
+  const xml = scheduledTask(sandbox);
+  const command = xml?.match(/<Command>([^<]*)<\/Command>/u)?.[1] ?? null;
+  return (
+    xml !== null &&
+    samePath(command, join(sandbox.install, "AyanamiTaskManager.exe")) &&
+    xml.includes("<Arguments>--ensure-running</Arguments>") &&
+    (xml.match(/<Interval>PT5M<\/Interval>/gu) ?? []).length === 2 &&
+    xml.includes("<LogonType>InteractiveToken</LogonType>")
+  );
+}
+
+/** A 3.x version installed, updated, undone to or repaired: the task is registered, and recorded so. */
+function keepaliveOn(sandbox: Sandbox, label = ""): void {
+  check(
+    `${label}keepalive task → root launcher --ensure-running every 5 min, recorded registered`,
+    taskRunsLauncher(sandbox) && taskRegistration(sandbox)?.registered === true,
+    { task: scheduledTask(sandbox)?.slice(-300), registration: taskRegistration(sandbox) },
+  );
+}
+
+/** Uninstalled, back on 2.x (no `--ensure-running`) or Electron (the root exe is Squirrel's stub): no task. */
+function keepaliveOff(sandbox: Sandbox, why: string, label = ""): void {
+  check(
+    `${label}no keepalive task (${why})`,
+    scheduledTask(sandbox) === null,
+    scheduledTask(sandbox),
+  );
+}
+
+/** This logon as the launcher and the host name it: `whoami /logonid` = S-1-5-5-X-Y, X and Y in 8 hex digits. */
+function thisLogon(): string | null {
+  const sid = spawnSync(resolveSystemTool("whoami"), ["/logonid"], {
+    encoding: "utf8",
+    windowsHide: true,
+  })
+    .stdout.trim()
+    .match(/^S-1-5-5-(\d+)-(\d+)$/u);
+  if (sid === null) return null;
+  const hex = (part: string | undefined) => Number(part).toString(16).padStart(8, "0");
+  return `${hex(sid[1])}${hex(sid[2])}`;
+}
+
+type Descriptor3 = { pid: number; endpoint: string };
+
+/** N's service descriptor; only pid and endpoint are read (never the token). */
+function descriptor3(sandbox: Sandbox): Descriptor3 | null {
+  try {
+    const { pid, endpoint } = JSON.parse(
+      readFileSync(join(sandbox.v3, "runtime", "daemon.json"), "utf8"),
+    ) as Descriptor3;
+    return { pid, endpoint };
+  } catch {
+    return null;
+  }
+}
+
+function alive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** `GET /health` (no token) answers, and from the descriptor's own process. */
+async function healthyAt(descriptor: Descriptor3): Promise<boolean> {
+  // node:http, not fetch: undici always sends `Sec-Fetch-Mode`, which the service refuses
+  // like a browser's request.
+  return new Promise((done) => {
+    const request = httpGet(`${descriptor.endpoint}/health`, { timeout: 1000 }, (response) => {
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk: string) => (body += chunk));
+      response.on("end", () => {
+        try {
+          done(
+            response.statusCode === 200 &&
+              (JSON.parse(body) as { pid?: number }).pid === descriptor.pid,
+          );
+        } catch {
+          done(false);
+        }
+      });
+    });
+    request.on("timeout", () => request.destroy());
+    request.on("error", () => done(false));
+  });
+}
+
+function keepaliveLog(sandbox: Sandbox): string {
+  try {
+    return readFileSync(join(sandbox.v3, "logs", "keepalive.log"), "utf8");
+  } catch {
+    return "";
+  }
+}
+
+function lastKeepaliveLine(sandbox: Sandbox): string {
+  return keepaliveLog(sandbox).trim().split("\n").at(-1) ?? "";
+}
+
+/** What the Task Scheduler does on every trigger: run the task's action once. */
+function trigger(sandbox: Sandbox): { status: number | null; ms: number } {
+  const started = performance.now();
+  const result = runLauncher(sandbox, ["--ensure-running"]);
+  return { status: result.status, ms: Math.round(performance.now() - started) };
+}
+
+function offlineDoctor(sandbox: Sandbox): Record<string, unknown> | null {
+  const result = runLauncher(sandbox, ["--cli", "--json", "doctor", "--offline"]);
+  try {
+    return (JSON.parse(result.stdout) as { keepalive?: Record<string, unknown> }).keepalive ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/** Holds `state\install.lock` the way a running setup does (no sharing), until killed. */
+function holdInstallLock(sandbox: Sandbox): ReturnType<typeof spawn> {
+  const lock = join(sandbox.install, "state", "install.lock");
+  return spawn(
+    "powershell.exe",
+    powershellArgs(
+      "$f = [IO.File]::Open($env:ATM_DRILL_HELD, 'OpenOrCreate', 'ReadWrite', 'None'); Start-Sleep -Seconds 120; $f.Close()",
+    ),
+    { stdio: "ignore", windowsHide: true, env: { ...process.env, ATM_DRILL_HELD: lock } },
+  );
+}
+
+type Recovery = { case: string; decisionMs: number; startToHealthyMs: number };
+const recoveries: Recovery[] = [];
+
+/**
+ * Crash → trigger → back, measured in the three segments B1 names: the trigger wait (the
+ * task's interval, ≤ PT5M; here the drill triggers at once), the decision (the launcher's
+ * own run, process creation included) and start → healthy (until a new process's descriptor
+ * answers /health).
+ */
+async function crashAndRecover(sandbox: Sandbox, label: string): Promise<void> {
+  const before = descriptor3(sandbox)?.pid ?? -1;
+  killAll(sandbox.install);
+  check(`${label}: ATM killed`, await until(() => !alive(before), 15_000), before);
+  const fired = trigger(sandbox);
+  const decided = performance.now();
+  check(
+    `${label}: --ensure-running exits 0 at once (${fired.ms} ms)`,
+    fired.status === 0 && fired.ms < 10_000,
+    fired,
+  );
+  let up = false;
+  while (performance.now() - decided < 60_000) {
+    const now = descriptor3(sandbox);
+    if (now !== null && now.pid !== before && alive(now.pid) && (await healthyAt(now))) {
+      up = true;
+      break;
+    }
+    await sleep(100);
+  }
+  const startToHealthyMs = Math.round(performance.now() - decided);
+  check(
+    `${label}: a new ATM answers /health (${startToHealthyMs} ms after the decision)`,
+    up,
+    keepaliveLog(sandbox).slice(-600),
+  );
+  check(
+    `${label}: keepalive.log records the launch after an abnormal exit`,
+    /Launch .* after Abnormal/u.test(lastKeepaliveLine(sandbox)),
+    lastKeepaliveLine(sandbox),
+  );
+  if (up) recoveries.push({ case: label, decisionMs: fired.ms, startToHealthyMs });
+}
+
+/** Kill ATM, trigger: nothing may start; the log names why. */
+async function noRecovery(sandbox: Sandbox, label: string, decision: string): Promise<void> {
+  killAll(sandbox.install);
+  await until(() => hostsUnder(sandbox.install).length === 0, 15_000);
+  const fired = trigger(sandbox);
+  check(`${label}: --ensure-running exits 0 (${fired.ms} ms)`, fired.status === 0, fired);
+  await sleep(3000);
+  check(
+    `${label}: nothing started`,
+    hostsUnder(sandbox.install).length === 0,
+    hostsUnder(sandbox.install),
+  );
+  check(
+    `${label}: keepalive.log says ${decision}`,
+    lastKeepaliveLine(sandbox).endsWith(decision),
+    lastKeepaliveLine(sandbox),
+  );
+}
+
+function lifecycleLines(sandbox: Sandbox): Array<Record<string, unknown>> {
+  try {
+    return readFileSync(join(sandbox.v3, "logs", "lifecycle.ndjson"), "utf8")
+      .split("\n")
+      .filter((line) => line.trim() !== "")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  } catch {
+    return [];
+  }
+}
+
+async function scenarioKeepalive(pkg: Packages): Promise<void> {
+  currentScenario = "keepalive";
+  const sandbox = new Sandbox("keepalive");
+  reset(sandbox);
+  process.stdout.write(`\n[${currentScenario}] first install registers the task\n`);
+  check(
+    "install exit 0",
+    runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet"]) === 0,
+    sandbox.log(4),
+  );
+  await installed(sandbox, VERSION_A, null);
+  const doctor = offlineDoctor(sandbox);
+  check(
+    "doctor --offline (the installed CLI): auto recovery on, registered",
+    doctor?.auto_recovery === true && doctor.registered === true && doctor.reason === null,
+    doctor,
+  );
+
+  process.stdout.write(`[${currentScenario}] a trigger while ATM serves does nothing\n`);
+  const serving = descriptor3(sandbox);
+  const idle = trigger(sandbox);
+  check(`--ensure-running while serving exits 0 (${idle.ms} ms)`, idle.status === 0, idle);
+  await sleep(2000);
+  check(
+    "…starts nothing and logs nothing",
+    hostsUnder(sandbox.install).length === 1 &&
+      descriptor3(sandbox)?.pid === serving?.pid &&
+      keepaliveLog(sandbox) === "",
+    { hosts: hostsUnder(sandbox.install), log: keepaliveLog(sandbox) },
+  );
+
+  process.stdout.write(`[${currentScenario}] crash → trigger → back (twice, measured)\n`);
+  await crashAndRecover(sandbox, "crash 1");
+  await crashAndRecover(sandbox, "crash 2");
+
+  process.stdout.write(
+    `[${currentScenario}] the third abnormal exit in 30 min trips the breaker\n`,
+  );
+  await noRecovery(sandbox, "crash 3", "Tripped");
+  const breakerPath = join(sandbox.v3, "runtime", "keepalive.json");
+  const breaker = existsSync(breakerPath)
+    ? (JSON.parse(readFileSync(breakerPath, "utf8")) as { exits: unknown[]; trippedAtMs?: number })
+    : null;
+  check(
+    "the breaker is kept across processes: 3 exits, tripped",
+    breaker?.exits.length === 3 && typeof breaker.trippedAtMs === "number",
+    breaker,
+  );
+  const later = trigger(sandbox);
+  await sleep(2000);
+  check(
+    "a later trigger still starts nothing",
+    later.status === 0 && hostsUnder(sandbox.install).length === 0,
+    hostsUnder(sandbox.install),
+  );
+  const tripped = offlineDoctor(sandbox);
+  check(
+    "doctor --offline: no auto recovery, tripped, 3 recent abnormal exits",
+    tripped?.auto_recovery === false &&
+      tripped.breaker_tripped === true &&
+      tripped.recent_abnormal_exits === 3,
+    tripped,
+  );
+
+  process.stdout.write(`[${currentScenario}] the user starts ATM: breaker reset, user told why\n`);
+  check("launcher (the user's start) exits 0", runLauncher(sandbox, []).status === 0);
+  check(
+    `service running ${VERSION_A}`,
+    await until(() => sandbox.serviceVersion() === VERSION_A, 30_000),
+  );
+  check("the breaker was reset", !existsSync(breakerPath));
+  const resetLine = lifecycleLines(sandbox).find((line) => line.event === "keepalive.reset");
+  check(
+    "lifecycle records keepalive.reset (abnormalExits 3)",
+    resetLine?.abnormalExits === 3,
+    resetLine,
+  );
+  check(
+    "keepalive.log records the reset",
+    keepaliveLog(sandbox).includes("Reset by the user's start (3 abnormal exits)"),
+    keepaliveLog(sandbox).slice(-400),
+  );
+
+  process.stdout.write(`[${currentScenario}] a quit marker from another logon does not hold\n`);
+  const quitPath = join(sandbox.v3, "runtime", "user-quit.json");
+  writeFileSync(
+    quitPath,
+    JSON.stringify({ logon: "ffffffffffffffff", at: new Date().toISOString() }),
+  );
+  await crashAndRecover(sandbox, "another logon's quit marker");
+
+  process.stdout.write(
+    `[${currentScenario}] the user quit in this logon: no start until the user starts it\n`,
+  );
+  const logon = thisLogon();
+  check("this logon is known (whoami /logonid)", logon !== null);
+  writeFileSync(quitPath, JSON.stringify({ logon, at: new Date().toISOString() }));
+  await noRecovery(sandbox, "quit in this logon", "UserQuit");
+  check("launcher (the user's start) exits 0", runLauncher(sandbox, []).status === 0);
+  check(
+    "the user's start serves and clears the marker",
+    (await until(() => sandbox.serviceVersion() === VERSION_A, 30_000)) && !existsSync(quitPath),
+  );
+
+  process.stdout.write(
+    `[${currentScenario}] an install transaction holds the lock: no start, no recovery\n`,
+  );
+  const holder = holdInstallLock(sandbox);
+  check("the install lock is held", await until(() => installLockHeld(sandbox), 10_000));
+  const mark = sandbox.logMark();
+  const journalBefore = JSON.stringify(sandbox.journal());
+  await noRecovery(sandbox, "lock held", "InstallBusy");
+  check(
+    "…and no recovery, no setup run",
+    sandbox.since(mark) === "" && JSON.stringify(sandbox.journal()) === journalBefore,
+    sandbox.since(mark).slice(-400),
+  );
+  holder.kill();
+  check("the lock is released", await until(() => !installLockHeld(sandbox), 10_000));
+  await crashAndRecover(sandbox, "lock released");
+
+  process.stdout.write(`[${currentScenario}] repair rebuilds a lost task\n`);
+  rmSync(join(sandbox.dir, "scheduler", `${KEEPALIVE_TASK}.xml`), { force: true });
+  check(
+    "ATM 修复 exit 0",
+    runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--repair", "--quiet"]) === 0,
+    sandbox.log(4),
+  );
+  keepaliveOn(sandbox, "after the repair: ");
+
+  process.stdout.write(
+    `[${currentScenario}] the task cannot be registered: the update commits anyway\n`,
+  );
+  rmSync(join(sandbox.dir, "scheduler"), { recursive: true, force: true });
+  writeFileSync(join(sandbox.dir, "scheduler"), "not a folder");
+  check(
+    "update exit 0",
+    runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), [
+      "install",
+      pkg.b.manifest,
+      "--quiet",
+    ]) === 0,
+    sandbox.log(6),
+  );
+  check(
+    `COMMITTED, ${VERSION_B} serving`,
+    sandbox.journal()?.outcome === "COMMITTED" &&
+      (await until(() => sandbox.serviceVersion() === VERSION_B, 30_000)),
+    sandbox.journal(),
+  );
+  const failed = taskRegistration(sandbox);
+  check(
+    "recorded: not registered, with the reason",
+    failed?.registered === false && (failed.reason ?? "").includes("KEEPALIVE_REGISTER"),
+    failed,
+  );
+  const unregistered = offlineDoctor(sandbox);
+  check(
+    "doctor --offline: no auto recovery claimed, the reason given",
+    unregistered?.auto_recovery === false &&
+      unregistered.registered === false &&
+      String(unregistered.reason).includes("KEEPALIVE_REGISTER"),
+    unregistered,
+  );
+  rmSync(join(sandbox.dir, "scheduler"), { force: true });
+  check(
+    "ATM 修复 exit 0",
+    runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--repair", "--quiet"]) === 0,
+    sandbox.log(4),
+  );
+  keepaliveOn(sandbox, "repaired: ");
+
+  process.stdout.write(`[${currentScenario}] uninstall removes the task\n`);
+  runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--uninstall", "--quiet"]);
+  check("install root removed", await until(() => !existsSync(sandbox.install), 60_000));
+  keepaliveOff(sandbox, "uninstalled");
+  teardown(sandbox);
+}
 
 async function installed(
   sandbox: Sandbox,
@@ -338,6 +797,7 @@ async function installed(
     samePath(junctionTarget(join(sandbox.data, "current")), sandbox.install),
     junctionTarget(join(sandbox.data, "current")),
   );
+  keepaliveOn(sandbox);
 }
 
 async function scenarioLifecycle(pkg: Packages): Promise<void> {
@@ -374,10 +834,8 @@ async function scenarioLifecycle(pkg: Packages): Promise<void> {
     "first install creates a desktop shortcut",
     existsSync(join(sandbox.dir, "desktop", "AyanamiTaskManager.lnk")),
   );
-  check(
-    "repair shortcut → atm-setup --repair",
-    shortcut(join(sandbox.dir, "start-menu", "ayanami", "ATM 修复.lnk"))?.args === "--repair",
-  );
+  const repair = shortcut(join(sandbox.dir, "start-menu", "ayanami", "ATM 修复.lnk"));
+  check("repair shortcut → atm-setup --repair", repair?.args === "--repair", repair);
   const uninstallKey = `${sandbox.registry}\\Uninstall\\AyanamiTaskManagerDesktop`;
   check(
     "Uninstall key points at atm-setup",
@@ -398,9 +856,10 @@ async function scenarioLifecycle(pkg: Packages): Promise<void> {
   const doctor = runLauncher(sandbox, ["--doctor"]);
   check(
     "launcher --doctor exits 0 and reports this version",
+    // 3.x: `atm.exe --doctor` prints `service: {json}` (the running service's own report).
     doctor.status === 0 &&
-      doctor.stdout.includes("ok: true") &&
-      doctor.stdout.includes(`version: ${VERSION_A}`),
+      doctor.stdout.includes('"ok":true') &&
+      doctor.stdout.includes(`"version":"${VERSION_A}"`),
     { status: doctor.status, out: doctor.stdout.slice(0, 200), err: doctor.stderr.slice(0, 200) },
   );
   const hostsBefore = processes(sandbox.install).filter((proc) =>
@@ -468,11 +927,16 @@ async function scenarioLifecycle(pkg: Packages): Promise<void> {
   );
 
   process.stdout.write(`[${currentScenario}] rollback → ${VERSION_A}\n`);
-  check(
-    "rollback exit 0",
-    runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--rollback", "--quiet"]) === 0,
-    sandbox.log(),
-  );
+  const rolledBack = spawnSync(join(sandbox.install, "atm-setup.exe"), ["--rollback", "--quiet"], {
+    env: sandbox.env(),
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 240_000,
+  });
+  check(`rollback exit 0 (${rolledBack.status})`, rolledBack.status === 0, {
+    out: `${rolledBack.stdout}${rolledBack.stderr}`.slice(-600),
+    log: sandbox.log(3),
+  });
   await installed(sandbox, VERSION_A, VERSION_B);
 
   process.stdout.write(`[${currentScenario}] uninstall\n`);
@@ -489,7 +953,9 @@ async function scenarioLifecycle(pkg: Packages): Promise<void> {
     !existsSync(startMenu) && !existsSync(join(sandbox.dir, "desktop", "AyanamiTaskManager.lnk")),
   );
   check("current junction removed", junctionTarget(join(sandbox.data, "current")) === null);
-  check("user data kept", existsSync(join(sandbox.data, "registry", "registry.sqlite")));
+  // 3.x keeps its data in N; uninstall removes the program, never the data.
+  check("user data kept (N)", existsSync(join(sandbox.v3, "data", "atm.sqlite")));
+  keepaliveOff(sandbox, "uninstalled");
   teardown(sandbox);
 }
 
@@ -498,7 +964,7 @@ type UpdateStatusFile = { code: string; version: string | null; outcome: string 
 function updateStatus(sandbox: Sandbox): UpdateStatusFile | null {
   try {
     return JSON.parse(
-      readFileSync(join(sandbox.data, "logs", "update-status.json"), "utf8"),
+      readFileSync(join(sandbox.v3, "logs", "update-status.json"), "utf8"),
     ) as UpdateStatusFile;
   } catch {
     return null;
@@ -506,10 +972,10 @@ function updateStatus(sandbox: Sandbox): UpdateStatusFile | null {
 }
 
 /**
- * The update bridge: a package delivered to `<data>\updates` is found by the packaged core,
- * then installed by exactly the command the host runs for "立即更新"
- * (`atm-setup --update <manifest> --quiet --show`). The core → host frame and the host's
- * path checks are covered by update-coordinator.test.ts and host update.rs tests.
+ * The update bridge: a package delivered to `N\updates` is found by the service's update
+ * coordinator, then installed by exactly the command the host runs for "立即更新"
+ * (`atm-setup --update <manifest> --quiet --show`). The coordinator and the host's path
+ * checks are covered by the `atm-jobs` update tests and host update.rs tests.
  */
 async function scenarioUpdate(pkg: Packages): Promise<void> {
   currentScenario = "update";
@@ -522,7 +988,7 @@ async function scenarioUpdate(pkg: Packages): Promise<void> {
     sandbox.log(),
   );
   killAll(sandbox.dir);
-  const feed = join(sandbox.data, "updates");
+  const feed = join(sandbox.v3, "updates");
   mkdirSync(feed, { recursive: true });
   // Delivery order: the zip first, the manifest last. Plus leftovers of the Squirrel era.
   copyFileSync(
@@ -534,7 +1000,7 @@ async function scenarioUpdate(pkg: Packages): Promise<void> {
   writeFileSync(join(feed, "AyanamiTaskManager-1.0.0-full.nupkg"), "drill");
   check("launcher start exits 0", runLauncher(sandbox, ["--background"]).status === 0);
   check(
-    `packaged core reports ${VERSION_B} ready`,
+    `the service reports ${VERSION_B} ready`,
     await until(() => updateStatus(sandbox)?.code === "UPDATE_READY", 30_000),
     updateStatus(sandbox),
   );
@@ -542,7 +1008,7 @@ async function scenarioUpdate(pkg: Packages): Promise<void> {
   // both; a toast that Windows refused logs "toast failed").
   const hostLog = () => {
     try {
-      return readFileSync(join(sandbox.data, "logs", "host.log"), "utf8");
+      return readFileSync(join(sandbox.v3, "logs", "host.log"), "utf8");
     } catch {
       return "";
     }
@@ -566,7 +1032,7 @@ async function scenarioUpdate(pkg: Packages): Promise<void> {
   process.stdout.write(`[${currentScenario}] 立即更新 → ${VERSION_B}\n`);
   // What UpdateCoordinator.apply() records before asking the host.
   writeFileSync(
-    join(sandbox.data, "logs", "update-status.json"),
+    join(sandbox.v3, "logs", "update-status.json"),
     JSON.stringify({
       ...updateStatus(sandbox),
       phase: "INSTALL",
@@ -599,16 +1065,7 @@ async function scenarioUpdate(pkg: Packages): Promise<void> {
     proc.path.endsWith("AyanamiTaskManager.exe"),
   );
   const window = host
-    ? spawnSync(
-        "powershell.exe",
-        [
-          "-NoProfile",
-          "-NonInteractive",
-          "-Command",
-          `(Get-Process -Id ${host.pid}).MainWindowHandle`,
-        ],
-        { encoding: "utf8", windowsHide: true },
-      ).stdout.trim()
+    ? powershellText(`(Get-Process -Id ${host.pid}).MainWindowHandle`).stdout.trim()
     : "";
   check("--show: the new version opened its window", window !== "" && window !== "0", {
     host,
@@ -646,6 +1103,7 @@ async function scenarioReview(pkg: Packages): Promise<void> {
     "nothing left installed",
     sandbox.pointer() === null && !existsSync(join(sandbox.install, `app-${VERSION_A}`)),
   );
+  keepaliveOff(sandbox, "a first install that failed registers nothing");
   teardown(sandbox);
 
   sandbox = new Sandbox("review-repair");
@@ -700,6 +1158,14 @@ async function scenarioReview(pkg: Packages): Promise<void> {
     { pointer: sandbox.pointer(), service: sandbox.serviceVersion() },
   );
   check(`staged app-${VERSION_B} removed`, !existsSync(join(sandbox.install, `app-${VERSION_B}`)));
+  // Undoing a 3.x → 3.x update stays on 3.x: N is still the source (07 §8 settles N only when
+  // leaving for an older line).
+  check(
+    "a 3.x → 3.x undo leaves A=v3 (no setup-rollback)",
+    authorityOf(sandbox)?.authority === "v3",
+    authorityOf(sandbox),
+  );
+  keepaliveOn(sandbox, "after the repair finished the undo: ");
 
   process.stdout.write(
     `[${currentScenario}] killed after ROLLBACK_START spawned the host (P1-7)\n`,
@@ -723,9 +1189,12 @@ async function scenarioReview(pkg: Packages): Promise<void> {
       (await until(() => sandbox.journal()?.outcome === "ROLLED_BACK", 90_000)),
     { recovered, journal: sandbox.journal(), log: sandbox.log(8) },
   );
+  // When the orphan's own --recover wins, the spawned host is its parent, blocked on it: it
+  // is replaced at once. Either way exactly one host is left (next check).
   check(
-    "the recovery took the spawned host over instead of starting a second",
-    sandbox.log(12).includes("taking over host"),
+    "the recovery took the spawned host over, or replaced the one waiting on it",
+    sandbox.log(12).includes("taking over host") ||
+      sandbox.log(12).includes("never served (it started this recovery and waits for it)"),
     sandbox.log(12),
   );
   check(
@@ -734,6 +1203,7 @@ async function scenarioReview(pkg: Packages): Promise<void> {
       (await until(() => sandbox.serviceVersion() === VERSION_A, 30_000)),
     hostsUnder(sandbox.install),
   );
+  keepaliveOn(sandbox, "after the recovery: ");
   teardown(sandbox);
 
   sandbox = new Sandbox("review-overlap");
@@ -773,14 +1243,14 @@ async function scenarioDelayed(pkg: Packages): Promise<void> {
   let exercised = false;
   for (let round = 1; round <= 6 && !exercised; round += 1) {
     killAll(sandbox.dir);
-    rmSync(join(sandbox.data, "runtime", "host.json"), { force: true });
+    rmSync(join(sandbox.v3, "runtime", "host.json"), { force: true });
     if (sandbox.pointer()?.current !== VERSION_A)
       runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--rollback", "--quiet"]);
     killAll(sandbox.dir);
     // Killed lease holders leave their lease file behind; with it gone, the file's presence
     // alone says a core has come up. serviceVersion() enumerates processes, which takes
     // seconds — longer than the window this scenario is after.
-    const lease = join(sandbox.data, "runtime", "daemon.json");
+    const lease = join(sandbox.v3, "runtime", "daemon.json");
     rmSync(lease, { force: true });
     spawn(
       join(sandbox.install, "AyanamiTaskManager.exe"),
@@ -792,7 +1262,7 @@ async function scenarioDelayed(pkg: Packages): Promise<void> {
         detached: true,
       },
     ).unref();
-    await until(() => existsSync(join(sandbox.data, "runtime", "host.json")), 10_000);
+    await until(() => existsSync(join(sandbox.v3, "runtime", "host.json")), 10_000);
     if (existsSync(lease)) continue;
     const before = sandbox.log(400).split("\n").length;
     const code = runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), [
@@ -875,13 +1345,10 @@ async function scenarioUninstallBusy(pkg: Packages): Promise<void> {
   const busy = join(sandbox.install, `app-${VERSION_A}`, "renderer", "index.html");
   const holder = spawn(
     "powershell.exe",
-    [
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      `$f = [IO.File]::Open('${busy.replaceAll("'", "''")}', 'Open', 'Read', 'None'); Start-Sleep -Seconds 120; $f.Close()`,
-    ],
-    { stdio: "ignore", windowsHide: true },
+    powershellArgs(
+      "$f = [IO.File]::Open($env:ATM_DRILL_HELD, 'Open', 'Read', 'None'); Start-Sleep -Seconds 120; $f.Close()",
+    ),
+    { stdio: "ignore", windowsHide: true, env: { ...process.env, ATM_DRILL_HELD: busy } },
   );
   await sleep(1500);
   runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--uninstall", "--quiet"]);
@@ -902,6 +1369,7 @@ async function scenarioUninstallBusy(pkg: Packages): Promise<void> {
       null,
   );
   check("atm-setup.exe kept for that", existsSync(join(sandbox.install, "atm-setup.exe")));
+  keepaliveOff(sandbox, "it went with the entry points, before the files");
   holder.kill();
   await sleep(1000);
   runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--uninstall", "--quiet"]);
@@ -915,7 +1383,9 @@ async function scenarioUninstallBusy(pkg: Packages): Promise<void> {
     regValue(`${sandbox.registry}\\Uninstall\\AyanamiTaskManagerDesktop`, "UninstallString") ===
       null,
   );
-  check("user data kept", existsSync(join(sandbox.data, "registry", "registry.sqlite")));
+  // 3.x keeps its data in N; uninstall removes the program, never the data.
+  check("user data kept (N)", existsSync(join(sandbox.v3, "data", "atm.sqlite")));
+  keepaliveOff(sandbox, "uninstalled");
   teardown(sandbox);
 }
 
@@ -1000,6 +1470,7 @@ async function scenarioFaults(pkg: Packages): Promise<void> {
       await until(() => sandbox.serviceVersion() === version, 30_000),
       sandbox.serviceVersion(),
     );
+    keepaliveOn(sandbox, `${state}: `);
     if (outcome !== "COMMITTED") {
       check(
         `${state}: staged app-${VERSION_B} removed`,
@@ -1038,6 +1509,7 @@ async function scenarioFaults(pkg: Packages): Promise<void> {
       await until(() => sandbox.serviceVersion() === VERSION_A, 30_000),
       sandbox.serviceVersion(),
     );
+    keepaliveOn(sandbox, `fail at ${state}: `);
   }
   const refused = runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), [
     "install",
@@ -1052,8 +1524,26 @@ async function scenarioFaults(pkg: Packages): Promise<void> {
   teardown(sandbox);
 }
 
-/** A Squirrel 1.x layout with its registrations, served by the fake Electron. */
+/**
+ * A Squirrel 1.x layout with its registrations, served by the fake Electron.
+ *
+ * 1.x and 2.x share the data root L (same registry and project databases), and a real 1.x
+ * user's L always holds them. The fake Electron writes none, and 3.x converts L, so the
+ * data comes first: the real 2.0 writes it (2.0's format) and is uninstalled again, which
+ * keeps L. Then the 1.x layout goes on top.
+ */
 async function squirrelLayout(sandbox: Sandbox): Promise<void> {
+  if (await install20(sandbox)) {
+    runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--uninstall", "--quiet"]);
+    check(
+      "1.x data root seeded (written by 2.0, which was uninstalled again)",
+      (await until(() => !existsSync(sandbox.install), 60_000)) &&
+        existsSync(join(sandbox.data, "registry", "registry.sqlite")),
+      existsSync(sandbox.install) ? readdirSync(sandbox.install) : readdirSync(sandbox.data),
+    );
+    killAll(sandbox.dir);
+    reg(["delete", sandbox.registry, "/f"]);
+  }
   const app = join(sandbox.install, `app-${LEGACY}`);
   mkdirSync(join(app, "resources"), { recursive: true });
   copyFileSync(fakeElectron, join(app, "AyanamiTaskManager.exe"));
@@ -1087,18 +1577,13 @@ async function squirrelLayout(sandbox: Sandbox): Promise<void> {
   ]);
   for (const dir of [join(sandbox.dir, "start-menu", "ayanami"), join(sandbox.dir, "desktop")]) {
     mkdirSync(dir, { recursive: true });
-    const lnk = join(dir, "AyanamiTaskManager.lnk").replaceAll("'", "''");
-    const target = join(sandbox.install, "AyanamiTaskManager.exe").replaceAll("'", "''");
-    spawnSync(
-      "powershell.exe",
-      [
-        "-NoProfile",
-        "-NonInteractive",
-        "-Command",
-        `$s = (New-Object -ComObject WScript.Shell).CreateShortcut('${lnk}'); $s.TargetPath = '${target}'; $s.WorkingDirectory = '${app.replaceAll("'", "''")}'; $s.Save()`,
-      ],
-      { windowsHide: true },
-    );
+    // IShellLinkW, not WScript.Shell: the file name is ASCII, but the parent directories come
+    // from the repository root and may not fit the ANSI code page (W8 gate, peer r16 P2-01).
+    writeShortcut(join(dir, "AyanamiTaskManager.lnk"), {
+      target: join(sandbox.install, "AyanamiTaskManager.exe"),
+      workdir: app,
+      args: "",
+    });
   }
   spawn(join(app, "AyanamiTaskManager.exe"), ["--background"], {
     env: sandbox.env(),
@@ -1117,6 +1602,7 @@ async function scenarioMigration(pkg: Packages): Promise<void> {
     `\n[${currentScenario}] Squirrel ${LEGACY} layout with a running (fake) Electron\n`,
   );
   await squirrelLayout(sandbox);
+  const seeded = legacyBusiness(sandbox.data);
   const stub = readFileSync(join(sandbox.install, "AyanamiTaskManager.exe"));
   check(
     `fake Electron serves ${LEGACY}`,
@@ -1199,8 +1685,11 @@ async function scenarioMigration(pkg: Packages): Promise<void> {
     desktop,
   );
   check(
-    "user data still readable by the new core (same registry DB)",
-    existsSync(join(sandbox.data, "registry", "registry.sqlite")),
+    "N holds the 1.x root's business content; L untouched",
+    seeded !== null &&
+      sameBusiness(v3Business(sandbox.v3), seeded) &&
+      sameBusiness(legacyBusiness(sandbox.data), seeded),
+    { seeded, n: v3Business(sandbox.v3), l: legacyBusiness(sandbox.data) },
   );
 
   process.stdout.write(`[${currentScenario}] back to Electron\n`);
@@ -1248,6 +1737,7 @@ async function scenarioMigration(pkg: Packages): Promise<void> {
     "no new-style process left",
     processes(join(sandbox.install, "state", "rollback", "newstyle")).length === 0,
   );
+  keepaliveOff(sandbox, "back on Electron: the root exe is Squirrel's stub");
 
   process.stdout.write(`[${currentScenario}] migrate again, then die after ISOLATE and recover\n`);
   const code = runSetup(
@@ -1363,9 +1853,15 @@ async function scenarioReverseReplay(pkg: Packages): Promise<void> {
       { code, journal: sandbox.journal(), log: sandbox.since(mark).slice(-1500) },
     );
     const log = sandbox.since(mark);
+    // SPAWNED: when the orphan's own --recover wins the lock, the host it would take over is
+    // its parent, blocked on it — it is replaced at once rather than waited for.
     check(
       `${label}: the replay took over the host started earlier`,
-      log.includes(`ROLLBACK_START: taking over host ${started}`),
+      log.includes(`ROLLBACK_START: taking over host ${started}`) ||
+        (point === "SPAWNED" &&
+          log.includes(
+            `ROLLBACK_START: host ${started} never served (it started this recovery and waits for it)`,
+          )),
       log.slice(-1500),
     );
     if (point !== "SPAWNED")
@@ -1557,12 +2053,556 @@ async function scenarioUninstallRace(pkg: Packages): Promise<void> {
   teardown(sandbox);
 }
 
+// ---------------------------------------------------------------- 2.0 ⇄ 3.0（W8b）
+
+/**
+ * The 2.0 package and its drill setup (sandbox and fault injection), from the 2.0-era drill
+ * build: `output/drill/package-2.0.0`. The production 2.0 setup has no sandbox, so it must
+ * never be used here.
+ */
+const PACKAGE_20 = {
+  setup: join(drillRoot, "package-2.0.0", "atm-setup.exe"),
+  manifest: join(drillRoot, "package-2.0.0", "atm-2.0.0-win-x64.json"),
+};
+// The version comes from the package itself, not a literal: the release chain treats a literal of
+// the current version outside the version sites as a leftover of a version bump.
+const V20 = existsSync(PACKAGE_20.manifest)
+  ? (JSON.parse(readFileSync(PACKAGE_20.manifest, "utf8")) as { version: string }).version
+  : "2.x (package missing)";
+
+type Step = {
+  scenario: string;
+  step: string;
+  current: string | null;
+  L: Business | null;
+  N: Business | null;
+  authority: { authority: string; by: string; generation: string | null } | null;
+  generation: string | null;
+};
+const business: Step[] = [];
+
+function authorityOf(sandbox: Sandbox): Step["authority"] {
+  const path = join(sandbox.v3, "authority.json");
+  if (!existsSync(path)) return null;
+  const a = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  return {
+    authority: String(a.authority),
+    by: String(a.by),
+    generation: (a.generation as string | null) ?? null,
+  };
+}
+
+function generationOf(sandbox: Sandbox): string | null {
+  const path = join(sandbox.v3, "conversion.json");
+  if (!existsSync(path)) return null;
+  const m = JSON.parse(readFileSync(path, "utf8")) as { phase?: string; generation?: string };
+  return m.phase === "PUBLISHED" ? (m.generation ?? null) : null;
+}
+
+/** Both roots' business content, the authority record and the generation, for the report. */
+function summarize(sandbox: Sandbox, step: string): Step {
+  const row: Step = {
+    scenario: currentScenario,
+    step,
+    current: sandbox.pointer()?.current ?? null,
+    L: legacyBusiness(sandbox.data),
+    N: v3Business(sandbox.v3),
+    authority: authorityOf(sandbox),
+    generation: generationOf(sandbox),
+  };
+  business.push(row);
+  process.stdout.write(
+    `    · ${step}: L ${row.L?.records.length ?? "-"} records, N ${row.N?.records.length ?? "-"} records, A ${row.authority ? `${row.authority.authority}/${row.authority.by}` : "-"}, g ${row.generation ?? "-"}\n`,
+  );
+  return row;
+}
+
+/** The 2.0 command line (`runtime\atm-core.exe runtime\cli.mjs`); its service must be up. */
+function cli20(sandbox: Sandbox, args: string[]): SpawnSyncReturns<string> {
+  const app = join(sandbox.install, `app-${V20}`, "runtime");
+  return spawnSync(join(app, "atm-core.exe"), [join(app, "cli.mjs"), "--json", ...args], {
+    env: sandbox.env(),
+    encoding: "utf8",
+    windowsHide: true,
+    timeout: 60_000,
+  });
+}
+
+/** The 3.x command line of `version` (`resources\atm.exe`), through N\runtime\daemon.json. */
+function cli3(sandbox: Sandbox, version: string, args: string[]): SpawnSyncReturns<string> {
+  return spawnSync(
+    join(sandbox.install, `app-${version}`, "resources", "atm.exe"),
+    ["--json", ...args],
+    { env: sandbox.env(), encoding: "utf8", windowsHide: true, timeout: 60_000 },
+  );
+}
+
+function record(
+  run: (args: string[]) => SpawnSyncReturns<string>,
+  title: string,
+  summary: string,
+): boolean {
+  const result = run([
+    "record",
+    "DRL",
+    "--kind",
+    "DECISION",
+    "--title",
+    title,
+    "--summary",
+    summary,
+  ]);
+  return result.status === 0;
+}
+
+const hasRecord = (side: Business | null, title: string) =>
+  side?.records.some((row) => row.includes(` ${title} `)) ?? false;
+
+async function install20(sandbox: Sandbox): Promise<boolean> {
+  if (!existsSync(PACKAGE_20.setup) || !existsSync(PACKAGE_20.manifest)) {
+    check(
+      "the 2.0 drill package is in output/drill/package-2.0.0 (see the header)",
+      false,
+      PACKAGE_20,
+    );
+    return false;
+  }
+  const code = runSetup(sandbox, PACKAGE_20.setup, ["install", PACKAGE_20.manifest, "--quiet"]);
+  check(`2.0 install exit 0 (${code})`, code === 0, sandbox.log(4));
+  check(
+    "2.0 serving (two-process, L\\runtime)",
+    await until(() => sandbox.serviceVersion() === V20, 30_000),
+    sandbox.serviceVersion(),
+  );
+  const source = join(sandbox.dir, "src");
+  mkdirSync(source, { recursive: true });
+  const created = cli20(sandbox, [
+    "project",
+    "create",
+    source,
+    "--name",
+    "演练项目",
+    "--code",
+    "DRL",
+  ]);
+  // 2.0 没装上时 atm-core.exe 不在，spawnSync 只有 error、没有输出：照样记成失败的检查项，不让整个演练中断。
+  check(
+    "2.0 CLI creates project DRL",
+    created.status === 0,
+    String(created.stderr ?? created.error ?? "").slice(0, 300),
+  );
+  check(
+    "2.0 CLI writes DRL-D-001",
+    record((args) => cli20(sandbox, args), "升级前写入", "2.0 写的"),
+  );
+  // 真实用户的 2.0 跑过一阵：新项目当天的自动备份已经做过。2.0 每次启动先做当天还没做的 DAILY / WEEKLY
+  // 备份（backup_catalog + global_events 的 backup.created），这些都在回滚检测摘要里（05 §5.2，保守方向）；
+  // 不先让它做完，回滚后 2.0 一重启就会写这一笔，「没动过 2.x」就不成立。
+  killAll(sandbox.dir);
+  check("2.0 restarts", runLauncher(sandbox, ["--background"]).status === 0);
+  check(
+    "2.0 made the new project's daily backup",
+    await until(() => projectBackups(sandbox.data) >= 1, 60_000),
+    projectBackups(sandbox.data),
+  );
+  check(
+    "2.0 serving after the restart",
+    await until(() => sandbox.serviceVersion() === V20, 30_000),
+    sandbox.serviceVersion(),
+  );
+  return sandbox.serviceVersion() === V20;
+}
+
+/** 2.x 的项目备份条数（只读打开 registry）。 */
+function projectBackups(root: string): number {
+  const path = join(root, "registry", "registry.sqlite");
+  if (!existsSync(path)) return 0;
+  const db = new DatabaseSync(path, { readOnly: true });
+  try {
+    const row = db
+      .prepare("SELECT count(*) AS n FROM backup_catalog WHERE scope = 'PROJECT'")
+      .get() as { n: number };
+    return Number(row.n);
+  } finally {
+    db.close();
+  }
+}
+
+/** registry 的全局事件条数：2.0 在两次比较之间有没有自己写过东西。 */
+function globalEvents(root: string): number {
+  const db = new DatabaseSync(join(root, "registry", "registry.sqlite"), { readOnly: true });
+  try {
+    return Number((db.prepare("SELECT count(*) AS n FROM global_events").get() as { n: number }).n);
+  } finally {
+    db.close();
+  }
+}
+
+async function rollbackTo20(sandbox: Sandbox, label: string): Promise<void> {
+  const code = runSetup(sandbox, join(sandbox.install, "atm-setup.exe"), ["--rollback", "--quiet"]);
+  check(`${label}: rollback exit 0 (${code})`, code === 0, sandbox.log(6));
+  check(
+    `${label}: app.json.current = ${V20}`,
+    sandbox.pointer()?.current === V20,
+    sandbox.pointer(),
+  );
+  check(
+    `${label}: 2.0 serving again`,
+    await until(() => sandbox.serviceVersion() === V20, 30_000),
+    sandbox.serviceVersion(),
+  );
+  const a = authorityOf(sandbox);
+  check(
+    `${label}: A=legacy by setup-rollback, bound to ${generationOf(sandbox)}`,
+    a?.authority === "legacy" &&
+      a.by === "setup-rollback" &&
+      a.generation === generationOf(sandbox),
+    a,
+  );
+  check(
+    `${label}: no 3.x process left under app-${VERSION_A}`,
+    processes(join(sandbox.install, `app-${VERSION_A}`)).length === 0,
+  );
+  keepaliveOff(sandbox, "2.0 does not know --ensure-running", `${label}: `);
+}
+
+async function upgradeTo3(sandbox: Sandbox, label: string): Promise<number> {
+  const code = runSetup(sandbox, pkg3().setup, ["install", pkg3().manifest, "--quiet"]);
+  check(`${label}: upgrade exit 0 (${code})`, code === 0, sandbox.log(8));
+  await installed(sandbox, VERSION_A, V20);
+  return code;
+}
+
+let packagesForV3: Packages | null = null;
+const pkg3 = () => packagesForV3!.a;
+
+/**
+ * 2.0 (two processes) → 3.x (single process, converts L into N) → undo → rollback to 2.0 →
+ * re-upgrade, in the three ways 07 §6 tells apart after a rollback: 2.x untouched (resume
+ * with nothing lost), 2.x written (reconvert from 2.x), 2.x not comparable (SOURCE_CONFLICT:
+ * setup waits for the user's choice, not for "progress"; nobody chooses, the cap ends the
+ * wait, setup confirms the process exited and rolls back). Each step records both roots'
+ * business content.
+ */
+async function scenarioV2V3(pkg: Packages): Promise<void> {
+  currentScenario = "v2-v3";
+  packagesForV3 = pkg;
+  const sandbox = new Sandbox("v2-v3");
+  reset(sandbox);
+  process.stdout.write(`\n[${currentScenario}] 2.0 installed, data written by 2.0\n`);
+  if (!(await install20(sandbox))) return teardown(sandbox);
+  const before = summarize(sandbox, "2.0 installed");
+  check("L has DRL and DRL-D-001", hasRecord(before.L, "升级前写入"), before.L);
+  check("no N yet", before.N === null && before.authority === null, before);
+
+  process.stdout.write(`[${currentScenario}] upgrade 2.0 → ${VERSION_A} (conversion)\n`);
+  await upgradeTo3(sandbox, "upgrade");
+  const upgraded = summarize(sandbox, `upgraded to ${VERSION_A}`);
+  const g1 = upgraded.generation;
+  check("N has exactly L's business content", sameBusiness(upgraded.L, upgraded.N), upgraded);
+  check("L is unchanged by the conversion", sameBusiness(upgraded.L, before.L), upgraded.L);
+  check(
+    "A=v3 by publish, bound to the published generation",
+    upgraded.authority?.authority === "v3" &&
+      upgraded.authority.by === "publish" &&
+      upgraded.authority.generation === g1 &&
+      g1 !== null,
+    upgraded.authority,
+  );
+  check(
+    "2.0 no longer serves (L\\runtime lease released)",
+    processes(join(sandbox.install, `app-${V20}`)).length === 0,
+  );
+  check(
+    "3.x CLI writes DRL-D-002 into N",
+    record((args) => cli3(sandbox, VERSION_A, args), "升级后写入", "3.0 写的"),
+  );
+  const written3 = summarize(sandbox, "written in 3.x");
+  check(
+    "the 3.x write is in N, not in L",
+    hasRecord(written3.N, "升级后写入") && !hasRecord(written3.L, "升级后写入"),
+  );
+
+  process.stdout.write(`[${currentScenario}] roll back to 2.0\n`);
+  const eventsBefore = globalEvents(sandbox.data);
+  await rollbackTo20(sandbox, "rollback 1");
+  const back1 = summarize(sandbox, "rolled back to 2.0");
+  check(
+    "2.0 restarted by the rollback wrote nothing of its own (no new global event)",
+    globalEvents(sandbox.data) === eventsBefore,
+    { before: eventsBefore, after: globalEvents(sandbox.data) },
+  );
+  check("2.0 serves L as it was before the upgrade", sameBusiness(back1.L, before.L), back1.L);
+  check("N is kept as it was (3.x write included)", sameBusiness(back1.N, written3.N), back1.N);
+
+  process.stdout.write(`[${currentScenario}] re-upgrade, 2.x untouched → resume\n`);
+  await upgradeTo3(sandbox, "re-upgrade unchanged");
+  const resumed = summarize(sandbox, "re-upgraded, 2.x untouched");
+  check(
+    "same generation (resumed, not reconverted)",
+    resumed.generation === g1,
+    resumed.generation,
+  );
+  check(
+    "A=v3 by resume-after-rollback",
+    resumed.authority?.authority === "v3" && resumed.authority.by === "resume-after-rollback",
+    resumed.authority,
+  );
+  check("nothing lost: N still has the 3.x write", sameBusiness(resumed.N, written3.N), resumed.N);
+
+  process.stdout.write(`[${currentScenario}] roll back, write in 2.0, re-upgrade → reconvert\n`);
+  await rollbackTo20(sandbox, "rollback 2");
+  check(
+    "2.0 CLI writes DRL-D-002 after the rollback",
+    record((args) => cli20(sandbox, args), "回滚后写入", "回到 2.0 之后写的"),
+  );
+  const written2 = summarize(sandbox, "written in 2.0 after the rollback");
+  await upgradeTo3(sandbox, "re-upgrade changed");
+  const reconverted = summarize(sandbox, "re-upgraded, 2.x written");
+  const g2 = reconverted.generation;
+  check("a new generation (reconverted from 2.x)", g2 !== null && g2 !== g1, { g1, g2 });
+  check("N is 2.x's content now", sameBusiness(reconverted.N, written2.L), reconverted);
+  check(
+    "the 2.x write is in, the superseded 3.x-only write is not",
+    hasRecord(reconverted.N, "回滚后写入") && !hasRecord(reconverted.N, "升级后写入"),
+    reconverted.N,
+  );
+  check(
+    "the superseded generation is sealed under N\\superseded, not deleted",
+    existsSync(join(sandbox.v3, "superseded")) &&
+      readdirSync(join(sandbox.v3, "superseded")).length > 0,
+    readdirSync(sandbox.v3),
+  );
+
+  process.stdout.write(
+    `[${currentScenario}] roll back, 2.x not comparable, re-upgrade → SOURCE_CONFLICT\n`,
+  );
+  await rollbackTo20(sandbox, "rollback 3");
+  const back3 = summarize(sandbox, "rolled back again");
+  writeFileSync(join(sandbox.data, "stray.bin"), "not a 2.x file");
+  const mark = sandbox.logMark();
+  const started = Date.now();
+  // Drill-only wait budget (first progress 60 s, stall 5 s, cap 40 s): a stall rule that still
+  // applied would end the wait 5 s after the conflict; the cap ends it instead.
+  const code = runSetup(sandbox, pkg3().setup, ["install", pkg3().manifest, "--quiet"], {
+    ATM_SETUP_WAIT_SECS: "60,5,40",
+  });
+  const waited = (Date.now() - started) / 1000;
+  const log = sandbox.since(mark);
+  check(
+    `unknown: setup did not commit (exit ${code}, ${waited.toFixed(0)} s)`,
+    code !== 0,
+    log.slice(-600),
+  );
+  check(
+    "unknown: setup saw the conflict and waited for the user's choice",
+    /SOURCE_CONFLICT, waiting for the user to choose the data source/u.test(log),
+    log.slice(-800),
+  );
+  check(
+    "unknown: the cap ended the wait, not the stall rule",
+    /START_TIMEOUT: the data source was not chosen within/u.test(log) && !/START_STUCK/u.test(log),
+    log.slice(-800),
+  );
+  check(
+    "unknown: journal ROLLED_BACK",
+    sandbox.journal()?.outcome === "ROLLED_BACK",
+    sandbox.journal(),
+  );
+  check(
+    `unknown: app.json.current = ${V20}`,
+    sandbox.pointer()?.current === V20,
+    sandbox.pointer(),
+  );
+  check(
+    "unknown: 2.0 serving again",
+    await until(() => sandbox.serviceVersion() === V20, 30_000),
+    sandbox.serviceVersion(),
+  );
+  check(
+    `unknown: the 3.x host exited before the rollback (no process under app-${VERSION_A})`,
+    processes(join(sandbox.install, `app-${VERSION_A}`)).length === 0,
+  );
+  const conflicted = summarize(sandbox, "re-upgrade with 2.x not comparable, rolled back");
+  check("unknown: L untouched", sameBusiness(conflicted.L, back3.L), conflicted.L);
+  check(
+    "unknown: N untouched (same generation, same content)",
+    conflicted.generation === g2 && sameBusiness(conflicted.N, back3.N),
+    conflicted,
+  );
+  check(
+    "unknown: A=legacy by setup-rollback again",
+    conflicted.authority?.authority === "legacy" && conflicted.authority.by === "setup-rollback",
+    conflicted.authority,
+  );
+  check(
+    "unknown: the rollback cleared the conflict state (2.x is the source again)",
+    !existsSync(join(sandbox.v3, "runtime", "startup-state.json")),
+  );
+
+  process.stdout.write(`[${currentScenario}] 2.x readable again, re-upgrade → resume\n`);
+  rmSync(join(sandbox.data, "stray.bin"));
+  await upgradeTo3(sandbox, "re-upgrade after the conflict");
+  const last = summarize(sandbox, "re-upgraded after the conflict");
+  check("resumed the same generation", last.generation === g2, last.generation);
+  check("N is what it was", sameBusiness(last.N, back3.N), last.N);
+  teardown(sandbox);
+}
+
+/**
+ * 2.0 → 3.x with setup killed at every commit point (and in the middle of the undo a failed
+ * START began, and right after it spawned the converting host). The next ordinary start —
+ * whichever launcher the root has at that moment — recovers: committed with N holding L's
+ * business content, or back on 2.0 with L untouched and `A` matching how far the
+ * conversion durably got (not published: no `A`; published: `A=legacy by setup-rollback`).
+ */
+async function scenarioV2V3Faults(pkg: Packages): Promise<void> {
+  currentScenario = "v2-v3-faults";
+  packagesForV3 = pkg;
+  const sandbox = new Sandbox("v2-v3-faults");
+  const expected: Array<[string, "ABORTED" | "ROLLED_BACK" | "COMMITTED"]> = [
+    ["STAGE", "ABORTED"],
+    ["PROBE", "ABORTED"],
+    ["SNAPSHOT", "ABORTED"],
+    ["FENCE", "ABORTED"],
+    ["QUIESCE", "ABORTED"],
+    ["SEAL", "ABORTED"],
+    ["SWITCH", "ROLLED_BACK"],
+    ["START", "ROLLED_BACK"],
+    // 刚拉起转换宿主就死：宿主准入时自己跑 --recover 并等它；那一轮 recover 不接管这个卡在准入的宿主，
+    // 先确认它退出再回滚（以前是互等到首条进度期限 60 s）。
+    ["SPAWNED:START", "ROLLED_BACK"],
+    // 宿主已经转换完、拿到 lease 才死：下一次启动的 recover 接管同一个宿主的等待，提交。
+    ["LEASED:START", "COMMITTED"],
+    ["UNDO:2", "ROLLED_BACK"],
+    ["COMMIT", "COMMITTED"],
+  ];
+  // 只复现其中几点：ATM_DRILL_POINTS=SPAWNED:START,COMMIT。
+  // An empty value means "all": a wrapper that clears the variable may leave it empty, and
+  // [""] would silently skip every point.
+  const points = process.env.ATM_DRILL_POINTS?.split(",").filter(Boolean);
+  for (const [point, planned] of expected) {
+    if (points?.length && !points.includes(point)) continue;
+    // SPAWNED:START races setup's death against the host's admission (see below): repeat until
+    // a round meets the case this point exists for.
+    const rounds = point === "SPAWNED:START" ? 4 : 1;
+    let exercised = point !== "SPAWNED:START";
+    for (let round = 1; round <= rounds; round += 1) {
+      const label = rounds > 1 ? `${point} round ${round}` : point;
+      process.stdout.write(`\n[${currentScenario}] 2.0 → ${VERSION_A}, die after ${label}\n`);
+      reset(sandbox);
+      if (!(await install20(sandbox))) break;
+      const before = legacyBusiness(sandbox.data);
+      const extra: Record<string, string> =
+        point === "UNDO:2"
+          ? { ATM_SETUP_FAIL_AT: "START", ATM_SETUP_DIE_AFTER: "UNDO:2" }
+          : { ATM_SETUP_DIE_AFTER: point };
+      const beforeSetup = sandbox.logMark();
+      const code = runSetup(sandbox, pkg.a.setup, ["install", pkg.a.manifest, "--quiet"], extra);
+      check(`${label}: setup died (99)`, code === 99, { code, log: sandbox.log(4) });
+      let outcome = planned;
+      if (point === "SPAWNED:START") {
+        // The host checks its admission right after it is spawned. Setup already gone (the
+        // lock free): it runs its own `atm-setup --recover` (no --quiet) and waits on it — that
+        // recovery must not take over the host waiting on it (W8b); it undoes. Setup still
+        // alive: the host was admitted as this START and converts; the launcher's recovery
+        // then takes its wait over and commits (LEASED:START's path).
+        const orphan = await until(
+          () => sandbox.since(beforeSetup).includes('["--recover"] root='),
+          15_000,
+        );
+        exercised ||= orphan;
+        outcome = orphan ? "ROLLED_BACK" : "COMMITTED";
+        process.stdout.write(
+          `    · ${orphan ? "the orphaned host recovered itself" : "admitted before setup died: a takeover"}\n`,
+        );
+      } else
+        check(
+          `${label}: journal left unfinished`,
+          sandbox.journal()?.outcome == null,
+          sandbox.journal(),
+        );
+      const mark = sandbox.logMark();
+      const begun = Date.now();
+      const start = runLauncher(sandbox, ["--background"]);
+      check(
+        `${label}: the root launcher's start exits 0 within 90 s (${((Date.now() - begun) / 1000).toFixed(1)} s)`,
+        start.status === 0 && Date.now() - begun < 90_000,
+        { status: start.status, err: start.stderr.slice(0, 300) },
+      );
+      check(
+        `${label}: recovered to ${outcome}`,
+        await until(
+          () => sandbox.journal()?.state === "DONE" && sandbox.journal()?.outcome === outcome,
+          240_000,
+        ),
+        { journal: sandbox.journal(), log: sandbox.since(mark).slice(-800) },
+      );
+      const version = outcome === "COMMITTED" ? VERSION_A : V20;
+      check(
+        `${label}: app.json.current = ${version}`,
+        sandbox.pointer()?.current === version,
+        sandbox.pointer(),
+      );
+      check(
+        `${label}: service running ${version}`,
+        await until(() => sandbox.serviceVersion() === version, 60_000),
+        sandbox.serviceVersion(),
+      );
+      const after = summarize(sandbox, `die after ${label} → ${outcome}`);
+      check(`${label}: L untouched`, sameBusiness(after.L, before), after.L);
+      if (outcome === "COMMITTED") {
+        check(`${label}: N holds L's business content`, sameBusiness(after.N, before), after.N);
+        check(
+          `${label}: A=v3, bound to the published generation`,
+          after.authority?.authority === "v3" && after.authority.generation === after.generation,
+          after.authority,
+        );
+      } else {
+        check(
+          `${label}: no 3.x process left`,
+          processes(join(sandbox.install, `app-${VERSION_A}`)).length === 0,
+        );
+        check(
+          `${label}: A matches the durable phase (published → legacy, otherwise none)`,
+          after.generation === null
+            ? after.authority === null
+            : after.authority?.authority === "legacy" &&
+                after.authority.generation === after.generation,
+          { generation: after.generation, authority: after.authority },
+        );
+      }
+      if (point === "LEASED:START")
+        check(
+          `${label}: the recovery took over the same host's wait`,
+          /taking over the wait for host/u.test(sandbox.since(mark)),
+          sandbox.since(mark).slice(-600),
+        );
+      if (exercised) break;
+    }
+    check(`${point}: a round met the case the point is about`, exercised);
+  }
+  teardown(sandbox);
+}
+
+/** What the drill actually installed (package A), and which 2.0 drill package the 2.x scenarios used. */
+function drillBinaries(): Record<string, unknown> {
+  const app = join(drillRoot, `package-${VERSION_A}`, `app-${VERSION_A}`);
+  return {
+    ...(existsSync(app) ? binariesOf(app) : {}),
+    package20: existsSync(PACKAGE_20.setup)
+      ? { setup: sha256File(PACKAGE_20.setup), manifest: sha256File(PACKAGE_20.manifest) }
+      : null,
+  };
+}
+
 async function main(): Promise<void> {
-  if (!existsSync(fakeElectron)) throw new Error(`DRILL_FAKE_ELECTRON_MISSING: ${fakeElectron}`);
   const only = process.argv.includes("--only")
     ? process.argv[process.argv.indexOf("--only") + 1]!.split(",")
     : null;
   const pkg = packages(process.argv.includes("--rebuild-packages"));
+  // 演练用的假 Electron 与 job-runner 是 drill 构建的 examples：构建包之后才一定在。
+  if (!existsSync(fakeElectron)) throw new Error(`DRILL_FAKE_ELECTRON_MISSING: ${fakeElectron}`);
   const scenarios: Array<[string, (pkg: Packages) => Promise<void>]> = [
     ["lifecycle", scenarioLifecycle],
     ["update", scenarioUpdate],
@@ -1575,8 +2615,18 @@ async function main(): Promise<void> {
     ["reverse-replay", scenarioReverseReplay],
     ["legacy-record", scenarioLegacyRecord],
     ["uninstall-race", scenarioUninstallRace],
+    ["keepalive", scenarioKeepalive],
+    ["v2-v3", scenarioV2V3],
+    ["v2-v3-faults", scenarioV2V3Faults],
   ];
   for (const [name, run] of scenarios) if (!only || only.includes(name)) await run(pkg);
+  // A scenario that ran without a single check skipped itself (an empty filter once did):
+  // that is a failure, not a pass.
+  for (const [name] of scenarios)
+    if ((!only || only.includes(name)) && !results.some((result) => result.scenario === name)) {
+      currentScenario = name;
+      check(`${name}: ran at least one check`, false);
+    }
   const failed = results.filter((result) => !result.passed);
   const report = {
     at: new Date().toISOString(),
@@ -1584,6 +2634,12 @@ async function main(): Promise<void> {
     total: results.length,
     failed: failed.length,
     results,
+    business,
+    // B1: crash → back = trigger wait (≤ the task's PT5M) + decision + start → healthy.
+    keepalive: { triggerWaitMaxMs: 5 * 60_000, recoveries },
+    // Candidate binding (L6): the drill packages carry the release host, launcher, CLI and shim
+    // from target/release; their setup is the drill build, which assemble-release does not compare.
+    binaries: drillBinaries(),
   };
   writeFileSync(join(drillRoot, "report.json"), `${JSON.stringify(report, null, 2)}\n`);
   process.stdout.write(

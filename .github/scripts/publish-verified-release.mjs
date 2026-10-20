@@ -84,11 +84,13 @@ const stages = [
   "typecheck",
   "test",
   "e2e",
-  "benchmark",
   "build",
   "package",
   "packaged-smoke",
   "distribution-smoke",
+  "install-drill",
+  "budget",
+  "power-loss",
 ];
 assert.equal(verification.commands.length, stages.length);
 for (const stage of stages)
@@ -105,7 +107,49 @@ for (const name of ["packaged", "portable", "installed", "distribution"]) {
 const e2e = await readJson(join(releaseRoot, "test-report/e2e-results.json"));
 assert.ok(e2e.stats.expected > 0);
 assert.equal(e2e.stats.unexpected, 0);
-assert.equal((await readJson(join(releaseRoot, "test-report/benchmark-report.json"))).passed, true);
+const drill = await readJson(join(releaseRoot, "test-report/install-drill-report.json"));
+assert.equal(drill.passed, true);
+assert.ok(drill.total > 0);
+assert.equal(drill.failed, 0);
+const budget = await readJson(join(releaseRoot, "test-report/budget-report.json"));
+assert.equal(budget.error, undefined);
+assert.equal(typeof budget.completedAt, "string");
+// 08 §3 的验收线逐条达标（与 budget-verdicts.ts 的 budgetReportProblems 同一规则）：十条一条不少、按顺序，
+// 每条 pass，样本数够（体积与首次转换 1 个，其余 5 个）。只看 allPass 的话，缩短的测量或汇总写错都能混过去。
+const BUDGET_ITEMS = [
+  "payload",
+  "更新 zip",
+  "首次转换（样本库）",
+  "后台空闲 Private",
+  "Agent 负载后 Private",
+  "关窗后 Private",
+  "关开窗不上涨",
+  "关窗后 WebView2 全部退出",
+  "冷启动 · 后台健康（中位）",
+  "冷启动 · 窗口可见（中位）",
+];
+const ONE_SAMPLE = new Set(["payload", "更新 zip", "首次转换（样本库）"]);
+assert.equal(budget.summary?.allPass, true);
+assert.deepEqual(
+  budget.summary.verdicts.map((verdict) => verdict.item),
+  BUDGET_ITEMS,
+);
+for (const verdict of budget.summary.verdicts) {
+  assert.equal(verdict.pass, true, verdict.item);
+  assert.ok(verdict.samples >= (ONE_SAMPLE.has(verdict.item) ? 1 : 5), verdict.item);
+}
+// 掉电演练（W8f）：三个场景都跑过、每项通过（power-loss-report.ts）。
+const powerLoss = await readJson(join(releaseRoot, "test-report/power-loss-report.json"));
+assert.equal(powerLoss.passed, true);
+assert.equal(powerLoss.error, null);
+assert.equal(powerLoss.failed, 0);
+assert.ok(powerLoss.total > 0);
+assert.deepEqual(powerLoss.scenarios, ["conversion", "writes", "recover"]);
+// 候选绑定（L6）：打包时记下的 exe 哈希就是这次发布的版本。
+assert.equal(
+  (await readJson(join(releaseRoot, "test-report/candidate-binaries.json"))).version,
+  version,
+);
 for (const layer of summary.evidenceLayers) {
   assert.equal(layer.candidateSha256, manifest.candidate.candidateSha256);
   assert.ok(layer.evidence.length > 0);

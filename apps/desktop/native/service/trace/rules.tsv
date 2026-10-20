@@ -1,0 +1,357 @@
+D01		状态机合法入口、同态操作与额外门分开；BACKLOG/READY/CLAIMED 即便 complete.allowe…
+D02		wait 保存 phase；从 WAITING 恢复可回 VERIFYING；CANCELLED reopen 回 B…
+D03		claim/start 的 BLOCKS 依赖必须 DONE，CANCELLED 依赖仍不 ready；抛 DEPEN…
+D04		claim/start 占用按 session，不仅按 Agent；只有租约过期且 takeoverStale 才接管…
+D05		完成门固定七类：checklist、evidence、children、blockers、dependencies、v…
+D06		完成失败不是返回第一条原因；每谓词至多 50 条明细，但 total/omitted/truncated 保真；ver…
+D07		verify_and_complete 是同一个 immediate 事务：必要时先 verify，再检查完成门，再 …
+D08		start/reopen 要解除 ACTIVE blockers，不能只清 work_item 的 blocked_r…
+D09		批量 create 的 parentRef/dependsOn 同批引用、父关系循环、依赖循环、discoveredF…
+D10		expectedVersion 通常是 WorkItem 版本；edit 版本过期有受限字段级安全合并：仅指定文本/日…
+D11		checklist_single 比检查项 version，并验证所属 task；checklist_batch 比 …
+D12		不传 evidence 保留原证据，显式空数组是清空；DONE 且 evidence_required 时不得为空。改…
+D13		Review request 必须绑定 REVIEW 类型的活动任务、其父任务的指定 checklist、任务版本、c…
+D14		submit 要 ONLINE REVIEWER session，agent 与 actor 相同，而且是该 Revi…
+D15		submit 自身要通过 Review 任务完成门，request 只能提交一次；APPROVED 才把父检查项置 D…
+D16		reviewer 绑定的是候选 hashes 与 checklist version，不是“最新代码”概念；候选变化需…
+D17		证据中的 atm_record/atm_task 要解析到本项目实际对象、规范化公开 key；不能在单库后按裸 ID …
+D18		resume 无 predecessor 时按 agent、cwd、thread、role 查唯一未关闭 sessio…
+D19		paused/retired 都保存未完成 claim 的 checkpoint/handoff，和 releaseC…
+D20		HEARTBEAT_TIMEOUT 可通过唯一且身份一致的 successor REBOUND；EXPLICIT_EN…
+D21		先查原 session/可访问前序链的幂等记录，再考虑当前状态/rebind；已关闭 session 的已成功请求仍可…
+D22		项目 mutation 默认幂等键为 session-or-actor + opId；operation 和规范化指纹…
+D23		原子 begin 带 operationId 要既有受管项目；垃圾箱项目不能通过新建/quick 绕过。begin 返…
+D24		brief 始终保留 project/seq/truncated；按 include 选节，task/delta 只在…
+D25		continuation 页不能放下一项时返回 RESULT_TOO_LARGE 并保留 cursor，不能给空页造成…
+D26		delta 不传 since_seq 是最近窗口；传入后按增量续读。current_sequence 不是 next_…
+D27		brief 是精选工作集：active objective/milestone、当前任务与交接、优先用户约束，不是简单…
+D28		进度优先 CHILDREN > CHECKLIST > REPORTED > NONE；取消/归档子项不参与，SKIP…
+D29		同任务最近进度 bucket 与 trimmed summary 相同、无新 evidence、无 blocker 时…
+D30		task/record/session/search 分页各有自己的目标、排序及游标规则，不能只迁 brief 游标。…
+D31		USER_ONLY 包含 saved views、settings、项目路径/归档/恢复/垃圾箱、恢复审批、backu…
+D32		TRASHED 上 begin 返回不可用但登记/更新 PENDING 恢复请求，不新建、不恢复、不进入 quick；…
+D33		ACTIVE/ARCHIVED 可打开项目库；其他生命周期拒绝。不要凭 ARCHIVED 名字擅自改成完全只读；CRE…
+D34		知识修订不可变，id/revisionId/head/version/archive 是不同字段；用户保存/归档同时校…
+D35		知识分页锁 revisionId 和 editVersion，不能老正文配新 head version 形成覆盖授权；…
+W-001	D17	公开 key 的解析
+W-002	D02	status / phase / waiting_on 的组合不变量
+W-003		版本号
+W-004		关系的通用约束
+W-005	D03,D09	discoveredFrom 与 BLOCKS 互不替代
+W-006		父子层级
+W-007	D08	blockers 记录
+W-008		标签
+W-009		Review 请求的 key 解析
+W-010	D13,D16	候选哈希的规范化
+W-011		证据格式与上限
+W-012	D17	证据规范化
+W-020	D01	操作解析算法
+W-021		单条 patch 的检查顺序
+W-022	D01	legal_operations 的计算
+W-023	D03,D04	claim
+W-024	D03	依赖就绪
+W-025	D04	领取可用性与租约
+W-026	D04	IN_PROGRESS 上的 claim（successor reclaim）
+W-027	D03,D04,D08	start
+W-028	D04	release
+W-029	D01	ready
+W-030		block
+W-031	D02,D08	wait_agent / wait_user
+W-032	D01,D05,D08	complete
+W-033	D08	cancel
+W-034	D02,D08	reopen
+W-035		edit 的字段
+W-036		edit 改父
+W-037		edit 改关系
+W-038	D01	会话效果
+W-039		事件
+W-040		父链重算
+W-041	D10	批次语义
+W-042		提交后的观测效果
+W-043		非领取操作不校验领取归属
+W-044		主体差异
+W-050		复合操作不混批
+W-051	D11	复合操作的 expected_version 语义
+W-052	D07	verify_and_complete
+W-053	D11,D12	checklist_single
+W-054	D11,D12	checklist_batch
+W-055	D12	证据的保留与清空
+W-056	D12	检查项更新会推高任务版本
+W-057	D13	review_request
+W-058	D14	review_submit 的身份
+W-059	D14,D15,D16	review_submit 的绑定与完成门
+W-060	D15	review_submit 的写入与结论效果
+W-061	D16	Review 不提供独立性保证
+W-062	D07	复合操作的失败一律零写入
+W-063		复合操作的幂等重放
+W-070	D09	批次与 clientRef
+W-071		规划根（objective / milestone 的默认值）
+W-072	D09	objective / milestone 校验
+W-073		父引用
+W-074		依赖引用
+W-075		发现来源引用
+W-076	D09	整图校验与顺序无关
+W-077	D09	先校验后写，全有或全无
+W-078		初始状态
+W-079		创建后的重算与版本
+W-080	D09	创建回执
+W-090	D05,D06	七个谓词与固定顺序
+W-091	D05	checklist 谓词
+W-092	D05	evidence 谓词
+W-093	D05	children 谓词
+W-094		blockers 谓词
+W-095	D03	dependencies 谓词
+W-096		verification 谓词
+W-097	D01,D05,D06	current_state 谓词
+W-098	D06	明细上限与截断
+W-099	D06	各入口的「有效当前状态」
+W-100	D10	expectedVersion 的通用语义
+W-101	D10	edit 的受限字段级安全合并
+W-102	D10	expectedFields 的 schema 约束
+W-103	D11	检查项版本与任务版本
+W-104		VERSION_CONFLICT 的载荷
+W-105		版本变化的来源一览
+W-106		写入串行化与 STORE_BUSY
+W-110		来源优先级
+W-111		权重
+W-112		舍入与上限
+W-113		DONE 与 complete 的进度
+W-114		重算的触发与传播
+W-115		reported_progress 的写入
+S-001	D23	begin 的 op_id trim 后 1–128，否则 OPERATION_ID_INVALID，零写入
+S-002	D23	原子 begin 要求项目已存在；不建 quick、不建项目
+S-003	D23	TRASHED 项目 begin：登记/累加恢复请求，PROJECT_DB_UNAVAILABLE(retryable…
+S-004	D21,D23	原子 begin 幂等：同 (项目, op_id) 同请求 → 原 {id, sequence}、dispositio…
+S-005	D23	begin 身份字段（scope、session、project、surface_version、op_id、atom…
+S-006	D18	resume 无 predecessor：同四元组唯一未关闭 Session → 接回同一 id、ONLINE、刷新心…
+S-007	D18,D19	resume 无 predecessor、无未关闭候选：唯一同四元组待确认交接来源 → 新 Session 以它为 p…
+S-008	D18	resume 指名 predecessor 的判定表（§2.3 A）
+S-009	D18	指名 predecessor 是普通 completed 结束、无交接 → SESSION_NOT_RETIRED
+S-010	D18,D19	不带 resume 的 begin 总是新建；不确认任何 handoff
+S-011		每次建 Session 都 upsert agents，覆盖 display_name / client_kind
+S-012	D20	心跳超时只在服务启动时、只对 ACTIVE 项目：ONLINE 且 COALESCE(heartbeat_at, up…
+S-013	D19	end：paused/retired 为未完成领取任务写 handoff，与 release_claims 独立
+S-014	D19	end 释放：只把 CLAIMED 变 READY，IN_PROGRESS 等保留状态/阶段但清 claim 与租约；…
+S-015	D19	end 的关闭字段与事件（§2.6）
+S-016	D19	handoff 确认只限 predecessor 来源、本 agent
+S-017	D20	强制关闭（USER）：默认释放，CLAIMED 清 assignee；覆盖 close_reason
+S-018	D20,D21	写入 actor 解析顺序：先幂等（REPLAY）→ ONLINE（CURRENT）→ 非心跳关闭 SESSION_C…
+S-019	D20	心跳超时 rebind：唯一 ONLINE 且 (agent, thread, parent, role) 一致的 s…
+S-020	D20	rebind 新建 successor 与写入同事务：写入失败时 successor 不存在
+S-021	D20	end 不建 successor：心跳超时旧 id 无 successor → SESSION_CLOSED；有唯一 …
+S-022		git 上下文：available 用新值，否则保留；无变化不写
+S-030	D22	项目写入键 = (项目, session-or-actor, opId)；同 opId 不同 Session 互不影响
+S-031	D22	同键同 operation 同指纹 → 回原回执，不执行、无新事件、无行变化
+S-032	D22	同键不同 operation 或不同指纹 → IDEMPOTENCY_CONFLICT，零写入
+S-033	D22	失败不缓存：action 抛错后同 op_id 可用修正后的请求重新执行
+S-034	D22	回执、状态、事件、outbox 同事务；中途失败全回滚
+S-035	D22	事件带 op_id（kernel 内发出的）
+S-036	D21	先查幂等再看 Session 状态：已关闭 Session 上已成功的请求仍 REPLAY
+S-037	D21	前序链：requested ONLINE 时沿 predecessor 往前查；命中 → REPLAY，actor=前序
+S-038	D22	兼容重放：checklist_single 带 taskKey 的请求可重放旧形状回执，但先校验归属
+S-039	D22,D29	noop 也是成功回执
+S-040		fp_v1 F-KERNEL 算法（§3.4）
+S-041	D34	fp_v1 F-KNOWLEDGE 算法与命名空间（§3.4）
+S-042	D34	知识 Agent 重放不要求 Session 在线；新写要求 ONLINE
+S-043	D22	两道闸门规范化一致（§3.3）
+S-050	D27	brief 是精选工作集（§4.1 表）
+S-051	D27	交接归属看 Session 身份：只有唯一同四元组已关闭来源的待确认交接才展示
+S-052	D24	include 选节；truncated/project/seq 始终在；task/delta 只在传 task_ke…
+S-053	D24,D25	预算按分节丢弃、records 整条分页、不截断字符串（§4.2）
+S-054	D24	brief 游标格式与签名（§4.2）
+S-055	D24	续读目标必须一致
+S-056	D24	续读时冻结记录变化 → STALE
+S-057	D24	游标过期 → INVALID_CURSOR EXPIRED，recovery restart_read
+S-058	D25	续读放不下一条 → RESULT_TOO_LARGE，保留 cursor，不返回空页
+S-059	D25	新事件不使续读失败，只附 snapshot_advanced_from/to
+S-060	D23	begin brief 模式 none/minimal/full
+S-061	D26	delta since_seq：sequence > since 升序、limit 1–100、hasMore
+S-062	D26	delta 省略 since_seq：最近 limit 条升序、window=latest、since_seq=首条-1
+S-063	D26	current_sequence ≠ next_seq；预算截断按实际返回推进
+S-064	D26	单个超大事件 → oversized_event + REST path，next_seq 越过它
+S-065	D30	任务列表 keyset + 每项游标 + retryCursor + oversized_item
+S-066	D30	记录列表 (updated_at, local_no) DESC keyset
+S-067	D30	Session 列表 (started_at, id) DESC keyset
+S-068	D30	搜索：词规则、rowid 快照、keyset、NFC 查询哈希
+S-069	D22,D30	op_id 精确回查（§4.6）
+S-070	D17,D30	单库下所有列表/搜索/回查都限定项目；不同项目同 local_no / 同 seq / 同 session id 字符…
+S-080	D29	bucket = round(clamp(p)/10)*10；percent 缺省 bucket=null 且清 re…
+S-081	D29	noop：同任务最近一条 bucket 相同、trim summary 相同、无证据、blocker 假 → 不写不发…
+S-082	D29	blocker 非空：合法性先验，BLOCKED、清等待、写 blocker 行、事件 work.blocked
+S-083	D29	回执报真实 key/version/state；一次非 noop 上报 version 至少 +2
+S-084	D28	computed 进度优先级与 99 上限
+S-085	D29	project scope 无去重、health/risks 默认
+S-086		feedback = 固定形状 Record，排除出 brief
+S-090		项目序号单调连续，回滚不消耗
+S-091		每个写入发出 §6.3 表中的事件；REPLAY 不发
+S-092		全局序号独立；项目事件镜像以 dedupe_key 去重
+P-001	D31	主体不能由输入自报
+P-002		HTTP 永不产生 User
+P-003		User 只能由 ui-bridge 或托盘构造，U1～U9 全部满足
+P-004		能力检查在服务入口，并且先于一切副作用
+P-005	D31	USER_ONLY 的完整集合
+P-006	D22,D23	Agent 写入需要有效 session，且 session 属于目标项目
+P-007	D34	Agent 知识写入：作者取自 session，写入要求 ONLINE
+P-008		Phone 只有两项能力，执行时 actor 是 PHONE
+P-009		System 按 job 授权，不能做用户决定
+P-010		CLI 遇到 USER_ONLY 子命令本地拒绝
+P-011		离线 recover 独占准入，不能成为旁路
+P-012		e2e 测试入口只在测试构建里
+P-013		ui-bridge 的应答绑定 generation 与 epoch；结果未知时如实报告
+P-014		有副作用的「读」按写处理
+P-015		宿主本地能力不经过 service 和 HTTP，参数按白名单校验
+P-016		Agent 集成写入只能由 User 发起；System 只做修复
+P-017		dispatch.launch 只给 User 和 Phone
+L-001	D33	生命周期只有三个持久状态：ACTIVE、ARCHIVED、TRASHED
+L-002	D31,D33	生命周期迁移只能由 User 发起，并且先做 PRE_* 整库或范围备份
+L-003	D32	Agent 在垃圾箱项目里 begin，只登记恢复请求
+L-004	D32	同一项目同时只有一条 PENDING；重复撞上只累加次数，并且只记一条事件
+L-005	D32	恢复请求只能决定一次；批准与恢复在同一事务
+L-006	D32	User 直接从垃圾箱恢复，会结掉 PENDING 请求
+L-007	D32	垃圾箱不做物理删除
+L-008	D33	各状态可执行的操作
+L-009	D33	canonical 路径全局唯一
+L-010	D33	路径识别顺序与 marker
+L-011	D33	范围恢复不改变生命周期
+L-012		项目代码
+L-013		quick task 的创建与更新带版本
+L-014		begin 的 quick 分支要幂等
+L-015		quick 晋升是原子且幂等的
+L-016		保存视图的增删改都带版本，只限 User
+L-017		设置的 key 白名单与 schema
+L-101	D34	修订不可变
+L-102	D34	id、revision、revisionId、head、version、archived 是六个不同的字段
+L-103	D34	用户保存同时校验 expectedVersion 与 expectedRevisionId
+L-104	D34	用户归档同时校验两者；用户可以编辑已归档的条目
+L-105	D34	Agent 保存：作者已验证、靠 revisionId 做 CAS、需要 ONLINE、不能写已归档条目
+L-106	D34	幂等命名空间分开
+L-107	D34	重放返回原修订以及当时的 version 和 archived
+L-108		slug 唯一
+L-109	D34,D35	按 revisionId 读旧修订：version 报 head 的值，编辑必须靠 revisionId
+L-110	D35	正文分页锁定 revisionId 与 editVersion
+L-111	D35	搜索游标绑定目录序号
+L-112	D35	恢复或换库会让所有旧游标失效
+L-113		history 用 keyset 翻页
+L-114	D35	FTS 行为
+L-115		预算与空页
+L-116		Agent 读不到作者等管理字段
+L-117		范围恢复后的幂等语义
+04/C-L01		持久生命周期只保留 ACTIVE、ARCHIVED、TRASHED；去掉 CREATING、RESTORING、MIG…
+04/C-L02		转换映射： • CREATING：最终库健康就转成 ACTIVE，否则不导入，并在报告里写明舍弃理由。依据：2.0 启…
+04/C-L03		marker 和 git exclude 在事务提交之后写，写失败不回滚项目，回执里如实标出
+04/C-L04		不新增「清空垃圾箱」或物理删除
+04/C-L05		quick 晋升在一个事务里完成：建项目（必要时）、objective/milestone、工作项、PROMOTED …
+04/C-L06		TRASHED 项目可以单独备份；2.0 中会因 openProject 失败而报 503
+04/C-L07		范围恢复保持原生命周期
+04/C-L08		全局搜索和 FTS 结果按生命周期过滤，默认排除 TRASHED
+04/C-L09		路径唯一键 path_key 按 Windows 规则大小写折叠
+04/C-L10		设置改为白名单 key + 各自的 schema；带语义的 key 只能经专用能力写
+04/C-L11		slug 冲突改用专门的 409 错误码
+04/C-L12		新增 CURSOR_EXPIRED；知识游标的签名改为 HMAC，密钥用库内的随机值
+04/C-L13		知识读取的回执增加 isHead
+04/C-L14		恢复墓碑与 OPERATION_UNDONE_BY_RESTORE
+04/C-L15		生命周期迁移时写 archived_at，或者删掉这一列
+01/C-01		[采纳] 新建任务的版本统一为 1。同一创建事务里，父任务只在派生值确实变化时加 1
+01/C-02		[采纳，v6] 只有 computed_progress 或 progress_source 实际变化时才推版本。这样…
+01/C-03		[采纳] 进入 DONE / CANCELLED 时清掉 claimed_by_session_id 和 lease，…
+01/C-04		[采纳] reopen 清掉 reported_progress 并重算自身进度
+01/C-05		[采纳] 从 CANCELLED 重开时清掉 cancel_reason / duplicate_of / super…
+01/C-06		[采纳] release 同时解除 ACTIVE blockers、清掉 blocked_reason
+01/C-07		[改采，v6] 对 Agent 主体：complete / cancel / verify / block / wai…
+01/C-08		[采纳] Agent 可以 release 无人领取的任务，也可以 release 已过期的领取（需 takeover…
+01/C-09		[采纳，v6] 租约跟随领取者 lineage 续期：lineage 内任何 session 写这个任务、或发心跳，租…
+01/C-10		[采纳，v6] checklist_batch 只有版本问题时报 VERSION_CONFLICT（可重试）；有完成门…
+01/C-11		[采纳] 完成门 reason 增加 task_key / blocker_key；DEPENDENCY_NOT_RE…
+01/C-12		[采纳，v6] checklist_single 的参数改名为 expected_checklist_version；…
+01/C-13		[采纳] edit 事件带上全部变更字段的列表；title 取新值，另附 previousTitle
+01/C-14		[采纳] edit 后完整刷新搜索文档
+01/C-15		[采纳] 所有 key 入参统一 trim 后转大写（放宽方向，旧调用不受影响）
+01/C-16		[采纳] 删除 2.0 中没有写入方的结构：labels / work_item_labels、RELATES / D…
+01/C-17		[改采] 公开入口（MCP、Agent REST、界面创建表单）只允许建成 BACKLOG / READY。quick…
+01/C-18		[采纳] 不能挂到终态的 objective / milestone 下（PLANNING_TARGET_CLOSED…
+01/C-19		[采纳] 版本冲突的快照按 details.entity 选择分支
+01/C-20		[采纳] review_submit 完成 Review 任务后的观测，与 complete 一致
+01/C-21		[采纳] 事务末尾只统一重算一次
+01/C-22		[采纳] 全局只用一个 is_stale(lease, now)（时间比较）
+01/C-23		[采纳，v6] 进度上报不带 percent 时，保留原来的 reported_progress
+01/C-24		[采纳] complete 时同时写 progress_source=NONE
+01/C-25		[采纳] phase_inferred 随 C-16 删除
+01/C-26		[采纳，v6] 要求 reviewer 的 agent_id 与 review 请求创建者的 agent_id 不同（…
+01/C-27		[采纳] 终态任务的检查项只读，要改先 reopen（WORK_ITEM_TERMINAL，409）
+01/C-28		[采纳，v6] block 也建 blocker 行；完成门照旧只看 ACTIVE blocker。两种「阻塞」由此统一
+01/C-29		[采纳] DEPENDENCY_NOT_READY 写明「前置已取消，需要 edit 移除依赖或 reopen 前置」
+01/Q-01		[见 C-17]
+01/Q-02		[不做] 归档不成为正式功能，archived_at 删除
+01/Q-03		[见 C-07、C-09]
+01/Q-04		[采纳，v6] 安全合并的 merges 进 MCP ACK 顶层
+01/Q-05		[由存储层强制] 复合主键加复合外键（05 §2），服务层不靠自觉带 WHERE
+01/Q-06		[改采] 转换时按新不变量规范化（如 C-03 的残留领取），每一类规范化都在报告里计数。VERIFY 比较时只排除这…
+01/Q-07		[删除] outbox 只服务于跨库投影，单库下不需要
+02/C-01		[采纳] 幂等查找覆盖整个 lineage（前序与后继），修掉 X-04 的重复执行
+02/C-02		[采纳] 请求只在服务层 DTO 规范化一次，修掉 X-06。fp_v1 重放仍按 02 §3.4 重建旧规范化
+02/C-03		[采纳] REPLAY 时跳过所有提交后的副作用（git 刷新、指标、通知），重放严格做到零新增事件
+02/C-04		[采纳，v6] delta 续读保留 types
+02/C-05		[采纳，v6] ACK 的 session 和 details_cursor.session 用回执所属的 sessi…
+02/C-06		[采纳] end 释放 CLAIMED 时同时清 assignee
+02/C-07		[改采] resume 指名一个已关闭的 predecessor 时，只校验 agent_id 和 role 一致；c…
+02/C-08		[采纳] 心跳超时改为常驻周期扫描（每分钟一次，超时阈值沿用 2.0）；这个 session 的任何写入都刷新心跳
+02/C-09		[采纳，v6] 搜索的 truncated 只在预算截断时为 true；首页一条都放不下时返回起点游标
+02/C-10		[采纳] brief 里的 milestone 限定在活动 objective 之下
+02/C-11		[采纳] Agent REST 创建 objective / milestone 也要求 op_id
+02/C-12		[采纳] 记录版本哈希不再包含 relatedRecords
+02/C-13		[采纳] 纯空白的 blocker 视为没有 blocker
+02/C-14		[采纳] 非 resume 的 begin 指名 predecessor 时，校验它存在，且 agent 一致
+02/C-15		[采纳] session 列表游标的选择集包含 taskKey
+02/C-16		[采纳] brief 连身份都放不下时报 RESULT_TOO_LARGE；begin 例外，始终返回身份
+02/C-17		[采纳，v6] 原子 begin 回放到已关闭的 session 时，回执带 session_state，brief …
+02/C-18		[采纳] 请求里出现孤立代理字符，一律 INVALID_ARGUMENT
+02/C-19		[采纳] field 续读的偏移对齐到合法的 code point 边界（计数仍按 UTF-16）
+02/C-20		[采纳] 知识写入也支持 HEARTBEAT_TIMEOUT rebind
+02/Q-01		[改采] 不新增 CURSOR_EXPIRED。复用 INVALID_CURSOR，加 reason:"FORMAT_…
+02/Q-02		[定义] STORE_BUSY（503，可重试）：只在写队列准入超时时出现，details {committed:fa…
+02/Q-03		[不回退] 按范围恢复后，project_seq 不回退，客户端看到的是跳号
+02/Q-04		[改采] 不再单独镜像全局事件。每个事件在插入时同时分配 project_seq 和 global_seq（单写线程，…
+02/Q-05		[删除，v6] ACK 去掉 projection 字段
+02/Q-06		[见 C-17]
+02/Q-07		[永久保留] 幂等回执不设保留期
+02/Q-08		[按 06] 旧 REST brief 的去留以 06 的清单为准
+03/C-01		[采纳] 删除 userToken 和单令牌模式；HTTP 只有 Agent token
+03/C-02		[改采] 界面照旧发「REST 形状」的请求（path、method、body）。ui-bridge 在进程内按界面路…
+03/C-03		[采纳] 新增 PRINCIPAL_CAPABILITY_DENIED，只在内部使用
+03/C-04		[采纳，v6] atm_end / close 只能结束自己 lineage 内的 session。要结束别人的 se…
+03/C-05		[采纳] 手机发起的写入，actor 记为 PHONE:<device>，事件里带上 device id
+03/C-06		[采纳] 带语义的设置只能经专用能力写；通用的 settings.write 只接受白名单内、带 schema 的 k…
+03/C-07		[采纳，v6] 导出改为 POST，只有 User 能用；不再借用备份目录。CLI 的 export 改为本地拒绝，并…
+03/C-08		[采纳] metrics.read 对 Agent 只读；metrics.refresh 只给 User 和 Syst…
+03/C-09		[采纳] 只供界面用的读接口不在 Agent HTTP 上开放
+03/C-10		[采纳] User 不能发起或提交 review
+03/C-11		[采纳] begin 走 quick 分支时，按 (agentId, cwd, title, operationId?…
+03/C-12		[采纳] quick 的 actor 先规范化，再拒绝保留名
+03/C-13		[采纳] quick.update 加 schema 校验
+03/C-14		[改采] 06 已决定删除 showItemInFolder（界面没有调用点），这一条随之作废
+10/R1		领取归属覆盖全部写入通道（P1-01）
+10/R2		领取属于 lineage，续租与转移（P1-02）
+10/R3		lineage 定义与幂等查找（P1-03、P2-03）
+10/R4		范围恢复不回滚身份图；请求带 scope generation（P1-04）
+10/R5		公开编号不复用（P1-05）
+10/R6		事件模型（P1-06；推翻 00 的 02 Q-04）
+10/R7		回执的两种合法形状（P1-07）
+10/R8		ui-bridge 白名单与导出（P2-01）
+10/R9		规范化规则表（P2-02）
+10/R10		小修
+10/R3′		幂等查找算法（取代 R3 中的「查找算法」部分）
+10/R4′		session 的身份字段与工作状态字段（补充 R4）
+10/R7‴		回执分类与校验（取代 R7、R7′、R7″；回应 W0-R3-P1-01、W0-R4-P1-01、W0-R5-P1-0…
+10/R9′		规范化规则表
+10/R11.P1-1		自动补 start（BLOCKED / WAITING_\* 除外）；本 lineage 持有领取时 expected…
+10/R11.P1-2		写操作可以省略 session、project、op_id。省略 op_id 不靠服务端猜：由桥为每次调用生成操作身份…
+10/R11.P1-3		begin 默认 resume:"auto"；按客户端进程是否存活判超时，兜底阈值 120 分钟；CLAIM_NOT_…
+10/R11.P1-4		统一参数名并接受别名，枚举不区分大小写，未知键给 did_you_mean；单条 patch 可以不包 items；c…
+10/R11.P1-5		建任务默认 READY；mode:"auto" 不再静默建 quick
+10/R11.P2-1～P2-7		summary 超长时自动截断，全文移到 detail；scope 和 outcome 能推出来就推；create 的…
+10/R11.P3		delta 并入 brief(since_seq)，feedback 并入 record（旧工具名保留为别名）；own…
+10/R11.A1		默认 session 与「重复 begin 等于接回」只在单对话连接上生效
+10/R11.A2		同一连接里的子代理
+10/R11.A3		省略 op_id：桥签发一份不可变的调用上下文，重试原样复用
+10/R11.A4		客户端身份怎么取
+10/R11.A5		服务端没有「应答超时」错误

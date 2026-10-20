@@ -1,0 +1,754 @@
+# atm-service 实现说明
+
+只记规格（`output/atm3-spec/`）没有写死、由实现定下的取舍，以及与规格的对应关系。
+
+## 写入流水线（`src/write.rs`，W2b）
+
+落点固定的 operation 都走 `Service::write`，顺序定死：
+
+1. `capability::require`（03 P-004）。被拒绝的调用不读库、不查回执、不入队：存储已关闭时，越权调用照样得到能力错误，读计数不变（用例 `a_refused_capability_writes_nothing_and_never_reaches_the_store`）。User 提交过的 op_id，Agent 拿来也换不到重放。
+2. 不碰存储的入参判定：op_id 非空；只有 Agent 能带 session；需要 session 的能力缺 session 报 `SESSION_REQUIRED`，消息里直接告诉 Agent 先调 `atm_begin`。
+3. 入队世代（R4）：调用方给了 `expected_generation` 就用它，否则经读连接取当前值。
+4. 写事务内：命名空间与 lineage → R3′ 查找裁决 → 只有新写入过世代屏障 → 业务动作 → 写 canon-v2 回执。任何一步 `Err` 都整体回滚。
+
+错误映射：`WriteError::Busy` → `STORE_BUSY`，`Closed` → `SERVICE_UNAVAILABLE`，超预算 / panic / SQLite → `INTERNAL_ERROR`（都已回滚）。
+
+### 命名空间
+
+| 主体              | 命名空间                                                  |
+| ----------------- | --------------------------------------------------------- |
+| Agent，带 session | `(SESSION, session_id)`，lineage 其他成员作为候选命名空间 |
+| Agent，无 session | `(ACTOR, "AGENT:" + (actor 或 "AGENT_ANON"))`             |
+| User              | `(ACTOR, "USER")`                                         |
+| System            | `(ACTOR, "SYSTEM")`                                       |
+| Phone             | `(ACTOR, "PHONE:" + device)`                              |
+
+无 session 的 Agent 加 `AGENT:` 前缀是本实现定的：`actor` 是客户端自报的归属标签，不加前缀的话 Agent 报 `actor: "USER"` 就能落进 User 的命名空间、重放 User 的回执。R7‴ 转换来的 2.x 行只有 SESSION、`USER`、2.x 常量三种形状，没有无 session 的 Agent 行，所以加前缀不影响兼容。
+
+### 旧格式键的探测
+
+- 项目范围：转换器已经按 R7‴ 给可命中的行补了新键，不需要旧键探测。BEGIN 行只走调用索引。
+- 知识库，Agent：lineage 每个 session 各一个 `agent:sha256([project, session, op_id])`，自己的那个算精确键。
+- 知识库，User：op_id 原值。其他主体不探测原值键。
+
+### 指纹重建的作者
+
+`FpInput(tx, family, author)` 由每个 operation 提供，返回业务字段（规范化后，不含定位字段与控制字段）。事务参数只用于只读的规范化：证据里的 atm_record / atm_task 引用改写成规范 key（W-012），失败时整组退回原样，让指纹对不上、由业务动作报准确的错误（02 §3.3，与 2.x 的 session 闸门一致）。`None` 表示这个族表达不了这次请求（A3 的可比性检查），与该族的候选不匹配。canon-v2 必须总能表达。
+
+| 候选的族     | 重建用的作者                                          |
+| ------------ | ----------------------------------------------------- |
+| canon-v2     | 候选的 `author_agent / author_session`                |
+| kernel-v1    | 候选的 `actor_session_id`（2.x 0007 拆出的列）        |
+| knowledge-v1 | 命中这条候选的那个 lineage 成员（旧键本身含 session） |
+
+### 兼容请求与重放前校验
+
+02 §3.3 只有一处兼容请求：`checklist.update` 带 taskKey 时，不带 taskKey 的 2.x 旧形状也算同一请求。`WriteRequest.compat_v1` 给出 kernel-v1 下的第二个形状，候选命中任一即可（`Rebuilt::AnyOf`）；`replay_guard` 在重放之前再跑一次 W-053 第 2、3 步，检查项不属于请求给的任务时报 `CHECKLIST_TASK_MISMATCH`，不重放。
+
+### 裁决的一个边角
+
+R3′ 说「请求方自己的新键或 legacy 键精确命中，只看这一条」。如果自己的新键和自己的旧键恰好命中两条不同的行，实现把这两条当作多候选，按状态表裁决（不会挑其中一条忽略另一条）。
+
+### 世代
+
+世代读取复用 `atm_store::restore::current_generation`，与恢复写入的是同一个定义。范围在入队时不存在（`None`）就不设屏障，由业务动作报不存在；入队时存在、执行时世代不同，报 `SCOPE_RESTORED`，details 带 `expected_generation` 与 `current_generation`。
+
+## 调用索引（`src/receipts.rs`）
+
+`find_call` / `decide_call` 实现 A3 的 L/N 裁决表，`insert` 支持 CALL 行（四列原值，`ns_id = call_principal_id`）。begin、`project.create`、无目标 `quick.promote` 的目标判定（EXISTING / CREATE / NONE、`TARGET_CHANGED`）随这三个 operation 在后续阶段实现，届时直接调用这两个函数。
+
+## 验收与变异
+
+- `tests/write.rs`：零写入一律按整库逐表逐行快照比对。
+- 变异验红：`output/w2-evidence/mutations/mut-w2b.py`，证据 `output/w2-evidence/w2b-mutation-evidence.json`。
+
+## 工作项（`src/work/`，W2c）
+
+入口：`Service::create_work_items`、`Service::patch_work_items`，都经上面的写入流水线。operation 名沿用 2.x（`work.create.batch`、`work.patch.batch`），转换来的旧回执才能按 kernel-v1 比对。
+
+### 规格没写死、由实现定下的
+
+| 位置                          | 做法                                                                                                                                                                                | 理由                                                                                                                                                                                   |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 单条 patch 的检查顺序         | key → **领取归属（R1）** → 版本 → 自动补 start → 状态机 → 前置条件                                                                                                                  | W-021 把版本放第二步；R1 只要求「写入之前」。非领取者无论带不带版本都过不去，先报 `CLAIM_NOT_OWNED`，省掉一次「补版本 → 再被拒」的往返（R11 原则）。用例 `w021_check_order` 固定这一点 |
+| 批次回执的 `items`            | 每条都是**提交时**该任务的最终视图                                                                                                                                                  | 末尾统一重算一次进度（C-21），逐条快照会给出过期的进度值；Agent 下一次写用的就是这个版本                                                                                               |
+| 末尾重算的版本                | 派生值确实变化（C-02）、且本事务没直接写过这个任务，才加一                                                                                                                          | 被直接写过的任务版本已随那次写入变化，派生值是同一次写的一部分；新任务固定 v1（C-01）                                                                                                  |
+| 自动补 start 的前置条件不满足 | 报 start 自己的错（`DEPENDENCY_NOT_READY` / `TASK_ALREADY_CLAIMED`）                                                                                                                | 比笼统的完成门或 `INVALID_TRANSITION` 更能直接行动                                                                                                                                     |
+| 「下一步」                    | 错误的 `details.next` 写要做的操作和要带的值（如 `{operation:"start", task_key}`、`{expected_version: 当前}`、`{takeover_stale:true}`、`{operation:"task_list", ready_only:true}`） | 服务层不知道工具名与参数名；W4 把它翻译成 `fix.call`                                                                                                                                   |
+| block 的阻塞记录（C-28）      | 每次 block 新建一条 ACTIVE 记录；start、release（C-06）、reopen、从 BLOCKED 进入等待时全部解除                                                                                      | 与进度上报的 blocker 同形，完成门只看 ACTIVE 记录                                                                                                                                      |
+| edit 事件（C-13）             | `fields` 列出给了的字段；`title` 是新标题，另带 `previousTitle`；事件类型优先级照 2.x（moved > relations_changed > updated）                                                        |                                                                                                                                                                                        |
+| edit 的搜索刷新（C-14）       | 自己、旧 / 新来源；改标题时连同所有 DISCOVERED_FROM 邻居                                                                                                                            | 邻居的正文里带着这个标题                                                                                                                                                               |
+| 规划根（W-071）               | 只给 Agent；User、Phone、System 缺 objective 报 `OBJECTIVE_REQUIRED`。补建的 objective / milestone 版本从 0 起                                                                      | C-01 只说任务                                                                                                                                                                          |
+| id 生成                       | 事务内单调的 ULID                                                                                                                                                                   | 同一毫秒内 ULID 随机部分无序；检查项按 (created_at, id) 排序时要等于写入顺序                                                                                                           |
+| 创建入参                      | `client_ref` 省略取序号；`status` 省略取 READY；`type` / `priority` 不区分大小写                                                                                                    | R11 P1-4、P1-5                                                                                                                                                                         |
+| kernel-v1 重建                | 照 2.x zod 解析后的 camelCase 形状；省略 `expected_version`、`client_ref` 或 `status` 的请求在 2.x 里没有对应形状，与旧候选不是同一请求                                             | A3 可比性检查；fail closed                                                                                                                                                             |
+
+`complete` 一步带 `note` / `evidence` / `checklist`（R11 P1-1 第 4 条）见下面的 W2d。
+
+### D01–D17 追溯（服务层部分；纯规则部分见 `domain/DOMAIN-NOTES.md`）
+
+| 编号                                                   | 用例（`tests/work.rs`）                                                                                                                                                                                                                                                         |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D01 状态机入口、同态、ready 无副作用                   | `w029_ready_has_no_side_effects`、`w020_verify_is_refused_on_closed_tasks`、`w021_check_order`                                                                                                                                                                                  |
+| D02 等待保存 phase、reopen 目标                        | `w031_waiting_keeps_the_phase`、`w034_c04_c05_reopen`                                                                                                                                                                                                                           |
+| D03 依赖必须 DONE                                      | `w024_c11_c29_dependencies_must_be_done`、`w075_discovered_from_is_searchable_but_not_blocking`                                                                                                                                                                                 |
+| D04 占用、租约、takeover、successor reclaim、release   | `w025_r2_claims_belong_to_the_lineage`、`w026_successor_reclaim`、`w028_c06_c08_release`、`c09_r2_writes_renew_the_lease`                                                                                                                                                       |
+| D05、D06 完成门                                        | `w032_c03_c24_complete`、`w030_c28_block`、`r11_p1_1_complete_auto_starts`                                                                                                                                                                                                      |
+| D07 verify_and_complete                                | `tests/composite.rs` 的 `w052_*`                                                                                                                                                                                                                                                |
+| D08 start / reopen 解除阻塞、completed_at、cancel 引用 | `w027_start_resolves_blockers_and_keeps_started_at`、`w034_c04_c05_reopen`、`w033_cancel`                                                                                                                                                                                       |
+| D09 批量创建                                           | `c01_p1_5_create_defaults_to_ready_at_version_one`、`c17_public_create_refuses_other_states`、`w071_planning_root_is_provisioned_for_agents_only`、`w072_c18_objective_and_milestone_are_checked`、`w073_w076_batch_references_and_cycles`、`c01_c02_create_versions`、`w075_*` |
+| D10 版本与安全合并                                     | `w041_batch_relay_and_rollback`、`w100_concurrent_writers_one_wins`、`w101_safe_merge`、`r11_version_is_optional_on_the_owner_path`                                                                                                                                             |
+| D11、D12、D13～D16                                     | `tests/composite.rs`（见下）                                                                                                                                                                                                                                                    |
+| D17 key 与证据                                         | `w037_relations`（key 大小写）、`agents_need_a_session_and_users_cannot_impersonate_one`（别的项目的 key）                                                                                                                                                                      |
+| 00 C-01、C-02、C-21                                    | `c01_c02_create_versions`、`c02_parent_version_moves_only_when_progress_moves`、`w034_c04_c05_reopen`                                                                                                                                                                           |
+| 00 C-03、C-24                                          | `w032_c03_c24_complete`、`w033_cancel`                                                                                                                                                                                                                                          |
+| 00 C-04、C-05                                          | `w034_c04_c05_reopen`                                                                                                                                                                                                                                                           |
+| 00 C-06、C-08                                          | `w028_c06_c08_release`                                                                                                                                                                                                                                                          |
+| 00 C-07 / 10 R1                                        | `r1_others_cannot_modify_a_claimed_task`、`w021_check_order`                                                                                                                                                                                                                    |
+| 00 C-09 / 10 R2                                        | `c09_r2_writes_renew_the_lease`、`w025_r2_claims_belong_to_the_lineage`                                                                                                                                                                                                         |
+| 00 C-11、C-29                                          | `w024_c11_c29_dependencies_must_be_done`                                                                                                                                                                                                                                        |
+| 00 C-13、C-14                                          | `w035_c13_c14_edit`、`w075_*`                                                                                                                                                                                                                                                   |
+| 00 C-15                                                | `w037_relations`、`w033_cancel`                                                                                                                                                                                                                                                 |
+| 00 C-17、C-18                                          | `c17_public_create_refuses_other_states`、`w072_c18_objective_and_milestone_are_checked`                                                                                                                                                                                        |
+| 00 C-28                                                | `w030_c28_block`                                                                                                                                                                                                                                                                |
+| 10 R11 P1-1                                            | `r11_p1_1_complete_auto_starts`、`r11_version_is_optional_on_the_owner_path`、`w041_batch_relay_and_rollback`                                                                                                                                                                   |
+| 10 R11 P1-5                                            | `c01_p1_5_create_defaults_to_ready_at_version_one`                                                                                                                                                                                                                              |
+| W-038 会话效果                                         | `w023_claim_holds_without_starting`、`w038_session_effects`、`w028_*`                                                                                                                                                                                                           |
+| W-063 重放                                             | `replay_adds_nothing`、`a_converted_2x_patch_receipt_replays`                                                                                                                                                                                                                   |
+
+变异验红：`output/w2-evidence/mutations/mut-w2c.py`，30 条全部 RED，证据 `output/w2-evidence/w2c-mutation-evidence.json`。
+
+## 复合操作（`src/work/{patch,checklist,review}.rs`，W2d）
+
+入口：`Service::verify_and_complete`、`update_checklist`、`update_checklist_batch`、`request_review`、`submit_review`。
+operation 名 `work.verify-and-complete`、`checklist.update`、`checklist.update.batch`、`review.request.create`、`review.submit`。
+每个复合操作是一个写事务，任何失败都整体回滚（W-062），计数器也不前进。复合操作各有入口，结构上不能和别的操作同批；
+W-050 的「混批 → INVALID_ARGUMENT」与 `takeoverStale` 只能是 false 都在 W4 的入参层做。
+
+### 检查顺序
+
+| 操作                | 顺序                                                                                                                                                                                                                              |
+| ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| verify_and_complete | key → R1 → 任务版本（owner 路径可省）→ 自动补 start → verify（不在 VERIFYING 时）→ complete 的状态机 → 在 VERIFYING 上求完成门 → DONE                                                                                             |
+| checklist_single    | 证据规范化 → 检查项存在 → 属于 task_key → R1 → C-27 终态只读 → **检查项**版本（owner 路径可省）→ 必证                                                                                                                             |
+| checklist_batch     | 入参（1–100、id 不重复）→ 证据规范化 → 任务 → R1 → C-27 → 汇总（任务版本 + 逐条 NOT_FOUND / TASK_MISMATCH / EVIDENCE_REQUIRED）→ 一次拒绝                                                                                         |
+| review_request      | session → Review 任务、类型 → R1 → Review 任务版本 → 未关闭 → 检查项与它的版本 → 绑定（父 = 检查项所属）→ 检查项未关闭 → 没有已有请求                                                                                             |
+| review_submit       | 证据规范化 → session → ONLINE 的同 agent REVIEWER → 请求、未提交 → 绑定的 Review 任务、task_key 一致 → C-26 不自审 → Review 任务版本 → 领取身份（lineage）→ 哈希 → 绑定仍成立 → 父检查项版本 = 绑定版本 → complete 状态机与完成门 |
+
+### 规格没写死、由实现定下的
+
+| 位置                                  | 做法                                                                                                                                                                                                              | 理由                                                                                                            |
+| ------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| 检查项更新对所属任务的版本            | 任务 version 恒 +1（W-056），祖先按 C-02 只在派生进度变化时 +1                                                                                                                                                    | 检查项是任务自己的数据，属于直接写入；C-02 针对的是子孙写入让父任务版本过期                                     |
+| W-060 父任务的版本                    | APPROVED：父检查项写入让父任务 +1（同上），Review 任务完成引起的重算不再加；CHANGES_REQUESTED：只在派生进度变化时 +1                                                                                              | 2.x 的「APPROVED +2 / CHANGES_REQUESTED +1」来自逐次重算；C-21 只重算一次、C-02 只在变化时推                    |
+| CHANGES_REQUESTED 的 last_evidence_at | 照 W-060 第 5 步推进父任务的 last_evidence_at，不推版本                                                                                                                                                           | 不算对父任务内容的修改                                                                                          |
+| Review 任务完成后的领取               | 清掉（C-03）                                                                                                                                                                                                      | W-060 写的「不清领取」是 2.x 现状，C-03 统一了终态                                                              |
+| review_submit 的身份                  | 领取者在提交者 session 的 lineage 里、assignee 是提交者的 agent；不看租约                                                                                                                                         | 10 R2 改写的 D14。R1 对 Review 任务的 may_modify 被这条蕴含                                                     |
+| C-26 的位置                           | 请求解析之后、版本之前                                                                                                                                                                                            | 不可重试的身份问题先报，免得 Agent 先去补版本                                                                   |
+| review 的版本参数                     | Review 任务版本省略时报 `EXPECTED_VERSION_REQUIRED`（带当前版本），不是 INVALID_ARGUMENT                                                                                                                          | 绑定版本是语义，不能省（R11）；带上当前值省一次读                                                               |
+| checklist_batch 只有版本问题          | `VERSION_CONFLICT`（可重试），details 是任务的 W-104 快照，另带 `reasons`；传的是检查项版本时加 `hint: CHECKLIST_VERSION_PASSED`                                                                                  | 00 C-10                                                                                                         |
+| C-12 旧参数名                         | `ChecklistSingle.legacy_version_name`：回执带 `deprecations[{field, use, message}]`；不进指纹                                                                                                                     | 同一请求换个参数名仍是同一请求                                                                                  |
+| complete 一步写全                     | 顺序：自动 start → 检查项（规则同 batch，没有版本问题；`checklist.batch_updated` 带 `operation:"complete"`）→ 门 → 进度（note，或只给 evidence 时摘要「完成」，不单独推版本）→ DONE。版本：检查项 +1、complete +1 | 等同于同一事务里先 checklist_batch 再 complete；note 是这次完成的说明，不是一次独立的进度上报                   |
+| complete 的检查项引用                 | 序号从 1 开始、按创建顺序；字符串先当 id，再按标题全文（trim）匹配；标题重名报 `VALIDATION_ERROR ambiguous_title` 并列出候选 id；本任务之外的 id 报 TASK_MISMATCH                                                 | R11 P1-1 第 4 条                                                                                                |
+| 错误 details 的字段顺序               | 工作区的 serde_json 开 `preserve_order`，details 按插入顺序输出                                                                                                                                                   | W-059 第 7 步要求 CANDIDATE_HASH_MISMATCH 的字段顺序（MCP 截断时先留可操作的差异）；也更接近 2.x 的 JS 对象顺序 |
+
+### 追溯（`tests/composite.rs`）
+
+| 规则                            | 用例                                                                                                                                                                                                                  |
+| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| W-052（D07）、W-062             | `w052_from_in_progress_two_transitions`、`w052_from_verifying_one_transition`、`w052_w062_gate_failure_commits_nothing`、`w052_blocked_is_an_invalid_verify`、`r11_verify_and_complete_auto_starts_without_a_version` |
+| W-051、W-053、W-056（D11、D12） | `w053_w056_single_bumps_the_task_version`、`w053_task_version_passed_hint`、`w053_ownership_is_checked_before_the_version`                                                                                            |
+| W-054、00 C-10                  | `w054_batch_bumps_the_task_once`、`w054_c10_all_reasons_at_once`、`w054_c10_version_only_is_a_version_conflict`、`w054_duplicate_ids_are_refused`                                                                     |
+| W-055                           | `w055_evidence_retention_and_requirement`                                                                                                                                                                             |
+| W-012（D17）                    | `w012_evidence_references_are_normalized`                                                                                                                                                                             |
+| 00 C-12、C-27                   | `c12_the_old_parameter_name_is_accepted_with_a_hint`、`c27_terminal_task_checklist_is_read_only`                                                                                                                      |
+| 10 R1、R11 P1-1 第 2 条         | `r1_verify_and_complete_on_another_claim_is_refused`、`r1_p1_1_checklist_ownership_and_optional_version`、`w060_approved_submission`（reviewer 改父检查项，阳性对照）                                                 |
+| R11 P1-1 第 4 条                | `p1_1_4_complete_writes_checklist_note_and_evidence`、`p1_1_4_complete_checklist_failures_roll_back`                                                                                                                  |
+| W-057（D13）                    | `w057_request_binds_without_touching_anything`、`w057_request_refusals`                                                                                                                                               |
+| W-058、10 R2、00 C-26（D14）    | `w058_c26_submitter_identity`、`r2_a_reviewer_successor_may_submit`                                                                                                                                                   |
+| W-059（D15、D16）               | `w059_candidate_hash_mismatch`、`w059_d16_the_checklist_moved_after_the_request`、`w059_w062_the_review_task_must_pass_its_gate`                                                                                      |
+| W-060、00 C-21                  | `w060_approved_submission`、`w060_changes_requested_leaves_the_checklist`                                                                                                                                             |
+| W-063、02 §3.3 兼容请求         | `w063_verify_and_complete_replays`、`w063_review_submit_replays`、`w063_checklist_compat_replay_checks_ownership_first`                                                                                               |
+
+W-061（不提供独立性保证）没有可测的行为：实现只校验 role / agent / session / 领取 / 哈希 / 版本，代码与文档都不声称独立。
+
+变异验红：`output/w2-evidence/mutations/mut-w2d.py`，43 条全部 RED，证据 `output/w2-evidence/w2d-mutation-evidence.json`。
+任务书点名的三条（batch 比 item.version、跳过候选哈希、门失败后仍提交 VERIFYING）都在其中。
+（原有 44 条；「submit 不查 ONLINE」在 W2e 之后由管线的 SESSION_CLOSED 先拦下，那段代码不再可达，删去。）
+
+## Session 生命周期与进度、记录（`src/{session,rebind,memory}.rs`，W2e）
+
+入口：`Service::begin`、`end_session`、`force_close_session`（User）、`sweep_sessions`（System `StartupRecover`）、
+`refresh_git_context`（User）、`add_progress`、`create_record`、`feedback`。operation 名 `session.recover-or-begin`
+（调用索引，A3）、`session.end`、`session.force-close`、`work.progress`、`project-update.publish`、`record.create`
+（反馈同名）。
+
+### 写入流水线的新步骤
+
+R3′ 判定为新写入之后（S-036：已关闭 session 上成功过的请求照样 REPLAY），`rebind::effective_session` 看 session：
+ONLINE 用它本身；`HEARTBEAT_TIMEOUT` / `CLIENT_EXITED` 关闭的接到唯一一条身份（agent、thread、parent、role）一致的
+ONLINE successor，没有就在**同一个写事务**里新建（发 `agent.joined`，`rebind:true`；写入失败一起回滚）；其他关闭原因
+`SESSION_CLOSED`，`details.next` 是带 predecessor 的 begin。`atm_end` 用 `Rebind::ExistingOnly`：只认已有 successor。
+action 成功后 `rebind::heartbeat` 刷新心跳（不推 session 版本），session 仍 ONLINE 时给它持有的未终态领取续租。
+
+### 规格没写死、由实现定下的
+
+| 位置                          | 做法                                                                                                                                                                                                                                       | 理由                                             |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------ |
+| begin 的客户端身份            | 取 `Principal::client_group()`（连接所属的进程组），不信请求里的字段                                                                                                                                                                       | A1 的「同一连接组」只能由传输层认定；请求可伪造  |
+| begin 不带 resume             | 默认 `auto`（R11 P1-3）：只接续 `CLIENT_EXITED` / `HEARTBEAT_TIMEOUT` 关闭、或有给本 agent 待确认交接、且还没被接续过的 session；永远不接回 ONLINE；多个候选时新建并在 `resumeCandidates` 列出带 predecessor 的 begin                      | 不阻塞开工；Agent 想接哪个自己指名               |
+| 显式 `session`（A1 优先级 1） | 同项目、同 agent、同 role、未关闭 → `CURRENT`；已关闭报 `SESSION_CLOSED`，next 是带 predecessor 的 begin；与 `predecessor_session_id` 同时给出报 `INVALID_ARGUMENT`。它是业务字段，进 canon-v2 指纹                                        | 接回与接续是两件事，混在一起就猜不出意图         |
+| begin 的 `resume` 省略        | 按 `auto` 执行；与 2.x 旧回执比较时按 2.x 的缺省值 false 重建；显式 `auto`、显式 `session` 在 kernel-v1 里无法表达，与旧行不可比                                                                                                           | R11 A3「缺省值按各候选自己的版本重建」           |
+| A1 接回                       | 只对白名单客户端（`single_conversation`）、PRIMARY、resume 不是 false、没指名 predecessor；同一连接组、同 agent、同 cwd 的唯一 ONLINE PRIMARY → `CURRENT`                                                                                  | 同一进程里可能跑多个对话的客户端不能共用 session |
+| 指名 predecessor              | ONLINE：四元组全等才接回（`RESUMED`）；已关闭：只校验 agent 与 role（C-07），有待确认交接或退役原因才接续，否则 `SESSION_NOT_RETIRED`；resume:false：同 agent、同 role（C-14 / R3），不确认交接                                            | 02 §2.3 的判定表                                 |
+| begin 的幂等                  | 调用索引 `(AGENT, agent_id, session.recover-or-begin, op_id)`，不按项目划分；2.x 旧键 `session-begin:<op>` 作为 legacy 探测；重放时补 `sessionState`（C-17）；auto resume 在 kernel-v1 里没有对应形状                                      | A3；git 探测结果不进指纹（每次都可能变）         |
+| TRASHED 项目的 begin          | 登记或累加恢复请求并**提交**，再报 `PROJECT_DB_UNAVAILABLE`（`retryable:false`、`recovery`、`quick:do_not_bypass`）                                                                                                                        | 请求要留下来给用户看到；重试只是累加计数         |
+| 没认出项目                    | 暂时一律 `PROJECT_REQUIRED`（带 `next.allow_project_create`）；A3 的 ③④（quick、建项目）随 W2g 接入                                                                                                                                        | 项目生命周期在 W2g                               |
+| schema                        | `agent_sessions.client_identity` 列、`close_reason` 加 `CLIENT_EXITED`、索引 `ix_agent_sessions_client` 直接改在 `0001_schema_v1.sql` 里                                                                                                   | 3.0 schema 尚未发布，没有需要迁移的库            |
+| 超时扫描                      | 只扫 ACTIVE 项目；客户端已退出 → `CLIENT_EXITED`；客户端仍存活按 120 分钟兜底，查不到身份按设置的超时（默认 5，夹到 [1, 1440]）；读快照之后心跳前进过的跳过；不释放领取，记 `last_session_closed_at`；`agent.recovered_stale` 由 SYSTEM 发 | 00 02 C-08、R11 P1-3、S-012                      |
+| end 的交接与释放              | paused / retired 给未终态领取写交接，与 `release_claims` 互相独立；释放只把 CLAIMED 变回 READY 并清 assignee（C-06），其余状态保留、只清领取；每个被释放的任务 version +1                                                                  | S-013、S-014                                     |
+| 强制关闭                      | 已关闭的也照样执行，覆盖 close_reason 为 `FORCE_CLOSE`（之后不能 rebind）                                                                                                                                                                  | 用户的意图是「这个 session 不要再用了」          |
+| 任务进度的版本                | 任务行直接写入 +1，事务末尾的重算按 C-02 / C-21 不再加                                                                                                                                                                                     | 02 S-083 的「至少 +2」是逐次重算的 2.x 现状      |
+| 进度的 noop                   | 同任务最近一条：同桶、同摘要哈希、没有证据、没有（trim 后非空的）blocker → 不写行、不推版本，回执带 `noop:true` 和那条的 id                                                                                                                | S-081；纯空白 blocker 按 C-13 视为没有           |
+| 进度的领取                    | 不论带不带 blocker、percent，都按 R1 校验；写入后按 R2 把领取转到当前 session                                                                                                                                                              | 10 R1、R2                                        |
+| 项目进度                      | completed 里的任务 key 必须存在并改写成规范 key；health 默认 UNKNOWN，带 blocker 时 AT_RISK；from = 上次发布的 to                                                                                                                          | 02 §5.6、C-02                                    |
+| 记录 summary 超长             | 超过 300 个 code point：截成 299 个加「…」，全文放到 detail 开头（原 detail 接在空行之后），回执带 `summaryTruncated:true`                                                                                                                 | R11 P2-1：不让 Agent 因为摘要写长了被拒          |
+| 反馈                          | 固定形状的 RISK 记录：scope `ATM_FEEDBACK`、topic `atm-agent-feedback`、detail 开头注明只存本机                                                                                                                                            | 02 §1.8                                          |
+
+### 追溯（`tests/session.rs`、`tests/memory.rs`）
+
+| 规则                                  | 用例                                                                                                                                              |
+| ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| S-001、S-004、00 02 C-17              | `s001_s004_atomic_begin`                                                                                                                          |
+| R11 A3                                | `a3_begin_op_id_is_shared_across_projects`、`a3_omitted_resume_matches_a_2x_begin_receipt`                                                        |
+| S-003、04 L-008                       | `s003_l008_trashed_and_archived_projects`                                                                                                         |
+| 04 L-010                              | `l010_project_is_found_by_path_marker_or_common_dir`                                                                                              |
+| S-006、S-011                          | `s006_s011_resume_reattaches_the_open_session`                                                                                                    |
+| S-007、S-013、S-016、R4′              | `s007_s013_s016_resume_through_a_pending_handoff`、`s007_two_handoff_sources_are_ambiguous`                                                       |
+| S-008、S-009、00 02 C-07、C-14、10 R3 | `s008_s009_c07_named_predecessor`                                                                                                                 |
+| S-010                                 | `s010_plain_begin_acknowledges_nothing`                                                                                                           |
+| R11 P1-3                              | `p1_3_auto_resume`、`s012_c08_p1_3_sweep`                                                                                                         |
+| R11 A1                                | `a1_single_conversation_reattach`、`a1_explicit_session_reattach`                                                                                 |
+| S-012、00 02 C-08                     | `s012_c08_p1_3_sweep`                                                                                                                             |
+| S-014、00 02 C-06                     | `s014_c06_end_releases_claims`                                                                                                                    |
+| S-017                                 | `s017_force_close`                                                                                                                                |
+| S-018、S-036                          | `s018_s036_closed_sessions_replay_but_do_not_write`                                                                                               |
+| S-019、S-020                          | `s019_s020_rebind_on_heartbeat_timeout`、`s019_rebind_refusals`                                                                                   |
+| S-021                                 | `s021_end_does_not_create_a_successor`                                                                                                            |
+| 03 P-006                              | `p006_the_session_must_belong_to_the_project`                                                                                                     |
+| 00 02 C-08、10 R2 心跳与续租          | `c08_r2_writes_refresh_heartbeat_and_renew_leases`                                                                                                |
+| S-022                                 | `s022_git_context`                                                                                                                                |
+| S-080、S-083、00 02 C-23              | `s080_bucket`、`s080_s083_c23_task_progress`                                                                                                      |
+| S-081、00 02 C-13                     | `s081_c13_duplicate_progress_is_a_noop`                                                                                                           |
+| S-082                                 | `s082_blocker_blocks_the_task`                                                                                                                    |
+| 10 R1、R2                             | `r1_r2_progress_respects_the_claim`                                                                                                               |
+| 02 §5.1 参数校验                      | `progress_arguments_are_validated_with_zero_writes`                                                                                               |
+| S-085                                 | `s085_project_progress`、`s085_project_updates_are_never_deduplicated`                                                                            |
+| S-031、S-032、02 §3.3                 | `s031_s032_progress_idempotency_and_v1_receipts`、`s031_record_idempotency`                                                                       |
+| 02 §1.6 记录                          | `records_kinds_keys_and_defaults`、`records_supersede_marks_the_old_one`、`records_list_related_records`、`users_write_records_without_a_session` |
+| R11 P2-1                              | `p2_1_long_summaries_are_truncated`                                                                                                               |
+| 02 §1.8 反馈                          | `feedback_is_a_fixed_shape_local_risk_record`                                                                                                     |
+
+变异验红：`output/w2-evidence/mutations/mut-w2e.py`，100 条全部 RED，证据 `output/w2-evidence/w2e-mutation-evidence.json`。
+
+## 读模型（`src/read/`，W2f）
+
+入口：`Service::brief`、`begin_brief`、`delta`、`task_list`、`task_get`、`record_list`、`session_list`、`search`、
+`mutation_ack`。全部在一个只读事务里完成，SQL 一律带 `project_id`（S-070）。输出形状照 surface v5 的 MCP 回执：
+brief 是 camelCase 载荷，列表、搜索、精确读取是 snake_case；W4 的 MCP 适配层只做参数映射。预算是
+`JSON.stringify(x).length`（UTF-16 码元），serde_json 的整数值 f64 先经 `codec::jsify` 改成整数，两边文本一致。
+
+### 游标
+
+| 前缀  | 用途                       | 绑定                                                                                       |
+| ----- | -------------------------- | ------------------------------------------------------------------------------------------ |
+| `b4`  | brief 记录续读（点分格式） | 世代、目标哈希（项目、session、include、task_key、since_seq）、冻结记录版本、30 分钟桶过期 |
+| `tl2` | 任务列表                   | 项目、世代、选择集哈希、keyset 位置                                                        |
+| `rl2` | 记录列表                   | 同上                                                                                       |
+| `sl2` | session 列表               | 同上，选择集含 task_key（C-15）                                                            |
+| `s2`  | 全文搜索                   | 项目（全局搜索为 `*`）、世代、查询哈希、doc_id 与 quick rowid 快照、keyset 位置            |
+| `f3`  | 字段续读                   | 项目、世代、实体、类型、mask 哈希、实体版本、字段哈希、偏移、7 天桶过期                    |
+
+签名是 `app_meta.cursor_key`（建库时随机生成）对 `<前缀>.<载荷>` 的 HMAC-SHA256 前 16 字节。2.x 的前缀
+（`b3`、`tl1`、`rc1`、`rl1`、`sl1`、`s1`、`f2`）一律 `INVALID_CURSOR FORMAT_RETIRED`（Q-01）；别的项目的游标、改过的
+游标是 `INVALID_OR_TAMPERED`；按范围恢复之后（`projects.scope_gen` 变了）是 `SCOPE_RESTORED`。三者的恢复都是
+`{action:"restart_read", omit_cursor:true}`。参数与首页不同是 `CONTINUATION_CONFLICT TARGET_MISMATCH`（保留游标重试），
+冻结的内容变了是 `CONTINUATION_CONFLICT STALE`。
+
+### 规格没写死、由实现定下的
+
+| 位置                   | 做法                                                                                                    | 理由                                            |
+| ---------------------- | ------------------------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| brief 的 milestone     | 活动 objective 下按 sort_key、local_no 取第一个活动 milestone                                           | 00 02 C-10                                      |
+| brief 的「自己的」任务 | own 与 currentTask 按 session 的 lineage 判断                                                           | 10 R2：领取属于 lineage                         |
+| brief 的交接           | 唯一同四元组的已关闭来源（2.x），加上 lineage 里其他 session 发出、仍待确认的交接                       | 10 R4′：指名 predecessor 之后祖先的交接不能消失 |
+| 冻结记录的版本         | 紧凑记录去掉 related_records 后的 sha256 前 6 字节                                                      | 00 02 C-12：同 topic 新增记录不该让续读失效     |
+| brief 的身份放不下     | `RESULT_TOO_LARGE`（recovery 提高 max_chars）；begin 例外，始终返回身份                                 | 00 02 C-16                                      |
+| brief 的 session 状态  | session 不是 ONLINE 时身份里带 `session_state`                                                          | 00 02 C-17                                      |
+| delta 续读             | `continuation.arguments` 带上原请求的 types                                                             | 00 02 C-04                                      |
+| ACK 的 session         | 回执所属的 session（author_session → SESSION 命名空间 → actor_session_id）；rebind 时是后继             | 00 02 C-05：details_cursor 原样调用总能查到     |
+| ACK 的投影             | 不再有 `projection`；加 `replayed`                                                                      | 00 02 Q-05：单库没有异步投影                    |
+| 搜索的 `truncated`     | 只表示预算截断；首页一条都放不下时 `next_cursor` 是起点游标                                             | 00 02 C-09                                      |
+| 字段续读的偏移         | 按 UTF-16 计，但只落在 code point 边界上                                                                | 00 02 C-19                                      |
+| 全局搜索               | 只看 ACTIVE / ARCHIVED 项目，带上 quick task（`project:null`）                                          | 03 F-05                                         |
+| TRASHED 项目的读       | `PROJECT_DB_UNAVAILABLE`（`retryable:false`、recovery `restore_project`）                               | 04 §1.3                                         |
+| task_list              | `status` 接受 `open` / `closed` / `all` / 具体状态；`mine_session` 只列该 session 的 lineage 持有的任务 | R11 P2-5                                        |
+| 查询与选择集的哈希     | 不做 NFC 规范化（没有可用的 crate）；2.x 也只在少数入口做                                               | 差异只影响「换了写法的同一查询」能否续读        |
+| 推迟到 W4              | owner 读时续租、reconcile 视图                                                                          | 需要 MCP 会话上下文                             |
+
+### 追溯（`tests/read.rs`）
+
+| 规则                      | 用例                                                         |
+| ------------------------- | ------------------------------------------------------------ |
+| S-050                     | `s050_brief_selects_records`                                 |
+| S-051、10 R2、R4′         | `s051_r4_handoffs_by_identity`、`r2_own_follows_the_lineage` |
+| S-052、00 02 C-10         | `s052_c10_include_and_sections`                              |
+| S-053、S-054              | `s053_s054_budget_and_continuation`                          |
+| S-055～S-059、A3          | `s055_s059_continuation_rules`                               |
+| 00 02 C-12                | `c12_related_records_do_not_stale_the_cursor`                |
+| S-060、00 02 C-16         | `s060_c16_begin_brief_modes`                                 |
+| 00 02 C-17                | `c17_brief_flags_a_closed_session`                           |
+| S-061～S-063、00 02 C-04  | `s061_s063_c04_delta`、`delta_types_filter`                  |
+| S-064                     | `s064_oversized_event`                                       |
+| S-065、R11 P2-5           | `s065_task_list_paging`                                      |
+| 02 §4.5 视图与 field_mask | `task_views_and_masks`                                       |
+| 00 02 C-19                | `c19_field_continuation`、`field_cursor_expires`             |
+| S-066、S-067、00 02 C-15  | `s066_s067_c15_record_and_session_lists`                     |
+| S-068、00 02 C-09         | `s068_c09_search`                                            |
+| 03 F-05、04 §1.3          | `f05_global_search_and_trashed_projects`                     |
+| 02 §4.5 精确读取          | `exact_reads`                                                |
+| S-069、00 02 C-05、Q-05   | `s069_c05_q05_ack_and_trace`、`ack_preview_is_bounded`       |
+| S-070、00 02 Q-01、A3     | `q01_retired_cursors_and_generations`                        |
+
+变异验红：`output/w2-evidence/mutations/mut-w2f.py`，93 条全部 RED，证据 `output/w2-evidence/w2f-mutation-evidence.json`。
+「ACK 忽略 rebind 后继」是等价变异，未列入：有回执时回执的 `author_session` 已经是后继，`rebound_to` 只在没有回执时兜底。
+
+## 项目生命周期、路径与 begin ③④⑤（`src/project.rs`、`src/quick.rs`，W2g1）
+
+入口：`Service::create_project`（User / Agent，调用索引 `project.create`）、`attach_path`（User）、`set_lifecycle`
+（User：archive / unarchive / trash / untrash）、`decide_restore_request`（User）、`project_info`、`trash`；begin 没有
+匹配到项目时的 ③④⑤。
+
+### 规格没写死、由实现定下的
+
+| 位置                  | 做法                                                                                                                                                                                                                                            | 理由                                                |
+| --------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| 路径唯一键            | `project_paths.path_key`（`atm_store::paths::path_key`：去掉末尾分隔符、Unicode 小写；盘符根保留一个分隔符），`canonical_path` 原样留作显示；begin 的选择器、建项目、登记路径都用这一个函数                                                     | 04 C-L09；所有入口一个函数，键才不会对不上          |
+| 转换                  | 2.x 的 project_paths 逐行算 path_key 再插入；两个项目撞同一个键时唯一约束让转换失败；`projects.archived_at` 删除，原值进 `legacy_json.archivedAt`，VERIFY 照旧逐列比对                                                                          | 04 C-L15、L-009                                     |
+| 建项目                | 一个写事务：新世代（`allocate_generation`，reason CREATED）、projects、7 个计数器、primary 路径、全局事件 `project.created`；路径已被任何项目（含垃圾箱里的）经 path_key 或 git common dir 认领 → `PROJECT_ALREADY_EXISTS`                      | 04 L-001、L-009                                     |
+| marker 与 git exclude | 回执给出 `marker {directory, file, content, gitExclude}`，由调用方提交之后写并报告 `markerWritten`                                                                                                                                              | 04 C-L03：文件 IO 不进写事务                        |
+| 项目代码              | 照搬 2.x `allocateProjectCode`（驼峰拆词、短尾词、首字母、单词前 6 位、数字后缀到 9999、兜底 `AYT-nnnn`）；显式代码先转大写再校验                                                                                                               | 04 L-012                                            |
+| project.create 的幂等 | 调用索引 `(USER 或 AGENT, principal, project.create, op_id)`，回执落在新项目范围、带它的初始世代；没有 op_id 不幂等                                                                                                                             | 10 A3                                               |
+| 生命周期迁移表        | archive：ACTIVE→ARCHIVED，ARCHIVED 幂等，TRASHED 冲突；unarchive：ARCHIVED→ACTIVE，ACTIVE 幂等，TRASHED 冲突（用 untrash）；trash：ACTIVE / ARCHIVED→TRASHED，TRASHED 幂等；untrash：TRASHED→ACTIVE，ACTIVE 幂等，ARCHIVED 冲突（用 unarchive） | 04 L-002；冲突是 409 而不是 2.x 碰巧的 503（LF-04） |
+| PRE\_\* 备份          | 先读当前生命周期，确实要迁移才备份（整库，`create_backup`），在写事务之外；备份失败 `INTERNAL_ERROR`（`backup_kind`），生命周期不变；已在目标上的请求不备份                                                                                     | 04 L-002：备份失败不改状态                          |
+| 生命周期事件          | 沿用 2.x 的全局事件名：`project.archived`、`project.trashed`、回到 ACTIVE 一律 `project.restored`；`projects.version` +1                                                                                                                        | 2.x `setProjectLifecycle`                           |
+| 恢复请求              | 续上时累加次数并把 requested_by / source_cwd 改成最后一次的值；只有第一次登记记 `project.restore_requested`；决定记 `project.restore_approved` / `_rejected`；untrash 与批准都结掉 PENDING                                                      | 04 L-004～L-006                                     |
+| 垃圾箱项目的写入      | 写入流水线在重放判定之后、session 检查之前查生命周期，TRASHED 报 `PROJECT_DB_UNAVAILABLE`（retryable:false，recovery `restore_project`）；生命周期操作与恢复请求的决定自己判定                                                                  | 04 L-008；已提交的请求照样拿回原回执                |
+| begin ③               | 显式 `mode:"quick"`（不论 allow_project_create）建 quick task，回执 `{scope:"quick", quick, session:null, outcome:"QUICK"}` 落在 GLOBAL、没有世代；begin 的 brief 只回身份与 quick                                                              | 10 A3；03 C-11：带 op_id 重试拿回同一个 Q 键        |
+| begin ④               | 同一写事务里建项目（名字取 title，否则目录名，否则「未命名项目」；路径取选择器的 canonical_path，否则 cwd），之后照常建 session；回执带 `projectCreated`、`sourcePath`、`marker`，落在新项目范围；`expected_generation` 对新项目不比较          | 10 A3：CREATE 没有可比的世代                        |
+| begin ⑤ 与 mode       | 不 quick、不允许建项目 → `PROJECT_REQUIRED`（带 next），零写入；mode 只认 auto / project / quick                                                                                                                                                | 10 R11 P1-5                                         |
+| 没有匹配时的重放      | 调用索引全局共享：先查重放，再按分支执行                                                                                                                                                                                                        | 10 A3                                               |
+
+### 追溯（`tests/project.rs`）
+
+| 规则                 | 用例                                                                                                  |
+| -------------------- | ----------------------------------------------------------------------------------------------------- |
+| 04 L-001             | `l001_create_project_in_one_transaction`                                                              |
+| 04 L-012             | `l012_project_codes`                                                                                  |
+| 10 A3 project.create | `a3_create_project_is_idempotent_by_op_id`                                                            |
+| 04 L-009、C-L09      | `l009_canonical_paths_are_unique`                                                                     |
+| 04 L-010             | `l010_attach_path`（另见 `tests/session.rs` 的 `l010_project_is_found_by_path_marker_or_common_dir`） |
+| 04 L-002、D31        | `l002_archive_and_unarchive`、`l002_refusals`                                                         |
+| 04 L-006、L-007      | `l006_l007_trash_and_untrash`                                                                         |
+| 04 L-003、L-004、D32 | `l003_l004_trashed_begin_registers_a_restore_request`                                                 |
+| 04 L-005             | `l005_restore_requests_are_decided_once`                                                              |
+| 04 L-008、D33        | `l008_what_each_state_allows`                                                                         |
+| 10 A3 ③④⑤、03 C-11   | `a3_begin_quick_branch`、`a3_begin_create_branch`、`a3_begin_without_a_project`                       |
+
+L-011（范围恢复不改生命周期）由存储层的恢复保证（`store/src/restore.rs` 不写 lifecycle），服务层的恢复入口随 W5 的
+备份界面接入时补用例。
+
+变异验红：`output/w2-evidence/mutations/mut-w2g1.py`，40 条全部 RED，证据 `output/w2-evidence/w2g1-mutation-evidence.json`。
+其中「写入流水线不拦垃圾箱项目」起初存活：工作项层的 `Work::open` 也拦，掩盖了流水线这一道；l008 补了不经过工作项层的
+写入（垃圾箱里 `atm_end`）后变红。
+
+## quick task、保存视图、设置（`src/quick.rs`、`src/views.rs`、`src/settings.rs`，W2g2）
+
+入口：`Service::quick_create`、`quick_update`、`quick_promote`、`quick_get`（User / Agent）；`create_saved_view`、
+`update_saved_view`、`delete_saved_view`、`list_saved_views`（User）；`set_setting`、`set_notification_mode`、
+`set_backup_policy`、`get_setting`、`list_settings`（User）。
+
+### 规格没写死、由实现定下的
+
+| 位置                    | 做法                                                                                                                                                                                                                                                                                                                                                                                                               | 理由                                         |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------- |
+| quick 的回执范围        | create / update 落在 GLOBAL（quick registry 不随范围恢复回退）；带目标的晋升落在目标项目；不带目标的晋升走调用索引，回执落在新建的项目（已晋升时落在 GLOBAL）                                                                                                                                                                                                                                                      | 10 A3：落点固定的走流水线，CREATE 走调用索引 |
+| quick 的 actor          | User 恒为 `USER`；Agent 必须自报，去空白、不分大小写地拒绝 `USER`、`SYSTEM`、`PHONE:*`，报 `USER_AUTHORIZATION_REQUIRED`（`field:"actor"`）；自报的 actor 同时是 ACTOR 命名空间 `AGENT:<actor>`                                                                                                                                                                                                                    | 03 C-12、§3 表中「403 + NS」                 |
+| quick.update 的 schema  | status 只认 OPEN / IN_PROGRESS / BLOCKED / DONE / CANCELLED（大小写不敏感）；percent 0～100 或清空；title 1～400；note ≤ 5000；due_date `YYYY-MM-DD` 或清空；summary ≤ 500，去空白；越界报 `VALIDATION_ERROR` 带 `field`                                                                                                                                                                                           | 03 C-13；summary 上限与 2.x 的 progress 一致 |
+| quick.update 的其余行为 | 照 2.x：没有可改字段时原样返回（`changed:false`），不加版本；DONE 写 completed_at、percent 设为 100；非空 summary 追加 `quick_task_updates`；已晋升的 quick 也能改（2.x 如此，晋升的绑定不受影响）                                                                                                                                                                                                                 | 04 §4.1；未确认的变更保持 2.0                |
+| 晋升的事务              | 带目标：写入流水线（TRASHED 目标由 L-008 闸门拒绝，ARCHIVED 允许）里做「已晋升判定 → 版本 → 采用或新建工作项 → PROMOTED 标记」；不带目标：同一个写事务里建项目（名字取 quick 标题，creation_reason 记来源）再做同样的事；任何一步失败整体回滚                                                                                                                                                                      | 04 L-015、C-L05                              |
+| 已晋升                  | 已经 PROMOTED：同一目标原样返回（`alreadyPromoted:true`，不查版本）；别的目标 `IDEMPOTENCY_CONFLICT`（带 `promoted_project_id`）；不带目标的请求一律原样返回，不建项目                                                                                                                                                                                                                                             | 04 §4.1、L-015                               |
+| 采用与新建              | 目标项目里已有 `source_quick_id` 指向它的工作项就采用（`adopted:true`），否则按 `Internal{source:"quick.promote"}` 新建一个：quick 为 IN_PROGRESS 时落 IN_PROGRESS，否则 READY；description 取 note；需要时补规划根                                                                                                                                                                                                | 10 R5；04 §4.1                               |
+| R5 双重绑定             | 标记同时写 `promoted_work_item_key` 与 `promoted_work_item_id`；读时核对 id，对不上（工作项被按范围恢复撤销）给 `promotionUndone:true`                                                                                                                                                                                                                                                                             | 10 R5                                        |
+| 保存视图                | scope 精确匹配 GLOBAL / PROJECT（否则 `VALIDATION_ERROR`）；PROJECT 不带项目 `PROJECT_REQUIRED`；name 去空白后非空；query / sort 必须是对象，省略为 `{}`；改和删必须带 expected_version；事件 `saved_view.created/updated/deleted`，actor `USER`，回执落在 GLOBAL                                                                                                                                                  | 04 L-016                                     |
+| 设置的通用写入          | key 先按 2.x 规则校验形状（`SETTING_KEY_INVALID`，不带 reason）；带语义的 key（`notification.mode`、`notification.enabled`、`backup.policy`、`mcp.memory-profile-enabled`）报 `SETTING_KEY_INVALID`，`reason:"DEDICATED_CAPABILITY"`、`use` 指向专用入口；白名单只有 `projects.order`（`{"ids":[非空字符串…]}`，最多 10000 个）与 `recovery.sessionTimeoutMinutes`（1～1440 的整数），其余 `reason:"NOT_WRITABLE"` | 04 L-017、03 C-06                            |
+| 设置的版本              | 照 2.x：不存在的 key 读出 -1；带 expected_version 就 CAS（不存在时只接受 -1）；不带是 last-write-wins；事件 `setting.updated`、actor `USER`、payload `{}`                                                                                                                                                                                                                                                          | 04 §4.3                                      |
+| 通知方式与备份策略      | `set_notification_mode` 只认 ALL / CRITICAL / OFF（`NOTIFICATION_MODE_INVALID`），不再同步写 `notification.enabled`；`set_backup_policy` 校验 daily 1～90、weekly 1～52、other 1～20，存 2.x 的 camelCase 形状；能力表没有单列的 backup.policy_set，沿用 settings.write                                                                                                                                            | 04 L-017；旧 key 的读回落留给读侧            |
+
+### 追溯（`tests/quick.rs`、`tests/settings.rs`）
+
+| 规则            | 用例                                                                                                          |
+| --------------- | ------------------------------------------------------------------------------------------------------------- |
+| 04 L-013        | `l013_create_and_update_carry_versions`、`l013_c13_update_refusals`                                           |
+| 03 C-12         | `c12_agent_actor_is_normalized`                                                                               |
+| 03 C-13         | `l013_c13_update_refusals`                                                                                    |
+| 04 L-015、C-L05 | `l015_promote_to_an_existing_project`、`l015_promote_refusals`、`l015_untargeted_promote_creates_one_project` |
+| 10 R5           | `r5_adopts_and_flags_undone_promotions`                                                                       |
+| 04 L-016        | `l016_saved_view_lifecycle`、`l016_refusals`                                                                  |
+| 04 L-017、C-L10 | `l017_whitelisted_settings`、`l017_refusals`                                                                  |
+| 03 C-06         | `c06_dedicated_settings`                                                                                      |
+| ACK 实体        | `read::ack::tests::quick_operations_name_their_entities`                                                      |
+
+L-014（begin 的 quick 分支幂等）在 W2g1 的 `a3_begin_quick_branch` 里。
+
+变异验红：`output/w2-evidence/mutations/mut-w2g2.py`，67 条全部 RED，证据 `output/w2-evidence/w2g2-mutation-evidence.json`。
+日期的长度检查起初是等价变异：`Timestamp::parse` 按固定位置校验，长度不对的日期本来就过不去，于是删掉了这道检查。
+
+## 知识库写入（`src/knowledge.rs`，W2g3）
+
+入口：`Service::knowledge_save`（User）、`knowledge_archive`（User）、`knowledge_save_agent`（Agent，带项目与 session）。
+三者都经写入流水线，回执落在知识范围（`knowledge_meta.database_id`）。
+
+### 规格没写死、由实现定下的
+
+| 位置              | 做法                                                                                                                                                                                                                                                                                                                      | 理由                                                                          |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| 知识库身份行      | 新库第一次写知识时在单独的写事务里建 `knowledge_meta`（新 database_id、generation，`scope_generations` 记 KNOWLEDGE / CREATED）；转换来的库已经有，不动                                                                                                                                                                   | 写入流水线要先知道范围 id 和世代才能查回执                                    |
+| 回执与返回        | 回执只存 `knowledge-receipt-v2 {id, revisionId, version, archived}`；新写入和重放都按不可变修订展开，version / archived 用回执里的值；2.x 的旧格式回执本身就是条目，原样返回                                                                                                                                              | 04 L-107；回执不带正文，库不膨胀                                              |
+| operation 名      | `knowledge.save`、`knowledge.archive`、`knowledge.agent-save`；同一 op_id 换一种操作算冲突；转换来的旧行 operation 为 `*`，只比指纹                                                                                                                                                                                       | 2.x 三种操作共用一个命名空间，靠 payload 里的 operation 区分                  |
+| knowledge-v1 指纹 | payload 按 2.x zod 输出拼：`{operation, slug, title, summary, useWhen, tags, aliases, appliesTo, bodyMarkdown, sourceRefs, …}`，去空白、补默认值后的值；User 带 opId / id / expectedVersion / expectedRevisionId；Agent 的 project 是项目 id，作者按候选自己的 session 重建（agentId 从 session 行取）                    | 10 A2；向量由 2.x 的 zod schema 生成（`tests/data/knowledge-v1-vectors.mjs`） |
+| canon-v2 指纹     | 业务字段：operation、规范化后的内容、id、expected 系列、archived；不含 op_id、session、作者（命名空间已经绑定）                                                                                                                                                                                                           | 02 §3.4                                                                       |
+| 内容校验          | 照 2.x：slug ≤ 160、title ≤ 240、summary ≤ 1000（都去空白且非空），useWhen ≤ 2000，tags / aliases / appliesTo 各最多 30 项（每项去空白非空，上限 80 / 160 / 200），正文 ≤ 500000 且不含 NUL，来源最多 30 条、类型四选一、project_record 必须固定 projectId / recordId / sourceVersion；越界 `VALIDATION_ERROR` 带 `field` | 04 §5.2；`protocol/src/inputs/knowledge.ts`                                   |
+| 双 CAS            | User 保存：head 的 version 与 revisionId 都要匹配，新建时 expected_version 必须是 0；带 id 不带 expected_revision_id 是 schema 错误；归档的 expected_version 必须是正整数                                                                                                                                                 | 04 L-103、L-104                                                               |
+| Agent 保存        | 作者 `{type:"AGENT", agentId, sessionId, projectId}` 取自写入流水线解析出的 session（rebind 后是后继）；CAS 只看 revisionId（expected_version 取 head 当前值）；已归档 `INVALID_ARGUMENT`；session 所在项目在垃圾箱里 `PROJECT_DB_UNAVAILABLE`（重放之后判定）                                                            | 04 L-105；2.x 要先打开项目库                                                  |
+| slug 冲突         | `KNOWLEDGE_SLUG_CONFLICT`（409），带 `slug`、`holder_id`                                                                                                                                                                                                                                                                  | 04 C-L11                                                                      |
+| FTS               | 每次保存删掉旧行、按新 head 插一行；metadata 照 2.x 的命中形状（去掉正文、来源、别名，加 version、archived）；归档不改 FTS，读侧以 entries 为准                                                                                                                                                                           | 04 §5.1；读取在 W2g4                                                          |
+| sequence          | 每次成功的保存与归档 `sequence+1`（搜索游标绑定它）                                                                                                                                                                                                                                                                       | 04 §5.2、L-111                                                                |
+
+### 追溯（`tests/knowledge.rs`）
+
+| 规则            | 用例                                                                |
+| --------------- | ------------------------------------------------------------------- |
+| 04 L-101、D34   | `l101_revisions_are_immutable`（含直接 UPDATE / DELETE 修订表报错） |
+| 04 L-102        | `l102_six_distinct_fields`                                          |
+| 04 L-103        | `l103_user_save_checks_version_and_revision`                        |
+| 04 L-104        | `l104_archive_and_edit_archived`                                    |
+| 04 L-105        | `l105_agent_save`                                                   |
+| 04 L-106        | `l106_namespaces_are_separate`                                      |
+| 04 L-107        | `l107_replay_returns_the_original_revision`                         |
+| 04 L-108、C-L11 | `l108_slugs_are_unique`                                             |
+| 10 A2           | `a2_converted_receipts_replay`（2.x 运行环境生成的向量）            |
+| 04 L-117、C-L14 | `l117_restore_tombstones_later_operations`                          |
+
+变异验红：`output/w2-evidence/mutations/mut-w2g3.py`，46 条全部 RED，证据 `output/w2-evidence/w2g3-mutation-evidence.json`。
+「useWhen 缺省时省略」起初写成了等价变异（规范化之后 use_when 恒为 Some），改成空串写 null 后变红；
+「更新把 version 重置为 1」由 l104 的归档 → 编辑 → 再归档链条抓住。
+
+## 知识库读取与搜索（`src/read/knowledge.rs`，W2g4）
+
+入口：`Service::knowledge_search`、`knowledge_get`（正文或 Agent 的元数据分页）、`knowledge_history`。主体是 Agent 时给
+Agent 视图，否则给管理视图。
+
+### 规格没写死、由实现定下的
+
+| 位置         | 做法                                                                                                                                                                                                                                                                                    | 理由                                                           |
+| ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------- |
+| 游标格式     | `k2.<base64url(JSON)>.<HMAC>`，库内密钥签名；载荷 `{k 种类, d database_id, g scope_gen, s scope 哈希, o 位置, r 目录序号或修订, v editVersion, i revisionId}`，键集合必须精确                                                                                                           | 00 C-L12；与 W2f 的读游标同一套签名                            |
+| 旧游标与恢复 | 2.x 的 `k1` → `INVALID_CURSOR FORMAT_RETIRED`；世代不同 → `INVALID_CURSOR SCOPE_RESTORED`；种类、scope、库不符或被改过 → `INVALID_OR_TAMPERED`；搜索期间有知识写入 → `INVALID_CURSOR CATALOG_CHANGED`                                                                                   | 04 L-111、L-112；Q-01 不新增 CURSOR_EXPIRED，与 W2f 的决定一致 |
+| isHead       | 管理视图与 Agent 首页带 `isHead`；按 revisionId 读旧修订时 version 报 head 的值、isHead 为 false                                                                                                                                                                                        | 04 L-109、C-L13                                                |
+| 续页         | 正文续页沿用首页的 editVersion 与 revisionId；续页带了与游标不同的 revisionId → `INVALID_CURSOR REVISION_MISMATCH`                                                                                                                                                                      | 04 L-110                                                       |
+| 搜索         | 照 2.x：按空白拆词、双引号成组、不分大小写去重、最多 8 个词；≥ 3 个 code point 走 trigram FTS 短语，否则 LIKE 扫表（转义 `% _ \`）；元数据用 instr；排名按整条 query（0 精确、1 标题、2 别名或标签、3 其他元数据、4 正文），同名次 id 倒序；默认不含归档；tag 精确匹配 metadata 的 tags | 04 §5.4、L-114                                                 |
+| 预算         | 按 `JSON.stringify` 的 UTF-16 码元数：搜索取放得下的最多项，有命中却一项都放不下 `RESULT_TOO_LARGE`；正文二分取最长前缀，不劈开代理对，切点退回起点也报 `RESULT_TOO_LARGE`（不发指回原处的游标）                                                                                        | 04 L-115                                                       |
+| Agent 视图   | 命中只有 title、summary、useWhen、tags、appliesTo、id、revisionId、archived；首页目录最多 40 项、标题截到 120 字、目录预算 min(1600, max/3)；元数据放不下时退化为截断标记 + `metadataRead` 指引，不给 `edit` 块；续页只带身份与正文                                                     | 04 L-115、L-116                                                |
+| 元数据分页   | 只给 Agent（User 报 `INVALID_ARGUMENT`），不能与 section 混用；内容去掉正文后的 JSON 文本按码元无损分页，绑定修订                                                                                                                                                                       | 2.x `part:"metadata"`                                          |
+| history      | 先确认条目存在（`NOT_FOUND`），再校验 limit 1～100、beforeRevision ≥ 1（`INVALID_ARGUMENT`）；keyset 翻页，不带正文                                                                                                                                                                     | 04 L-113；2.x 的判定顺序                                       |
+| 空库         | 还没有 knowledge_meta 时搜索返回空页，读条目 `NOT_FOUND`                                                                                                                                                                                                                                | 新库第一次写知识才建身份行（W2g3）                             |
+
+### 追溯（`tests/knowledge_read.rs`）
+
+| 规则            | 用例                                                                                                             |
+| --------------- | ---------------------------------------------------------------------------------------------------------------- |
+| 04 L-109、C-L13 | `l109_old_revisions_report_the_head_version`                                                                     |
+| 04 L-110        | `l110_body_pages_pin_the_revision_and_version`                                                                   |
+| 04 L-111        | `l111_search_cursors_bind_the_catalog`                                                                           |
+| 04 L-112、C-L12 | `l112_restores_and_old_formats_invalidate_cursors`                                                               |
+| 04 L-113        | `l113_history_pages_by_keyset`                                                                                   |
+| 04 L-114        | `l114_search_behaves_like_2x`、`read::knowledge::tests::search_terms_follow_2x`                                  |
+| 04 L-115        | `l115_budgets_never_return_empty_pages`                                                                          |
+| 04 L-116        | `l116_agent_views_and_metadata_paging`                                                                           |
+| 目录与章节      | `sections_and_an_empty_catalog`、`read::knowledge::tests::headings_follow_2x`、`surrogate_pairs_are_never_split` |
+
+变异验红：`output/w2-evidence/mutations/mut-w2g4.py`，46 条全部 RED，证据 `output/w2-evidence/w2g4-mutation-evidence.json`。
+补用例的几处：section 名为 `metadata` 的正文游标与元数据游标 scope 相同，只能靠种类区分（l116）；排名需要「精确标题 vs 标题包含」
+与同名次两条对照（l114）；截断页必须塞满预算（l110）；预算只放得下元数据时报错而不是发空页（l115）。
+
+## 阶段验收：09 §5 规则变异（W2h3）
+
+在 W2 收尾的代码上把 09 §5 必须变红的规则变异重跑一遍：`output/w2-evidence/mutations/mut-w2h3.py`，9 条全部 RED，
+证据 `output/w2-evidence/w2h3-mutation-evidence.json`（首跑存档 `w2h3-mutation-evidence.first-run.json`）。
+
+| 09 §5 规则                   | 变异位置                                    | 变红的用例                                                      |
+| ---------------------------- | ------------------------------------------- | --------------------------------------------------------------- |
+| 去掉 USER_ONLY 检查          | 能力表 `settings.write` 改成 Agent 可用     | `permissions:p005_…`（逐能力 15 条见 `mut-w2h1.py`）            |
+| checklist_batch 比较 version | `work/checklist.rs` 逐项比 expected_version | `composite:w054_batch_bumps_the_task_once`                      |
+| review_submit 跳过候选 hash  | `work/review.rs` 不比 hash                  | `composite:w059_candidate_hash_mismatch`                        |
+| 完成门失败仍提交 VERIFYING   | `work/patch.rs` 门失败时照样提交            | `composite:w052_w062_gate_failure_commits_nothing`              |
+| 去掉幂等回执                 | `receipts.rs` 不写回执                      | `write:a_replay_returns_the_original_receipt_and_adds_nothing`  |
+| CANCELLED 依赖当作 ready     | 完成门 `domain/src/gate.rs`                 | `work:w095_d03_cancelled_dependencies_fail_the_completion_gate` |
+|                              | claim/start `work/patch.rs` 的依赖查询      | `work:w024_c11_c29_dependencies_must_be_done`                   |
+| brief 游标不检查 include     | `read/brief.rs` 不比 target 摘要            | `read:s055_s059_continuation_rules`                             |
+| fp_v1 改按码元排序           | `fp.rs` kernel_v1 键序                      | `fp:kernel_v1_matches_the_2x_runtime`                           |
+
+首跑时完成门那条存活：服务层没有用例会走到「开工后加上的前置被取消，再完成」（domain 层的 gate 单测覆盖了，
+但服务层是否把依赖状态喂进门没人看），补了 `w095_d03_…` 后变红。
+
+## 阶段验收：规格追溯（W2h2）
+
+追溯表与检查见 [`TRACE.md`](TRACE.md)：357 个编号（D01–D35、W / S / P / L 规则、00 §1–§4 与 10 的裁决）逐条落到用例或后续阶段，
+`tests/spec_trace.rs` 随整套测试运行。
+
+补追溯时发现并修掉的实现缺口：
+
+- 00 Q-02：`STORE_BUSY` 的 details 带 `committed:false`（准入超时的作业保证没执行）。
+- W-104：检查项的 `VERSION_CONFLICT` 按规格给 `current{id, task_key, task_version, …}`、`recent_changes`（≤ 6 条）与
+  `changes_complete:false`，和任务冲突共用 `Work::recent_changes`。
+- 10 R4′：范围恢复把已确认的交接退回待确认后，后继 resume（接回）时重新确认祖先发给它的交接；以前只在新建后继时确认。
+
+补追溯时更正的用例名：`s090`～`s092`、`s094` 测的是记录（02 §1.6），`s093` 是反馈，`s084` 是参数校验，`s030` 测的是 S-031 / S-032，
+`s085_s086` 与反馈无关——编号借用会让追溯检查误判覆盖，已改成不带编号或带正确编号的名字。
+
+规格没写死、由实现定下的：
+
+| 项目         | 做法                                                                                                                                                                                                                                                                                       | 依据                                                    |
+| ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------- |
+| 批次条数越界 | 服务层报 `INVALID_ARGUMENT`（与 MCP schema 拦下时同一个码），规格写的服务层兜底码是 `VALIDATION_ERROR`                                                                                                                                                                                     | Agent 易用：同一个错误一个码                            |
+| 读是否续租   | R2 说读不续租，R11 P3 说 owner 的读也续租：按更晚的 R11，W4 读请求带上 session 后实现                                                                                                                                                                                                      | ATM 记录                                                |
+| C-16 的删除  | 按 00 C-16（优先于 01）：`work_items.archived_at / phase_inferred / planned_start_date`、labels 两表、RELATES / DUPLICATES 已从 3.0 schema 删除；检查项非 ACCEPTANCE kind、blockers CANCELLED、progress_source STATUS 改写为 3.0 取值（N-02g～i），CHECK 只收 3.0 取值；非默认值进报告附件 | W3a 已落地并经 peer r2 批准（`store/NORMALIZATION.md`） |
+
+变异验红：`output/w2-evidence/mutations/mut-w2h2.py`，11 条全部 RED（追溯检查对删用例、规格加规则、未知编号、引用不存在的用例、
+矩阵过期、去掉人工判定说明、去向不写阶段都变红；三处实现修复各自变红），证据 `output/w2-evidence/w2h2-mutation-evidence.json`。
+抽取脚本 `spec-trace-extract.py --check --spec <副本>` 在规格副本里加一条规则时失败、原规格通过。
+
+## 阶段评审修订（W2h4，codex W2 r1）
+
+W2 第一轮独立评审（`output/peer-atm3-w2-r1.md`）的五条 P1 与三条 P2 都在本阶段关闭：
+
+- **P1-01 Unicode 切片**：`search` 判断 `op:` 前缀改用 `str::get`，`begin` 的「你是不是要找」按字符取前两个；全库扫过其余
+  动态字符串切片（都只作用在已确认是 ASCII 的串上）。用例覆盖 ASCII、汉字、混排、二字节、四字节。
+- **P1-02 生命周期的 PRE\_\* 备份**：先不带备份走一趟流水线（重放、冲突、已在目标上直接出结果），确认是新迁移才备份、再写
+  第二趟；并发抢先时撤回没用上的备份（`atm_store::backup::discard_backup`，尽力而为：撤回失败只多留一份有效备份，不把已有结果改报成错误）。测试钩子 `with_backup_hook` 模拟抢先。
+- **P1-03 知识库首写**：写入流水线加 `prepare` 步骤，在世代屏障之前、同一事务里建知识库身份与世代；失败与其余写入一起回滚。
+  身份在请求读到之后被并发建立时（`SCOPE_MOVED`）按新身份再写一次。
+- **P1-04 review_request 的 R2**：成功请求把 Review 任务的领取转给发起者并续租，只动领取两列，不加 version。
+- **P1-05 服务业务补齐**：`work.plan`（`create_objective` / `create_milestone`）、`project_update.draft` / `publish`、
+  `knowledge.preview_record`、`backup.list` / `create_manual` / `restore_scope`、`import.preview` / `apply`。不在 W2 的能力与理由
+  见 [`PERMISSIONS.md`](PERMISSIONS.md)「不在 W2 的能力」（方案 §11 W2 一行同步改写，ATM-D-318）。
+- **P2-01 NFC**：搜索查询哈希与列表选择集里的文本先做 NFC（`unicode-normalization`）。
+- **P2-02 测试隔离**：`support::test_root()`；`tests/isolation.rs` 扫三个 crate 的测试源码，由 `CARGO_MANIFEST_DIR` 拼出的可写路径
+  必须走 `CARGO_TARGET_DIR` 兜底。
+- **P2-03 追溯表**：改正 01/C-21、S-051、W-102 的说明，补 W-102 的服务层用例；`TRACE.md` 加「这张表证明什么、不证明什么」与
+  多通道规则（R1、R2、02/C-03、L2）的入口映射。
+
+规格没写死、由实现定下的：
+
+| 项目                             | 做法                                                                                                               | 依据                                                                 |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------- |
+| 新建 objective                   | 原来 ACTIVE 的降为 PLANNED（version+1），新的是 ACTIVE                                                             | 2.x `planning-commands.ts:58-63`                                     |
+| milestone 挂到已关闭的 objective | `PLANNING_TARGET_CLOSED`，与任务同一条（01 C-18）                                                                  | 挂上去的任务也会被 C-18 拒，提前拦下                                 |
+| milestone 排序键                 | 项目内最大值 + 1000                                                                                                | 2.x（单项目库里的全表最大值）                                        |
+| 项目更新发布                     | User 与 Agent（progress scope=project）都把 `projects.health` 改成发布值、`meta_version`+1                         | 2.x `project_meta`                                                   |
+| 发布的 summary / 列表上限        | summary ≤ 500，completed / risks / next 各 ≤ 20 条、每条 ≤ 500                                                     | 与 progress 同一张表、同一组上限                                     |
+| 恢复时固定备份                   | `pinned_until` = 现在 + 30 天（`RESTORE_PIN_DAYS`）；W5 的保留期清理跳过固定的备份                                 | 够用户在恢复后发现问题再回退一次                                     |
+| 按范围恢复的错误码               | 存储层错误一一映射到 `BACKUP_*`；写线程拒绝是 `STORE_BUSY committed:false`；附件未换入是 `INTERNAL_ERROR` 带世代   | 已提交的恢复不能报成「没发生」                                       |
+| agenttask 导入                   | 一个事务（2.x 逐条提交，中途失败留下半个导入）；同源同项目再导入返回当时结果并标 `alreadyImported`；内容上限 2 MiB | 单库单进程；Agent 易用                                               |
+| 导入记录标题                     | 截到 80 个 UTF-16 码元，不切开代理对                                                                               | 00 02 C-19；与 2.x 的唯一差异，向量里标出                            |
+| review_request 转移领取          | 不加 version、不发任务事件                                                                                         | 回执不带 Review 任务版本，加了会让发起者无谓冲突；与心跳续租同一规则 |
+
+变异验红：`output/w2-evidence/mutations/mut-w2h4.py`，证据 `output/w2-evidence/w2h4-mutation-evidence.json`。
+
+## 阶段评审修订（W2h5，codex W2 r2）
+
+W2 第二轮独立评审（`output/peer-atm3-w2-r2.md`）的三条 P1 与 P2-01：
+
+- **P1-01 生命周期跨恢复**：`set_lifecycle` 进来时读一次项目范围世代，两趟（以及版本变化后的重做）都带着它作
+  `expected_generation`。两趟之间项目被恢复过就报 `SCOPE_RESTORED`（带新旧世代），不采纳恢复后的世代继续迁移；
+  重放与「被恢复撤销」的裁决在世代检查之前，照旧优先。
+- **P1-02 撤回**：`discard_backup` 持附件锁（与恢复的选中、校验、固定串行），只删没固定、没有恢复引用的备份（条件写在
+  DELETE 里）；目录先改名进 `<备份根>/.withdrawn/` 再删行——挪不动（文件被占用）就整份保留，删行没成就放回，删行后目录删不掉
+  留在隔离区。隔离区在下次备份、撤回、恢复时按登记行归位或删除。备份在登记之前失败也不留目录。结果
+  （`WITHDRAWN` / `KEPT` 带原因 / `CLEANUP_PENDING` / `FAILED`）记在服务里最近 16 条，`list_backups` 的 `withdrawals` 返回，
+  连同隔离区里待清的数目。
+- **P1-03 `metrics.read`**：`metrics_read(principal, project, task_key)` 只读已存的项目最新指标与任务基线 / 指标，不调 git、不写、
+  不排后台扫描；没有数据是 `available:false, reason:NO_DATA`，不是错误。采集与刷新仍在 W5。
+- **P2-01 备份错误码**：`BackupError::Write` 带 `StoreFailure`：写准入超时 `STORE_BUSY committed:false`，读连接占满
+  `STORE_BUSY`，存储关闭 `SERVICE_UNAVAILABLE`，执行后失败（超预算、panic、SQLite）`INTERNAL_ERROR`。不再解析说明文字。
+
+顺带：`knowledge_read.rs::l114` 的同名次排序原先假设插入顺序就是 id 顺序，同一毫秒内的 ULID 先后不定（约 1/8 失败），改按实际 id 推期望。
+
+规格没写死、由实现定下的：
+
+| 项目                  | 做法                                                                | 依据                                   |
+| --------------------- | ------------------------------------------------------------------- | -------------------------------------- |
+| 撤回被保留的备份      | 登记与目录都完整，归 W5 的保留期管（固定期内跳过）                  | 宁可多留一份有效备份，不留没登记的目录 |
+| 撤回诊断              | 内存里最近 16 条 + 隔离区计数，经 `list_backups` 返回               | 有界；持久状态就是隔离区本身           |
+| `metrics.read` 的形状 | 2.x 的 camelCase：`project` 为最新一条原文，`workItem` 为基线与指标 | 2.x `engineering-metrics-observer.ts`  |
+
+变异验红：`output/w2-evidence/mutations/mut-w2h5.py`（服务包）与 `mut-w2h5-store.py`（存储包），证据
+`output/w2-evidence/w2h5-mutation-evidence.json`、`w2h5-store-mutation-evidence.json`。
+
+## 阶段评审修订（W2h6，codex W2 r3）
+
+第三轮（`output/peer-atm3-w2-r3.md`）关闭了第二轮全部条目，新提一条 P1：备份登记失败、目录当时又删不掉（文件被占用）时，
+残留目录不在隔离区，清扫和诊断都找不到。
+
+- 创建备份前先在 `<备份根>/.creating/<id>` 落一个空标记（fsync），登记成功才删。登记前任何一步失败都删目录；删掉了（或目录本就
+  不存在）才删标记，删不掉就留着。清扫（下次备份、撤回、恢复时，都在附件锁里）按标记处理：对应 id 已登记的只删标记，
+  没登记的删目录再删标记。创建也在附件锁里，所以清扫看到的标记都不属于进行中的创建。
+- `list_backups` 的 `withdrawals.cleanupPending` 现在是隔离区条目加创建标记的数目。
+- 守卫：`tests/backups.rs::a_failed_backup_that_cannot_be_removed_stays_tracked_until_swept`（评审反例：触发器让登记失败、
+  登记前锁住备份文件；标记留存、诊断计 1、下一次备份清掉残留）、`a_creation_marker_never_removes_a_registered_backup`
+  （标记指向已登记且被恢复固定的备份时只删标记）。变异 `output/w2-evidence/mutations/mut-w2h6.py`（5 条），证据
+  `output/w2-evidence/w2h6-mutation-evidence.json`；`mut-w2h5*.py` 两条锚点随改写更新并重跑。
+
+评审的两条 P2（清扫与诊断扫描没有工作量上限；`metrics.read` 的 `NO_DATA` 需要 W4 / W6 的界面与入口承接）是 W4 / W5 / W6 / W8 的硬门，
+已记入 ATM。W8g（ATM-T-0895）关闭：
+
+- **清扫有界**（`store/src/backup.rs`）：
+  - 一轮最多 `SWEEP_MAX_ENTRIES`（32）条、`SWEEP_BUDGET`（1.5 s）。时长在条目之间检查，超出的最多是正在处理的那一条：一次改名，或者删一份备份的目录，与在同一把附件锁里做一份备份同一量级。
+  - 一批条目的登记一次读库查完（`json_each`），读池占满时一轮只等一次 `read_wait`。查不了登记就一条都不动。
+  - 先放回仍登记的，再删没登记的。没轮到的留到下一轮，`Swept::more` 为真。
+  - 两个恢复入口在清扫之后对选中的那份单独 `reinstate_locked`：它不论轮没轮到都先回到备份根，不会被当成缺失。
+  - 用例：`store/src/sweep_budget.rs`（时长为 0 时先放回登记的；读池占满时 32 条只等一次）、`tests/restore.rs::a_sweep_round_is_bounded_and_the_chosen_backup_is_reinstated_anyway`。
+- **诊断有界且如实**：`withdrawn_pending` 每一处最多数 `PENDING_SCAN_LIMIT`（1000）条，返回 `(数目, EXACT | TRUNCATED | SCAN_FAILED)`。读不出来不再当成 0。
+  - `list_backups` 的 `withdrawals` 多了 `cleanupPendingCount`。
+  - 用例：`tests/restore.rs::the_pending_count_is_bounded_and_says_how_it_was_counted`。
+- **NO_DATA 的承接**：
+  - 服务端：读从不扫、不排队（`jobs/tests/metrics.rs::reading_has_no_side_effects_and_refreshing_is_user_or_capture_only`），刷新只给 User 与采集作业。只有任务指标时是 `available:true, project:null`（`tests/metrics.rs::metrics_read_with_only_task_metrics`）。
+  - 界面（`packages/ui/src/project-statistics-panel.tsx`）分四种显示：
+    - `NO_DATA`，或只有任务指标：「还没有统计」并指向「刷新统计」，不再说目录不是 Git 仓库、不去读空的项目指标；
+    - `NO_SOURCE_PATH`：「项目没有源码目录」；
+    - 刷新失败：服务端的说明；
+    - 读失败：可重试的行内错误。
+  - e2e「有源码目录但还没统计过」走真实点击：先读（不带 refresh），点刷新（`refresh=true`），刷新后显示的 HEAD 与时间来自采集载荷里的 `head` / `capturedAt`。
+
+## A3 服务端：operation 映射表、resolve、目标核对（`src/ops.rs`、`src/resolve.rs`，W4f）
+
+入口：`ops::OPS`（全部写 operation 一行一条）、`Service::resolve`（只读）、begin / `project.create` / `quick.promote`
+请求上的 `expected_target`；HTTP 侧是 `POST /mcp/resolve` 与各写工具的隐藏控制字段 `expected_target`（`http/src/resolve.rs`）。
+
+### 规格没写死、由实现定下的
+
+| 位置                     | 做法                                                                                                                                                                                                         | 理由                                                     |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------- |
+| 需要 session 这一列      | 不单独登记，从入口能力的「Agent 需 session」推出；一个 operation 有几个入口能力时只看 Agent 能用的（`project-update.publish` 同时是 Agent 的项目进度与 User 的发布）                                         | 03 §3 是唯一事实源，表里再写一遍会漂                     |
+| 幂等命名空间             | 调用索引的三个 operation 恒为 Call（带目标的 `quick.promote` 落点固定，除外）；其余带 session 是 SESSION，不带是 ACTOR。代码里没有 GLOBAL 命名空间：GLOBAL 是 quick 与全局实体的**范围**，命名空间仍是 ACTOR | A3 第 3 条；与写入流水线的 `admit` 一致                  |
+| 表的完整性               | 用例扫描 `src/` 全部 `pub const *_OPERATION` 与表逐项比对（两个方向），扫描本身带阳性对照                                                                                                                    | A3：不能用「其余」兜底，遗漏项要验红                     |
+| expected_target 的线格式 | `{kind:"NONE"}`、`{kind:"CREATE"}`、`{kind:"EXISTING", scope:{kind:"PROJECT"/"KNOWLEDGE", id}, generation}`；项目用内部 id；多余的键、未知的 kind 都是参数错误                                               | 项目代码可以改名，id 不变                                |
+| begin 的分支判定         | `begin_target` 一个函数供 resolve 与执行时核对共用：① TRASHED、③ quick、⑤ 报错是 NONE，② EXISTING，④ CREATE                                                                                                  | 判定只有一处，两边不会不一致                             |
+| 核对的位置               | 重放判定之后、任何写入之前；TRASHED 仍先于核对报 `PROJECT_DB_UNAVAILABLE`                                                                                                                                    | A3「只有没有可重放结果的新写入才核对」；s 不可写报业务错 |
+| CREATE 被别人建好        | begin：那个项目没有 RESTORED 世代就接上去；`project.create`：显式代码或目录已属于某个项目就是 TARGET_CHANGED；无目标 `quick.promote`：这期间已被晋升就是 TARGET_CHANGED（不接到那个项目，不写回执）          | A3 CREATE 一节                                           |
+| 落点固定的写入           | 目标必须就是这个 scope（否则 TARGET_CHANGED），世代交给 R4 屏障；显式 `expected_scope_generation` 优先于目标里的世代                                                                                         | A3：显式给的保留，不被 resolve 的值覆盖                  |
+| 知识写入                 | 目标必须是知识库（不看作者所在项目）；知识库还没有身份时 resolve 给 id 为空、世代为空的 EXISTING                                                                                                             | 知识库是数据根唯一的那个                                 |
+| 默认 session             | 只给白名单客户端：连接组身份相同、ONLINE、项目不在垃圾箱里的 session，取心跳最近的一个；begin 不取默认 session                                                                                               | A1；begin 的约定                                         |
+| principal 映射           | `project.create`、`quick.promote` 的 Agent：session 的 agent_id → actor → `AGENT_ANON`；session 写错报 SESSION_NOT_FOUND，不退回 actor；晋升没给 actor 时事件 actor 也取 session 的 agent                    | A3 的映射表                                              |
+| TARGET_CHANGED 的 fix    | 原调用去掉 `expected_target`、`expected_scope_generation` 与 `auto:` 开头的 op_id，即一次新签发                                                                                                              | A3：不带上下文的原调用                                   |
+
+### 追溯
+
+| 规则                      | 用例                                                                                                                                 |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| A3 映射表                 | `tests/ops.rs` 全部三个                                                                                                              |
+| A3 resolve 只读、分支判定 | `tests/target.rs::resolve_is_read_only_and_names_the_branch`、`http/tests/resolve.rs::resolve_reads_one_snapshot_and_writes_nothing` |
+| A3 目标核对（begin）      | `tests/target.rs::begin_checks_the_resolved_target`                                                                                  |
+| A3 目标核对（创建、晋升） | `tests/target.rs::create_and_promote_check_the_target`                                                                               |
+| A3 principal 映射         | `tests/target.rs::the_call_principal_follows_session_then_actor`                                                                     |
+| A3 写工具上的上下文       | `http/tests/resolve.rs::writes_carry_the_resolved_target`                                                                            |
+
+桥的签发、重试上下文、30 s 预算与 `RESULT_UNKNOWN` 见下一节。
+
+## 桥：签发、重试、连接组身份（`mcp-shim/src/sign.rs`、`identity.rs`，W4g）
+
+`atm-mcp.exe` 是 3.x 唯一的 MCP 入口：读 3.x 数据根的 `runtime\daemon.json`，只转发到三个静态 profile，写工具的
+`tools/call` 先签发再发送。黑盒用例 `http/tests/bridge.rs` 驱动真实的 exe，经一个可注入故障的代理连真实的 atm-http。
+
+### 规格没写死、由实现定下的
+
+| 位置              | 做法                                                                                                                                                                               | 理由                                              |
+| ----------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------- |
+| 完整显式调用      | begin 只看 op_id；知识写入看 session 与 op_id；其余写还要 project。完整的原样转发，不 resolve                                                                                      | A3：完整显式调用不生成任何东西                    |
+| 补什么            | 只补缺的 session、project、expected_target 与 `auto:<ULID>` op id；显式值一律不动；begin 的选择器（project、cwd）是 Agent 的输入，从不补                                           | A3：不覆盖 Agent 给的值                           |
+| 默认 session      | 桥自己从不挑 session：只有 resolve 给了才补；resolve 拒绝（如非白名单的 SESSION_REQUIRED）原样回给 Agent，写不发出                                                                 | A1：白名单判定只在服务端一处                      |
+| 重试              | 上下文签好后冻结；连接被拒、服务重启、STORE_BUSY 都用同一份上下文重发，不再 resolve；30 s 预算从收到调用起算，resolve 与重发共用                                                   | A3：重试换 op_id 或重新 resolve 都可能执行两次    |
+| 失败的两种结果    | 一次都没可能送达：SERVICE_UNAVAILABLE、`details.sent:false`，auto id 时 committed:false、fix.call 是原调用；可能送达过：RESULT_UNKNOWN、committed:"unknown"、fix.call 带完整上下文 | 照 fix.call 重试：已提交就重放，没提交就执行一次  |
+| 显式 op_id 没发出 | committed:"unknown"                                                                                                                                                                | 同一个 op_id 可能由别的连接发过，桥不能断言没提交 |
+| 系统随机数不可用  | 不生成可预测的 id：SERVICE_UNAVAILABLE，fix 是带上自己的 op_id                                                                                                                     |                                                   |
+| 连接组身份        | `<pid>:<FILETIME>@<clientInfo.name>`；pid 是第一个不是 shell 包装（cmd、PowerShell、pwsh、bash、sh、conhost）的祖先；父进程比子进程晚创建视为 pid 复用                             | A4；node.exe 不跳过，真实客户端在 W4j 逐个实测    |
+| 数据来源冲突      | `runtime\startup-state.json` 是 SOURCE_CONFLICT（或读不了、解析不了）时立刻报 `ATM_SOURCE_CONFLICT`，不等超时                                                                      | 07 §7：用户选好之前宿主什么都不服务               |
+| 没有 `--profile`  | 退出码 1，`MCP_PROFILE_REQUIRED`，提示从 ATM 窗口重新安装                                                                                                                          | 3.0 没有 legacy 全量入口                          |
+
+### 追溯
+
+| 规则                                 | 用例（`http/tests/bridge.rs`）                                                                                          |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| A3 签发、只补缺的、显式 op_id 原样   | `the_bridge_signs_writes_and_names_its_client`                                                                          |
+| A1 非白名单不补 session              | `non_whitelisted_clients_get_no_default_session`                                                                        |
+| A3 响应丢失、STORE_BUSY 用同一上下文 | `lost_responses_and_busy_replies_retry_the_same_context`                                                                |
+| A3 恢复与 resolve 交错               | `a_restore_between_resolve_and_write_is_scope_restored`                                                                 |
+| A3 预算耗尽                          | `an_unconfirmed_write_ends_in_result_unknown_with_its_context`、`no_service_means_service_unavailable_and_nothing_sent` |
+| 唤醒                                 | `a_missing_service_is_woken_and_then_used`、`a_write_wakes_a_service_that_went_away`                                    |
+| 07 §7 来源冲突                       | `a_source_conflict_is_reported_at_once`                                                                                 |
+| 06 #97 profile 必填                  | `a_missing_profile_is_refused`                                                                                          |
+| A4 连接组身份                        | `the_bridge_signs_writes_and_names_its_client`、`shell_wrappers_are_skipped_in_the_client_identity`                     |
+
+2.x 的 JS 桥（`mcp-stdio.cjs`）仍按原来的 stdio 契约测（`apps/desktop/test/mcp-stdio-bridge.test.ts`），不再与原生桥共用。
+打包脚本里把原生桥放进 2.x 安装包的那条路径在 W4i 随发布流水线一起改。
+
+## Agent REST：路由表、拒绝桩、删除守卫（`http/src/rest.rs`，W4h）
+
+`rest::ROUTES` 是 06 §2 的 109 条路由逐条的 3.0 处置，Agent HTTP 的 REST 部分完全由它生成；MCP 入口仍由
+`mcp::routes` 注册，表里只登记供快照核对。
+
+### 规格没写死、由实现定下的
+
+| 位置                  | 做法                                                                                                                                                                                     | 理由                                                                        |
+| --------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| #27 导出              | U\* 拒绝桩，不是 06 写的 A+U                                                                                                                                                             | 00 C-07（v6，晚于 06）：导出只给 User                                       |
+| 有对应工具的路由      | brief、任务列表 / 读 / 建 / 改、进度、记录、两条搜索、begin、end 走 MCP 工具的同一个校验器与处理器；路径里的项目代码、任务 key、session 注入参数；回执与错误信封与工具相同               | 一套参数词汇（Agent 易用第一）；不维护第二份映射                            |
+| 路径与参数冲突        | body / query 里的值与路径不同是 `INVALID_ARGUMENT`（problem `conflict`），`fix.call` 是用路径值改正后的同一调用                                                                          | 不悄悄挑一个                                                                |
+| 2.0 的 camelCase      | 顶层与 `items` 里的对象，工具认得的 camelCase 键改成 snake_case；同名的 snake_case 已在时不动，交给校验器报                                                                              | 2.0 的 CLI 与 GUIDE 用 camelCase                                            |
+| GET 的 query          | 数字与 `true` / `false` 由工具的校验器认；这里只补 2.0 CLI 的 `1` / `0` 布尔与逗号分隔的列表，其余原样交给校验器                                                                         | 与工具同一个校验器                                                          |
+| 没有工具的路由        | 项目列表与读、备份列表、导入预览、事件分页、review 请求、quick 列表 / 建 / 晋升、objective / milestone、项目创建、系统状态：各有一张参数表，走同一个校验器（别名、大小写、did_you_mean） | 同上                                                                        |
+| objective / milestone | 回执是固定形状的 ACK，另带新建实体本身（`objective` / `milestone`，含 id）                                                                                                               | 建 milestone、挂任务要用 objective 的 id，ACK 的 entities 里没有            |
+| 项目创建（#15）       | `path` 先 realpath 并取 git common dir；marker 与 git exclude 在提交之后写，如实报告 `marker_written`                                                                                    | 与 begin 同一个做法（C-L03）                                                |
+| 备份列表（#22）       | 照收 `project` 但不过滤，响应带 `scope:"store"`                                                                                                                                          | 3.0 的备份是整库的                                                          |
+| 事件分页（#79）       | `since` 是事件序号（与 `atm_delta` 的 `since_seq` 同义），升序；不给 `since` 是最新一页；不做体积裁剪                                                                                    | 它是 delta `oversized_event` 的回取入口，必须给出完整事件                   |
+| 系统状态（#1）        | 服务给单库的健康与计数（`impl:"rust"`、`layout:"single"`、项目数、全局序号）；运行时用 `RuntimeStatus` 补产品版本与转换状态，键冲突时服务的为准                                          | 服务层不知道版本与转换状态；数据来源冲突期间 HTTP 不起，冲突由桥报告（W4g） |
+| 拒绝信封（03 §5.2）   | details 是 `{principal:"AGENT", where, next_step}`，桩另带路由编号与能力名；`fix` 是 `ask_user`。服务层的 `require` 同样带 `where` 与 `next_step`（`Capability::user_entry`）            | 03 §5.2 原文；Agent 能把入口原样转告用户                                    |
+| U 与删                | 显式登记成 404：同一路径上别的方法存在、或会被同方法的参数路由接走（`ui/checklist/batch` 与拒绝桩 `ui/checklist/:id`）时，都是 404                                                       | T-GONE                                                                      |
+| 2xx                   | 新建（#15、51、52、65、75、80、85）201，其余 200                                                                                                                                         | 与 2.0 相同                                                                 |
+
+### 追溯
+
+| 验收            | 用例（`http/tests/rest.rs`）                                                                                                                     |
+| --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------ |
+| T-AG 表与快照   | `the_route_table_is_06_section_2_with_c07`（清单写死）、`every_agent_route_reaches_the_service`                                                  |
+| T-AG 工具同契约 | `tool_routes_speak_the_tool_contract`、`own_routes_cover_what_the_tools_do_not`                                                                  |
+| T-GONE          | `ui_only_and_deleted_routes_are_404`                                                                                                             |
+| T-DENY          | `every_user_only_route_is_refused_without_side_effects`（NS-1～NS-4、NS-7 与 User 阳性对照）、`an_agent_cannot_speak_as_the_user_on_quick_tasks` |
+| T-HINT          | `the_oversized_event_hint_resolves`、`the_review_request_hint_resolves`                                                                          |
+| 拒绝信封        | `domain/tests/capability.rs::every_user_side_refusal_names_where_and_the_next_step`                                                              |
+
+- **NS-5、NS-6、NS-8、NS-9**（子进程、网络、宿主、内存状态）在拒绝桩上没有通道：桩不读 body、不调服务。「桩绑上
+  处理器」的变异验红。服务层的判权仍由 W2h1 的权限矩阵（`service/tests/permissions.rs`）守着，「去掉 require」的
+  变异落在那里。
+- **CLI**：06 的 T-AG 要求 CLI 黑盒覆盖每条 A 路由。3.0 的 `atm.exe` 在 W6，到时用这张表驱动；这里先用 HTTP 黑盒逐条覆盖。

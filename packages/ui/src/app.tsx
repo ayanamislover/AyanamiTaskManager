@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { useEffect, useState } from "react";
+import { QueryClientProvider, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { AyanamiClient } from "@ayanami-task/client";
 import { createAyanamiQueryClient } from "./query-policy.js";
 import { DialogProvider } from "./components/atm-dialogs.js";
@@ -11,6 +11,8 @@ import { AppShell } from "./shell/app-shell.js";
 import { useProjectOrder } from "./project-order.js";
 import { ServiceStatus } from "./shell/service-status.js";
 import { CommandPalette } from "./features/command-palette.js";
+import { DataSourceChoicePage } from "./features/data-source-choice.js";
+import { DamagedDatabasePage } from "./features/damaged-database.js";
 import { TaskDrawer } from "./features/task-drawer.js";
 import { AppRouter } from "./routes/app-router.js";
 import type { KnowledgeDraftSeed } from "./features/knowledge.js";
@@ -20,9 +22,53 @@ import {
   useDesktopRouteNavigation,
   useRouteHash,
 } from "./routes/use-app-route.js";
-import type { AyanamiTaskManagerProps, DesktopBridge } from "./contracts.js";
+import type {
+  AyanamiTaskManagerProps,
+  DataSourceChoice,
+  DataSourceState,
+  DesktopBridge,
+} from "./contracts.js";
 import "./styles.css";
 import { requestNewProjectTask } from "./hooks/new-project-task.js";
+
+/**
+ * 宿主里服务的状态（07 §7）：数据源冲突、或正在按用户的选择启动时，内容区换成选源页。
+ * 回到「在服务」时让所有读重新来一遍：冲突期间失败的读不能留在界面上。浏览器预览没有桌面桥，永远是 null。
+ */
+function useDataSource(desktop: DesktopBridge | undefined) {
+  const queryClient = useQueryClient();
+  const [source, setSource] = useState<DataSourceState | null>(null);
+  useEffect(() => {
+    if (!desktop?.getDataSource) return;
+    let alive = true;
+    const unsubscribe = desktop.onDataSourceChange?.((next) => alive && setSource(next));
+    void desktop.getDataSource().then(
+      (next) => alive && setSource(next),
+      () => undefined,
+    );
+    return () => {
+      alive = false;
+      unsubscribe?.();
+    };
+  }, [desktop]);
+  const blocking =
+    source?.state === "SOURCE_CONFLICT" ||
+    source?.state === "DAMAGED" ||
+    (source?.state === "STARTING" && source.choosing);
+  const [wasBlocking, setWasBlocking] = useState(false);
+  useEffect(() => {
+    if (blocking) setWasBlocking(true);
+    else if (wasBlocking && source?.state === "SERVING") {
+      setWasBlocking(false);
+      void queryClient.invalidateQueries();
+    }
+  }, [blocking, wasBlocking, source, queryClient]);
+  const choose = async (choice: DataSourceChoice) => {
+    const next = await desktop!.chooseDataSource!(choice);
+    setSource(next);
+  };
+  return { source: blocking ? source : null, choose };
+}
 
 function App({
   client,
@@ -34,6 +80,7 @@ function App({
   brandLogoSrc?: string;
 }) {
   const projects = useQuery({ queryKey: ["projects"], queryFn: () => client.projects.list() });
+  const dataSource = useDataSource(desktop);
   const [route, setRoute] = useAppRouteState();
   const [palette, setPalette] = useState(false);
   const [drawer, setDrawer] = useState<{ project: string; key: string } | null>(null);
@@ -67,23 +114,36 @@ function App({
       theme={theme}
       statusSlot={<ServiceStatus error={projects.error} loading={projects.isPending} />}
       content={
-        <AppRouter
-          client={client}
-          desktop={desktop}
-          route={route}
-          projects={projectList}
-          projectsPending={projects.data === undefined}
-          projectsError={
-            projects.data === undefined && !projects.isFetching ? projects.error : null
-          }
-          onRetryProjects={() => void projects.refetch()}
-          notify={notify}
-          onRoute={setRoute}
-          onTask={openTaskInPlace}
-          knowledgeDraft={knowledgeDraft}
-          onKnowledgeDraft={setKnowledgeDraft}
-          onKnowledgeDraftConsumed={() => setKnowledgeDraft(null)}
-        />
+        dataSource.source?.state === "DAMAGED" ? (
+          <DamagedDatabasePage
+            source={dataSource.source}
+            copy={async (text, label) => {
+              if (desktop?.copyText) await desktop.copyText(text);
+              else await navigator.clipboard.writeText(text);
+              notify(`${label}已复制`);
+            }}
+          />
+        ) : dataSource.source ? (
+          <DataSourceChoicePage source={dataSource.source} choose={dataSource.choose} />
+        ) : (
+          <AppRouter
+            client={client}
+            desktop={desktop}
+            route={route}
+            projects={projectList}
+            projectsPending={projects.data === undefined}
+            projectsError={
+              projects.data === undefined && !projects.isFetching ? projects.error : null
+            }
+            onRetryProjects={() => void projects.refetch()}
+            notify={notify}
+            onRoute={setRoute}
+            onTask={openTaskInPlace}
+            knowledgeDraft={knowledgeDraft}
+            onKnowledgeDraft={setKnowledgeDraft}
+            onKnowledgeDraftConsumed={() => setKnowledgeDraft(null)}
+          />
+        )
       }
       paletteSlot={
         palette ? (

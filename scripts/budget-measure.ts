@@ -1,22 +1,26 @@
 /**
- * de-electron §2 预算实测（ATM-T-0523b）：在 output/ 下的沙箱里量当前构建。
+ * 3.0 预算实测（ATM 3 规格 08：协议 §1、验收线 §3）：在 output/ 下的沙箱里量当前构建。
  *
- *   pnpm exec tsx scripts/budget-measure.ts [--json output/de-electron-budget-raw.json]
- *     [--memory-only]   只量后台与关开窗内存（调内存时反复跑用），不量冷启动
+ *   pnpm exec tsx scripts/budget-measure.ts [--json output/budget-report.json]
+ *     [--memory-only]   只量首次转换与内存（调内存时反复跑用），不量冷启动
  *     [--cycles N]      关开窗轮数（默认 5）；看有没有缓慢上涨时加大
+ *     [--cold-runs N]   生产包前台、后台冷启动各几轮（默认 5；smoke 取 min(N, 3)）
  *
  * 量什么、怎么量：
- *   - 活动版本净 payload：output/package/app-<version> 递归字节；压缩更新包：zip 字节。
- *   - 后台（无窗口）常驻：生产便携包（portable zip 解到 output/budget-portable）以 --background
- *     拉起，数据根是真实规模样本库的副本；量宿主 + core 的 Private Bytes 与 Working Set。
- *     先空闲量一轮，再用 Agent 凭证打一批读请求（HTTP、定时器、订阅都在跑）后再量一轮。
- *   - 开窗：第二实例发 SHOW（用户再点一次入口），窗口可见后静置再量整棵进程树
- *     （宿主 + core + 本应用的 WebView2 全部进程）；WM_CLOSE 关窗（与点标题栏关闭同一条路径），
- *     等 WebView2 进程全部退出、静置后再量；关开 5 次，看是否回到开窗前的后台水位 ±10%。
- *   - 冷启动（不含 0–5 s 登录随机延迟）：生产包前台启动量 daemon.json 出现、服务健康、窗口可见；
- *     --background 启动量 daemon.json。renderer-ready 与可交互只有 smoke 构建能看（生产包没有
- *     CDP），用 smoke 构建另跑几轮：页内 MutationObserver 记 .atm-shell 挂载（= renderer 报到的
- *     条件）与侧栏项目列表出数据的时刻。
+ *   - 体积：output/package/app-<version> 递归字节（payload）、更新 zip、便携 zip、atm-setup.exe。
+ *   - 首次转换：2.x 根 L 是真实规模样本库的副本，N 空着，生产便携包 --background 拉起；量 spawn →
+ *     服务健康，期间轮询 N\runtime\startup-progress.json 记下每一次推进（「有进度」）。转换完成、
+ *     宿主退出后，把 L 与 N 存成快照；之后每一轮都从这份快照开始——冷启动不含首次转换（08 §3）。
+ *   - 内存（主进程 Private Bytes 为主、Working Set 为辅；WebView2 树单独报）：每个场景静置 ≥10 s，
+ *     每 2 s 采一次、共 5 次，取中位数。场景：后台空闲；Agent 负载之后（项目列表、brief、深分页、
+ *     中文检索、events、system/status，都是 Agent HTTP 上的 3.x 路由）；开窗稳定；关窗后（WebView2
+ *     进程全部退出再静置）；关开窗 N 轮。导出一个大项目之后（导出只给用户，走界面的 bridge）用
+ *     smoke 构建单独量。
+ *   - 冷启动（不含 0–5 s 登录随机延迟）：生产包前台 N 轮记 daemon.json 出现、服务健康、窗口可见；
+ *     --background N 轮记服务健康；smoke 构建 3 轮经 CDP 记 renderer-ready（.atm-shell 挂载）与
+ *     可交互（侧栏项目列表出数据且窗口可见）。报中位数与最大值。
+ *   - 判定：summary.verdicts 逐条对 08 §3 的验收线；有一条不达标就以退出码 1 结束（预算不放宽，
+ *     除非用户同意）。
  *
  * 约束：
  *   - 数据根、合成 home、解包目录都在 output/ 下，名字固定；不碰真实安装与真实数据根。
@@ -25,6 +29,12 @@
  *   - 只结束自己拉起的宿主：优先经它的 second-instance 管道发 QUIT，不行再按 PID 结束进程树。
  *   - daemon.json 里的 Agent 令牌只在本进程内存里用来发读请求，不写日志、不进报告。
  */
+// 先于一切：这里拉起的宿主窗口不抢焦点、压在最底层（scripts/test-windows.ts）。
+import "./test-windows.js";
+import { agentFetch } from "./agent-fetch.js";
+import { binariesOf } from "./candidate-binaries.js";
+import { budgetVerdicts, stats } from "./budget-verdicts.js";
+import { rendererRequest } from "./renderer-user-request.js";
 import { spawn, type ChildProcess } from "node:child_process";
 import { createInterface } from "node:readline";
 import { connect } from "node:net";
@@ -38,12 +48,11 @@ import {
   statSync,
   writeFileSync,
 } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { performance } from "node:perf_hooks";
 import { chromium } from "@playwright/test";
-import { unzipSync } from "fflate";
-import Database from "better-sqlite3";
-import { AyanamiTaskService } from "../packages/application/src/index.js";
+import { copySampleLibrary, ensureSampleLibrary } from "./sample-library.js";
+import { unpackPortable } from "./portable-unpack.js";
 import { NativeWindowProbe } from "./native-window.js";
 import {
   assertSandboxDataDir,
@@ -57,6 +66,7 @@ import {
   smokeExecutable,
   smokeHostEnvironment,
   sourceVersion,
+  v3Root,
   withLoginItemsRestored,
 } from "./smoke-host.js";
 import { powershellScratch } from "./powershell-scratch.js";
@@ -71,6 +81,7 @@ import {
   type ProcessTree,
   type RawProcessTree,
 } from "./budget-probe.js";
+import { powershellArgs } from "./windows-text.js";
 
 const MIB = 1024 * 1024;
 const jsonPath = resolve(
@@ -89,6 +100,11 @@ const memoryOnly = process.argv.includes("--memory-only");
 const seedDir = assertSandboxDataDir(join(outputRoot, "budget-seed-data"));
 const runDir = assertSandboxDataDir(join(outputRoot, "budget-run-data"));
 const homeDir = assertSandboxDataDir(join(outputRoot, "budget-run-home"));
+/** 首次转换完成时的 L 与 N：冷启动与内存的每一轮都从这里恢复。 */
+const convertedLDir = assertSandboxDataDir(join(outputRoot, "budget-converted-data"));
+const convertedNDir = assertSandboxDataDir(join(outputRoot, "budget-converted-n"));
+/** 3.0 根 N（smokeHostEnvironment 把 ATM3_DATA_DIR 指到这里）：运行文件、WebView 数据与 lifecycle 日志。 */
+const v3Dir = v3Root(homeDir);
 const portableRoot = assertSandboxDataDir(join(outputRoot, "budget-portable"));
 const packageDir = join(outputRoot, "package");
 
@@ -120,151 +136,69 @@ function directoryBytes(path: string): { bytes: number; files: number } {
 
 // ---------------------------------------------------------------- 样本库
 
-const SEED = { projects: 100, workItems: 10_000, searchDocuments: 40_000 } as const;
-
-/** 与 scripts/benchmark.ts 同一规模与同一做法：100 个项目、主项目 1 万条任务、4 万条检索文档。 */
-async function ensureSeed(): Promise<Record<string, unknown>> {
-  const marker = join(seedDir, "budget-seed.json");
-  if (existsSync(marker)) return JSON.parse(readFileSync(marker, "utf8"));
-  rmSync(seedDir, { recursive: true, force: true });
-  mkdirSync(seedDir, { recursive: true });
-  const started = performance.now();
-  const service = await AyanamiTaskService.open({
-    dataDir: seedDir,
-    migrationsRoot: join(repoRoot, "migrations"),
-  });
-  const primary = await service.createProject({ name: "预算基准", sourcePath: null, code: "PFM" });
-  for (let index = 1; index < SEED.projects; index += 1)
-    await service.createProject({
-      name: `预算项目 ${index}`,
-      sourcePath: null,
-      code: `P${String(index).padStart(3, "0")}`,
-    });
-  const objective = await service.createObjectiveAsUser(primary.code, "budget-objective", {
-    title: "预算基准目标",
-    description: "真实规模样本库",
-    definitionOfDone: [],
-  });
-  for (let batch = 0; batch < SEED.workItems / 50; batch += 1)
-    await service.createWorkItemsAsUser(
-      primary.code,
-      `budget-batch-${batch}`,
-      Array.from({ length: 50 }, (_, offset) => {
-        const index = batch * 50 + offset;
-        return {
-          clientRef: `budget-${index}`,
-          objectiveId: objective.id,
-          title: `预算任务 ${String(index).padStart(5, "0")}`,
-          description: `真实规模样本任务 ${index}`,
-          type: "TASK" as const,
-          priority: index % 20 === 0 ? ("HIGH" as const) : ("NORMAL" as const),
-          status: index % 3 === 0 ? ("BACKLOG" as const) : ("READY" as const),
-          acceptance: [],
-          checklist: [],
-          verificationRequired: false,
-        };
-      }),
-    );
-  service.close();
-  const direct = new Database(primary.databasePath);
-  direct.pragma("journal_mode = WAL");
-  const insertDocument = direct.prepare(
-    "INSERT INTO search_documents(entity_type, entity_id, entity_key, title, body, updated_at) VALUES (?, ?, ?, ?, ?, ?)",
-  );
-  const insertFts = direct.prepare(
-    "INSERT INTO search_documents_fts(entity_type, entity_id, entity_key, title, body) VALUES (?, ?, ?, ?, ?)",
-  );
-  direct.transaction(() => {
-    const now = new Date().toISOString();
-    for (let index = 0; index < SEED.searchDocuments; index += 1) {
-      const id = `budget-document-${index}`;
-      const key = `DOC-${index}`;
-      const title = `中文预算文档 ${index}`;
-      const body = `项目验证关键词 任务管理 本地优先 第 ${index} 条`;
-      insertDocument.run("RECORD", id, key, title, body, now);
-      insertFts.run("RECORD", id, key, title, body);
-    }
-  })();
-  direct.pragma("wal_checkpoint(TRUNCATE)");
-  direct.close();
-  const seed = {
-    ...SEED,
-    seededMs: Math.round(performance.now() - started),
-    bytes: directoryBytes(seedDir).bytes,
-  };
-  writeFileSync(marker, JSON.stringify(seed, null, 2));
-  return seed;
+/** 首次转换用的数据：L 换回样本副本，N 清空。 */
+function freshRunData(): void {
+  copySampleLibrary(seedDir, runDir);
+  resetHome(false);
 }
 
-function freshRunData(keepWebview = false): void {
-  const webview = join(runDir, "webview");
-  const keep = keepWebview && existsSync(webview);
-  for (const entry of existsSync(runDir) ? readdirSync(runDir) : [])
-    if (!(keep && entry === "webview"))
-      rmSync(join(runDir, entry), { recursive: true, force: true });
-  mkdirSync(runDir, { recursive: true });
-  cpSync(seedDir, runDir, {
+/** 转换完成、宿主退出之后：L 与 N 存成快照（N 的运行文件、WebView 数据与日志不进快照）。 */
+function snapshotConverted(): void {
+  if (!existsSync(join(v3Dir, "conversion.json")))
+    throw new Error("N 里没有 conversion.json：转换没完成");
+  rmSync(convertedLDir, { recursive: true, force: true, maxRetries: 2 });
+  cpSync(runDir, convertedLDir, { recursive: true });
+  const transient = ["runtime", "webview", "logs"].map((name) => join(v3Dir, name).toLowerCase());
+  rmSync(convertedNDir, { recursive: true, force: true, maxRetries: 2 });
+  cpSync(v3Dir, convertedNDir, {
     recursive: true,
-    filter: (source) => !source.endsWith("budget-seed.json"),
+    filter: (source) => !transient.includes(source.toLowerCase()),
   });
-  // registry 记的是项目库的绝对路径：不改写的话，副本里的服务会去开样本目录里的那些库，
-  // 每一轮都改写同一份样本（实测第一版就是这样把备份写进了样本目录）。
-  const registry = new Database(join(runDir, "registry", "registry.sqlite"));
-  try {
-    registry
-      .prepare("UPDATE projects SET db_path = replace(db_path, ?, ?)")
-      .run(seedDir, resolve(runDir));
-    const leaked = registry
-      .prepare("SELECT count(*) AS count FROM projects WHERE instr(lower(db_path), lower(?)) > 0")
-      .get(seedDir) as { count: number };
-    if (leaked.count > 0) throw new Error("副本 registry 仍指向样本目录");
-  } finally {
-    registry.close();
-  }
-  rmSync(homeDir, { recursive: true, force: true, maxRetries: 2 });
+}
+
+/**
+ * 冷启动与内存的每一轮：L 与 N 换回首次转换完成时的快照，冷启动就不含首次转换（08 §3）。
+ * keepWebview 时留下 N\webview（和用户日常登录一样，WebView2 的用户数据目录已经在）。
+ * 两份快照都在同一组固定路径上转出来，里面记的绝对路径原样可用。
+ */
+function convertedRunData(keepWebview = false): void {
+  if (!existsSync(join(convertedNDir, "conversion.json")))
+    throw new Error("没有转换后的快照：先量首次转换");
+  rmSync(runDir, { recursive: true, force: true, maxRetries: 2 });
+  cpSync(convertedLDir, runDir, { recursive: true });
+  resetHome(keepWebview);
+  cpSync(convertedNDir, v3Dir, { recursive: true });
+}
+
+/** 合成 home 清空（keepWebview 时只留 N\webview）。 */
+function resetHome(keepWebview: boolean): void {
+  const keep = keepWebview && existsSync(join(v3Dir, "webview"));
+  const clear = (dir: string, except: string | null) => {
+    for (const entry of existsSync(dir) ? readdirSync(dir) : [])
+      if (entry !== except)
+        rmSync(join(dir, entry), { recursive: true, force: true, maxRetries: 2 });
+  };
+  if (keep) {
+    clear(homeDir, "Local");
+    clear(join(homeDir, "Local"), basename(v3Dir));
+    clear(v3Dir, "webview");
+  } else rmSync(homeDir, { recursive: true, force: true, maxRetries: 2 });
   mkdirSync(join(homeDir, "Roaming"), { recursive: true });
   mkdirSync(join(homeDir, "Local"), { recursive: true });
 }
 
 // ---------------------------------------------------------------- 生产便携包
 
-function ensurePortable(): string {
-  const zip = readdirSync(packageDir).find((name) => name.endsWith("-portable.zip"));
-  if (!zip) throw new Error(`output/package 里没有便携 zip`);
-  const marker = join(portableRoot, "source.json");
-  const source = { zip, bytes: statSync(join(packageDir, zip)).size };
-  const stale =
-    !existsSync(marker) ||
-    JSON.stringify(JSON.parse(readFileSync(marker, "utf8"))) !== JSON.stringify(source);
-  if (stale) {
-    rmSync(portableRoot, { recursive: true, force: true });
-    const files = unzipSync(readFileSync(join(packageDir, zip)));
-    for (const [name, bytes] of Object.entries(files)) {
-      if (name.endsWith("/")) continue;
-      const target = join(portableRoot, ...name.split("/"));
-      mkdirSync(resolve(target, ".."), { recursive: true });
-      writeFileSync(target, bytes);
-    }
-    writeFileSync(marker, JSON.stringify(source));
-  }
-  const folder = readdirSync(portableRoot).find((name) => name.startsWith("AyanamiTaskManager-"));
-  if (!folder) throw new Error("便携 zip 里没有版本目录");
-  const executable = join(portableRoot, folder, "AyanamiTaskManager.exe");
-  if (!existsSync(join(portableRoot, folder, "portable")))
-    throw new Error("便携目录缺 portable 标记");
-  return executable;
-}
-
 // ---------------------------------------------------------------- 进程探针（Toolhelp32 + 标量）
 
 class ProcessProbe {
   // Add-Type 的编译目录不落 %TEMP%（见 powershell-scratch.ts），进程退出就删。
   private readonly scratch = powershellScratch(repoRoot);
-  private readonly child = spawn(
-    "powershell.exe",
-    ["-NoProfile", "-NonInteractive", "-Command", PROBE],
-    { windowsHide: true, stdio: ["pipe", "pipe", "pipe"], env: this.scratch.env },
-  );
+  private readonly child = spawn("powershell.exe", powershellArgs(PROBE), {
+    windowsHide: true,
+    stdio: ["pipe", "pipe", "pipe"],
+    env: this.scratch.env,
+  });
   private readonly waiting: Array<(line: string) => void> = [];
   private queue: Promise<unknown> = Promise.resolve();
   readonly ready: Promise<void>;
@@ -360,26 +294,24 @@ type Sample = {
   atMs: number;
   processes: number;
   webview2: number;
-  hostCorePrivate: number;
-  hostCoreWs: number;
+  hostPrivate: number;
+  hostWs: number;
   totalPrivate: number;
   totalWs: number;
   rows?: ProcessRow[];
 };
 
 function summarize(rows: ProcessRow[], hostPid: number, keepRows = false): Sample {
-  const hostCore = rows.filter(
-    (row) =>
-      row.pid === hostPid || (row.ppid === hostPid && row.exe.toLowerCase() === "atm-core.exe"),
-  );
+  // 3.x 单进程：服务在宿主里，没有 core 子进程。
+  const host = rows.filter((row) => row.pid === hostPid);
   const sum = (list: ProcessRow[], key: "ws" | "priv") =>
     list.reduce((total, row) => total + row[key], 0);
   return {
     atMs: Date.now(),
     processes: rows.length,
     webview2: rows.filter((row) => row.exe.toLowerCase() === "msedgewebview2.exe").length,
-    hostCorePrivate: sum(hostCore, "priv"),
-    hostCoreWs: sum(hostCore, "ws"),
+    hostPrivate: sum(host, "priv"),
+    hostWs: sum(host, "ws"),
     totalPrivate: sum(rows, "priv"),
     totalWs: sum(rows, "ws"),
     ...(keepRows ? { rows } : {}),
@@ -404,8 +336,8 @@ async function sampleSeries(
     median: {
       processes: pick("processes"),
       webview2: pick("webview2"),
-      hostCorePrivate: pick("hostCorePrivate"),
-      hostCoreWs: pick("hostCoreWs"),
+      hostPrivate: pick("hostPrivate"),
+      hostWs: pick("hostWs"),
       totalPrivate: pick("totalPrivate"),
       totalWs: pick("totalWs"),
     },
@@ -440,14 +372,14 @@ async function until<T>(
 }
 
 async function healthy(): Promise<{ token: string; endpoint: string; pid: number } | null> {
-  if (!existsSync(runtimeFile(runDir))) return null;
+  if (!existsSync(runtimeFile(v3Dir))) return null;
   try {
-    const runtime = JSON.parse(readFileSync(runtimeFile(runDir), "utf8")) as {
+    const runtime = JSON.parse(readFileSync(runtimeFile(v3Dir), "utf8")) as {
       token: string;
       endpoint: string;
       pid: number;
     };
-    const response = await fetch(`${runtime.endpoint}/api/v1/system/status`, {
+    const response = await agentFetch(`${runtime.endpoint}/api/v1/system/status`, {
       headers: { authorization: `Bearer ${runtime.token}` },
     });
     return response.ok ? runtime : null;
@@ -577,37 +509,154 @@ async function requestShow(host: Host): Promise<void> {
 
 // ---------------------------------------------------------------- 各项测量
 
-async function measureMemory(executable: string, probe: ProcessProbe, windows: NativeWindowProbe) {
+/** WM_CLOSE 关窗（与点标题栏关闭同一条路径），等本应用的 WebView2 进程全部退出；返回用了多久。 */
+async function closeWindow(probe: ProcessProbe, host: Host, hwnd: number): Promise<number> {
+  const closeAt = Date.now();
+  await probe.close(hwnd);
+  await until(
+    async () => {
+      const tree = await probe.tree(host.pid);
+      // 查不了的成员可能正是 WebView2：等它。
+      if (tree.unknown.length > 0) return null;
+      return tree.rows.some((row) => row.exe.toLowerCase() === "msedgewebview2.exe")
+        ? null
+        : tree.rows;
+    },
+    30_000,
+    "WebView2 进程退出",
+    100,
+  );
+  return Date.now() - closeAt;
+}
+
+/** 每个场景的采样（08 §1）：静置后每 2 s 采一次，共 5 次，取中位数。 */
+const SAMPLES = 5;
+const SAMPLE_INTERVAL_MS = 2_000;
+/** 深分页翻到第几页：100 条一页，第 40 页 ≈ 2.x 口径的 offset 4000。 */
+const DEEP_PAGES = 40;
+
+type ProgressStep = { atMs: number; phase: string; done: number; total: number };
+
+/**
+ * 首次转换（08 §3：样本库 ≤ 60 s，并且有进度）：L 是样本副本、N 空着，--background 拉起生产包，
+ * 量 spawn → 服务健康；期间轮询 startup-progress.json，记下每一次推进。完成后宿主退出、存快照。
+ */
+async function firstConversion(executable: string, probe: ProcessProbe) {
   freshRunData();
+  const progressPath = join(v3Dir, "runtime", "startup-progress.json");
+  const host = startHost(executable, ["--background"]);
+  const started = performance.now();
+  const progress: ProgressStep[] = [];
+  let last = "";
+  try {
+    await until(
+      async () => {
+        try {
+          const current = JSON.parse(readFileSync(progressPath, "utf8")) as {
+            phase: string;
+            progress: { done: number; total: number };
+          };
+          const key = `${current.phase}:${current.progress.done}/${current.progress.total}`;
+          if (key !== last) {
+            last = key;
+            progress.push({
+              atMs: Math.round(performance.now() - started),
+              phase: current.phase,
+              done: current.progress.done,
+              total: current.progress.total,
+            });
+          }
+        } catch {
+          // 还没写，或正在原子替换：下一轮再读。
+        }
+        return (await healthy()) ? true : null;
+      },
+      180_000,
+      "首次转换完成并健康",
+      50,
+    );
+    const healthMs = Math.round(performance.now() - started);
+    await sleep(3_000);
+    const quit = await quitHost(host, probe);
+    const converted = existsSync(join(v3Dir, "conversion.json"));
+    return {
+      healthMs,
+      converted,
+      progress,
+      phases: [...new Set(progress.map((step) => step.phase))],
+      quit,
+    };
+  } finally {
+    if (!childExited(host.child)) killProcessTree(host.pid);
+  }
+}
+
+/**
+ * Agent 负载（08 §1 场景 2，都走 Agent HTTP 的 3.x 路由）：项目列表、brief（3.x 里 overview 只给
+ * 界面）、深分页（按 next_cursor 翻 DEEP_PAGES 页）、中文检索、events、system/status。
+ * 任何一个不是 200 都算这一轮没测成：拿 404 的空回包量出来的内存不算数。
+ */
+async function agentLoad(runtime: { endpoint: string; token: string }) {
+  const headers = { authorization: `Bearer ${runtime.token}` };
+  const get = async (path: string) => {
+    const response = await agentFetch(`${runtime.endpoint}${path}`, { headers });
+    const text = Buffer.from(await response.arrayBuffer()).toString("utf8");
+    if (response.status !== 200)
+      throw new Error(`Agent 负载请求失败：${path} → ${response.status} ${text.slice(0, 300)}`);
+    return text;
+  };
+  const fixed = [
+    "/api/v1/projects",
+    "/api/v1/projects/PFM/brief",
+    `/api/v1/projects/PFM/search?query=${encodeURIComponent("项目验证关键词")}&limit=20`,
+    "/api/v1/projects/PFM/events?since=0&limit=100",
+    "/api/v1/system/status",
+  ];
+  let requests = 0;
+  let deepestPage = 0;
+  for (let round = 0; round < 10; round += 1) {
+    for (const path of fixed) {
+      await get(path);
+      requests += 1;
+    }
+    let cursor: string | null = null;
+    for (let page = 1; page <= DEEP_PAGES; page += 1) {
+      const body = JSON.parse(
+        await get(
+          `/api/v1/projects/PFM/work-items?status=READY&limit=100${cursor === null ? "" : `&cursor=${encodeURIComponent(cursor)}`}`,
+        ),
+      ) as { items: unknown[]; has_more: boolean; next_cursor?: string | null };
+      requests += 1;
+      deepestPage = Math.max(deepestPage, page);
+      if (!body.has_more || !body.next_cursor) break;
+      cursor = body.next_cursor;
+    }
+  }
+  return { requests, deepestPage, paths: [...fixed, "/api/v1/projects/PFM/work-items (cursor)"] };
+}
+
+async function measureMemory(executable: string, probe: ProcessProbe, windows: NativeWindowProbe) {
+  convertedRunData();
   const host = startHost(executable, ["--background"]);
   try {
     const runtime = await until(healthy, 60_000, "服务健康", 100);
     // 起来之后先空着：首轮维护（2.5 s）、订阅、更新检查都跑过一遍。
     await sleep(30_000);
-    const idle = await sampleSeries(probe, host.pid, 5, 2_000);
+    const idle = await sampleSeries(probe, host.pid, SAMPLES, SAMPLE_INTERVAL_MS);
 
-    // Agent 读流量：概览、项目列表、大项目分页、中文检索、增量。
-    const auth = { authorization: `Bearer ${runtime.token}` };
-    const paths = [
-      "/api/v1/overview",
-      "/api/v1/projects",
-      "/api/v1/projects/PFM/work-items?status=READY&limit=100&offset=4000",
-      `/api/v1/projects/PFM/search?query=${encodeURIComponent("项目验证关键词")}&limit=20`,
-      "/api/v1/projects/PFM/events?since=0&limit=100",
-      "/api/v1/system/status",
-    ];
-    const statuses: Record<string, number> = {};
-    for (let round = 0; round < 10; round += 1)
-      for (const path of paths) {
-        const response = await fetch(`${runtime.endpoint}${path}`, { headers: auth });
-        await response.arrayBuffer();
-        statuses[path] = response.status;
-      }
+    const agent = await agentLoad(runtime);
     await sleep(15_000);
-    const afterAgent = await sampleSeries(probe, host.pid, 5, 2_000);
+    const afterAgent = await sampleSeries(probe, host.pid, SAMPLES, SAMPLE_INTERVAL_MS);
 
-    const cyclesOut: Array<Record<string, unknown>> = [];
-    for (let cycle = 0; cycle <= cycles; cycle += 1) {
+    type Series = Awaited<ReturnType<typeof sampleSeries>>;
+    const cyclesOut: Array<{
+      cycle: number;
+      visibleMs: number;
+      webviewGoneMs: number;
+      open: Series;
+      closed: Series;
+    }> = [];
+    for (let cycle = 1; cycle <= cycles; cycle += 1) {
       const showAt = Date.now();
       await requestShow(host);
       const visible = await until(
@@ -621,29 +670,14 @@ async function measureMemory(executable: string, probe: ProcessProbe, windows: N
       );
       const visibleMs = Date.now() - showAt;
       await sleep(10_000);
-      const open = await sampleSeries(probe, host.pid, 3, 2_000);
-      const closeAt = Date.now();
-      await probe.close(visible.hwnd);
-      await until(
-        async () => {
-          const tree = await probe.tree(host.pid);
-          // 查不了的成员可能正是 WebView2：等它。
-          if (tree.unknown.length > 0) return null;
-          return tree.rows.some((row) => row.exe.toLowerCase() === "msedgewebview2.exe")
-            ? null
-            : tree.rows;
-        },
-        30_000,
-        "WebView2 进程退出",
-        100,
-      );
-      const webviewGoneMs = Date.now() - closeAt;
+      const open = await sampleSeries(probe, host.pid, SAMPLES, SAMPLE_INTERVAL_MS);
+      const webviewGoneMs = await closeWindow(probe, host, visible.hwnd);
       await sleep(10_000);
-      const closed = await sampleSeries(probe, host.pid, 3, 2_000);
+      const closed = await sampleSeries(probe, host.pid, SAMPLES, SAMPLE_INTERVAL_MS);
       cyclesOut.push({ cycle, visibleMs, webviewGoneMs, open, closed });
     }
-    // core 自己每分钟记一次 rss/heapUsed（core-main.ts heartbeat）：用来区分 V8 堆与堆外增长。
-    const lifecycle = join(runDir, "logs", "lifecycle-core.ndjson");
+    // 宿主每分钟记一次 rss（lifecycle heartbeat），与开关窗事件放在一起看有没有缓慢上涨。
+    const lifecycle = join(v3Dir, "logs", "lifecycle.ndjson");
     const heartbeats = existsSync(lifecycle)
       ? readFileSync(lifecycle, "utf8")
           .split(/\r?\n/u)
@@ -653,7 +687,7 @@ async function measureMemory(executable: string, probe: ProcessProbe, windows: N
           .map((line) => JSON.parse(line) as Record<string, unknown>)
       : [];
     return {
-      statuses,
+      agent,
       idle,
       afterAgent,
       cycles: cyclesOut,
@@ -676,7 +710,7 @@ async function coldStartProduction(
   const started = performance.now();
   try {
     const daemonJson = await until(
-      () => (existsSync(runtimeFile(runDir)) ? performance.now() - started : null),
+      () => (existsSync(runtimeFile(v3Dir)) ? performance.now() - started : null),
       30_000,
       "daemon.json",
       10,
@@ -711,19 +745,19 @@ async function coldStartProduction(
  * 页面里的时刻用 Date.now()，与本进程同一个系统时钟。
  */
 async function coldStartSmoke(executable: string, probe: ProcessProbe, windows: NativeWindowProbe) {
-  rmSync(devToolsPortFile(runDir), { force: true });
+  rmSync(devToolsPortFile(v3Dir), { force: true });
   const host = startHost(executable, []);
   const startedWall = Date.now();
   const started = performance.now();
   let browser: Awaited<ReturnType<typeof chromium.connectOverCDP>> | null = null;
   try {
     const daemonJson = await until(
-      () => (existsSync(runtimeFile(runDir)) ? performance.now() - started : null),
+      () => (existsSync(runtimeFile(v3Dir)) ? performance.now() - started : null),
       30_000,
       "daemon.json",
       10,
     );
-    const port = await until(() => readDevToolsPort(runDir), 30_000, "DevTools 端口", 10);
+    const port = await until(() => readDevToolsPort(v3Dir), 30_000, "DevTools 端口", 10);
     browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
     const connectedWall = Date.now();
     const page = await until(
@@ -790,6 +824,73 @@ async function coldStartSmoke(executable: string, probe: ProcessProbe, windows: 
   }
 }
 
+/**
+ * 08 §1 场景 6：导出一个大项目之后。导出只给用户（00 C-07），走界面的 bridge；生产包没有 CDP，
+ * 只能用 smoke 构建从外面驱动（宿主代码与生产包相同，只多 CDP 与 SMOKE_QUIT）。同一个进程里：
+ * 后台空闲先量一轮作对照 → 开窗、经 bridge 导出主项目 → 关窗、WebView2 退干净、静置后再量。
+ */
+async function measureExport(executable: string, probe: ProcessProbe, windows: NativeWindowProbe) {
+  convertedRunData(true);
+  rmSync(devToolsPortFile(v3Dir), { force: true });
+  const host = startHost(executable, ["--background"]);
+  let browser: Awaited<ReturnType<typeof chromium.connectOverCDP>> | null = null;
+  try {
+    await until(healthy, 60_000, "服务健康", 100);
+    await sleep(30_000);
+    const idle = await sampleSeries(probe, host.pid, SAMPLES, SAMPLE_INTERVAL_MS);
+
+    await requestShow(host);
+    const visible = await until(
+      async () => {
+        const state = await windows.appWindow(host.pid);
+        return state?.visible ? state : null;
+      },
+      30_000,
+      "窗口可见",
+      50,
+    );
+    const port = await until(() => readDevToolsPort(v3Dir), 30_000, "DevTools 端口", 20);
+    browser = await chromium.connectOverCDP(`http://127.0.0.1:${port}`);
+    const page = await until(
+      () =>
+        browser!
+          .contexts()
+          .flatMap((context) => context.pages())
+          .find((candidate) => candidate.url().startsWith("https://atm.localhost")) ?? null,
+      30_000,
+      "页面",
+      20,
+    );
+    const exportStarted = performance.now();
+    const exported = await rendererRequest<Record<string, unknown>>(
+      page,
+      "POST",
+      "/api/v1/exports/PFM",
+    );
+    const exportMs = Math.round(performance.now() - exportStarted);
+    if (exported.status < 200 || exported.status >= 300)
+      throw new Error(
+        `导出失败：${exported.status} ${JSON.stringify(exported.body).slice(0, 300)}`,
+      );
+    await browser.close().catch(() => undefined);
+    browser = null;
+    const webviewGoneMs = await closeWindow(probe, host, visible.hwnd);
+    await sleep(10_000);
+    const afterExport = await sampleSeries(probe, host.pid, SAMPLES, SAMPLE_INTERVAL_MS);
+    return {
+      idle,
+      exportStatus: exported.status,
+      exportMs,
+      webviewGoneMs,
+      afterExport,
+      quit: await quitHost(host, probe),
+    };
+  } finally {
+    await browser?.close().catch(() => undefined);
+    if (!childExited(host.child)) killProcessTree(host.pid);
+  }
+}
+
 // ---------------------------------------------------------------- 主流程
 
 const report: Record<string, unknown> = {
@@ -822,75 +923,115 @@ report.sizes = {
 };
 save();
 
-report.seed = await ensureSeed();
-const production = ensurePortable();
+report.seed = await ensureSampleLibrary(seedDir, repoRoot);
+const production = unpackPortable(packageDir, portableRoot);
 const smoke = smokeExecutable();
 report.executables = { production, smoke };
+// 候选绑定（L6）：量的是哪份二进制。生产便携包对 release 那套，smoke 构建对 smoke 那套。
+report.binaries = {
+  production: binariesOf(dirname(production)),
+  smoke: binariesOf(dirname(smoke)),
+};
 save();
 
 const probe = new ProcessProbe();
 let windows: NativeWindowProbe | null = null;
+let conversion: Awaited<ReturnType<typeof firstConversion>> | undefined;
+let memory: Awaited<ReturnType<typeof measureMemory>> | undefined;
+const foreground: Array<Awaited<ReturnType<typeof coldStartProduction>>> = [];
+const background: Array<Awaited<ReturnType<typeof coldStartProduction>>> = [];
+const smokeRuns: Array<Awaited<ReturnType<typeof coldStartSmoke>>> = [];
 try {
   await probe.ready;
   windows = NativeWindowProbe.start();
   const nativeWindows = windows;
   await nativeWindows.windows(process.pid);
   await withLoginItemsRestored(async () => {
-    const memory = await measureMemory(production, probe, nativeWindows);
+    // 首次转换只量一次：之后每一轮都从它转出来的快照开始，冷启动不含首次转换。
+    conversion = await firstConversion(production, probe);
+    report.conversion = conversion;
+    save();
+    requireExitConfirmed("首次转换", conversion.quit);
+    snapshotConverted();
+
+    memory = await measureMemory(production, probe, nativeWindows);
     report.memory = memory;
     save();
     requireExitConfirmed("内存测量", memory.quit);
     if (memoryOnly) return;
 
-    const production_foreground = [];
-    const production_background = [];
-    // 第一轮带着刚才那次运行留下的 WebView2 用户数据目录，和用户日常登录一致。
+    // 第一轮带着内存测量那次运行留下的 WebView2 用户数据目录，和用户日常登录一致。
     for (let run = 0; run < coldRuns; run += 1) {
-      freshRunData(true);
+      convertedRunData(true);
       const result = await coldStartProduction(production, probe, nativeWindows, false);
-      production_foreground.push(result);
-      report.coldStartProduction = { foreground: production_foreground };
+      foreground.push(result);
+      report.coldStartProduction = { foreground };
       save();
       requireExitConfirmed(`前台冷启动第 ${run + 1} 轮`, result.quit);
     }
     for (let run = 0; run < coldRuns; run += 1) {
-      freshRunData(true);
+      convertedRunData(true);
       const result = await coldStartProduction(production, probe, nativeWindows, true);
-      production_background.push(result);
-      report.coldStartProduction = {
-        foreground: production_foreground,
-        background: production_background,
-      };
+      background.push(result);
+      report.coldStartProduction = { foreground, background };
       save();
       requireExitConfirmed(`后台冷启动第 ${run + 1} 轮`, result.quit);
     }
-    report.coldStartProduction = {
-      foreground: production_foreground,
-      background: production_background,
-    };
-    save();
 
-    const smokeRuns = [];
     for (let run = 0; run < Math.min(coldRuns, 3); run += 1) {
-      freshRunData(true);
+      convertedRunData(true);
       const result = await coldStartSmoke(smoke, probe, nativeWindows);
       smokeRuns.push(result);
       report.coldStartSmoke = smokeRuns;
       save();
       requireExitConfirmed(`smoke 冷启动第 ${run + 1} 轮`, result.quit);
     }
-    report.coldStartSmoke = smokeRuns;
+
+    const exported = await measureExport(smoke, probe, nativeWindows);
+    report.exportScenario = exported;
+    save();
+    requireExitConfirmed("导出场景", exported.quit);
   }, [production, smoke]);
 } catch (error) {
   report.error = error instanceof Error ? (error.stack ?? error.message) : String(error);
 } finally {
   probe.stop();
   windows?.close();
+  const verdicts = budgetVerdicts({
+    sizes: report.sizes as { payloadBytes: number; updateZipBytes: number },
+    conversion,
+    memory,
+    foreground,
+    background,
+  });
+  report.summary = {
+    coldStart: {
+      foreground: {
+        daemonJsonMs: stats(foreground.map((run) => run.daemonJsonMs)),
+        healthMs: stats(foreground.map((run) => run.healthMs)),
+        windowVisibleMs: stats(foreground.map((run) => run.windowVisibleMs)),
+      },
+      background: { healthMs: stats(background.map((run) => run.healthMs)) },
+      smoke: {
+        rendererReadyMs: stats(smokeRuns.map((run) => run.rendererReadyMs)),
+        interactiveMs: stats(smokeRuns.map((run) => run.interactiveMs)),
+      },
+    },
+    verdicts,
+    // 只量了内存（--memory-only）时冷启动那几条必然没有样本：不算全部达标。
+    allPass: verdicts.every((verdict) => verdict.pass),
+  };
   report.completedAt = new Date().toISOString();
   save();
 }
 process.stdout.write(`${jsonPath}\n`);
+const failedVerdicts = (
+  report.summary as { verdicts: Array<{ item: string; pass: boolean }> }
+).verdicts.filter((verdict) => !verdict.pass);
 if (report.error) {
   process.stderr.write(`${String(report.error)}\n`);
+  process.exitCode = 1;
+} else if (failedVerdicts.length > 0) {
+  process.stderr.write(`预算未达标：${failedVerdicts.map((verdict) => verdict.item).join("、")}\n`);
   process.exitCode = 1;
 }

@@ -55,15 +55,24 @@ export async function walkProductFiles(
   return result;
 }
 
+/**
+ * atm-setup 在开始菜单写的修复入口（`setup/src/env.rs` 的 `REPAIR_SHORTCUT_NAME`，有用例核对）。
+ * 名字里没有产品名：只按产品名找会漏掉它。distribution-smoke 第一次在干净机器上跑时，
+ * 安装后的检查因此说「没有修复入口」，其实是查找漏了它（W8 关口在 CI 上）。
+ */
+export const REPAIR_SHORTCUT_NAME = "ATM 修复.lnk";
+
 export async function findProductShortcuts(
   roots: string[] = productShortcutRoots(),
 ): Promise<string[]> {
   const found = (await Promise.all(roots.map(async (root) => await walkProductFiles(root)))).flat();
-  return found.filter(
-    (path) =>
-      path.toLowerCase().endsWith(".lnk") &&
-      basename(path).toLowerCase().includes("ayanamitaskmanager"),
-  );
+  return found.filter((path) => {
+    const name = basename(path).toLowerCase();
+    return (
+      name.endsWith(".lnk") &&
+      (name.includes("ayanamitaskmanager") || name === REPAIR_SHORTCUT_NAME.toLowerCase())
+    );
+  });
 }
 
 /** PowerShell 单引号字面量：只有单引号要翻倍，反斜杠原样（JSON 的转义规则在这里是错的）。 */
