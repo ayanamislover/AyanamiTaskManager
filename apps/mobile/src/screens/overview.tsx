@@ -206,9 +206,10 @@ function ProjectCard({ project }: { project: ProjectHead }) {
         <CaretRight className="project-chevron" size={16} weight="bold" aria-hidden="true" />
       </span>
       <span className="project-counts">
-        {stats.map((stat, index) => (
+        {stats.map((stat) => (
           <span key={stat.label} data-tone={stat.tone}>
-            {index > 0 ? <i aria-hidden="true">·</i> : null}
+            {/* 每项都带分隔点，行首那一个由 .project-counts 裁掉，折行后不会以「·」起头。 */}
+            <i aria-hidden="true">·</i>
             {stat.label} <b>{stat.value}</b>
           </span>
         ))}
