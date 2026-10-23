@@ -12,7 +12,7 @@
   </p>
 
   <p>
-    <a href="https://github.com/ayanamislover/AyanamiTaskManager/releases/latest"><strong>下载稳定版</strong></a>
+    <a href="https://github.com/ayanamislover/AyanamiTaskManager/releases/latest"><strong>下载 3.0</strong></a>
     ·
     <a href="./docs/user-guide.md">用户指南</a>
     ·
@@ -20,7 +20,7 @@
     ·
     <a href="./docs/security-model.md">安全模型</a>
     ·
-    <a href="./docs/local-knowledge.md">共享知识库</a>
+    <a href="./docs/troubleshooting.md">排障</a>
   </p>
 </div>
 
@@ -29,173 +29,48 @@
 <div align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/screenshot-project-dark.png" />
-    <img src="./docs/assets/screenshot-project-light.png" alt="ATM 项目页：当前进行、阻塞与等待、Agent 与领取、下一步四个面板，以及数据投影状态" width="100%" />
+    <img src="./docs/assets/screenshot-project-light.png" alt="ATM 项目页：目标、里程碑、健康度、进度，以及任务列表" width="100%" />
   </picture>
-  <p><sub>示例数据：结构取自真实项目，字面内容已全部重写。可用 <code>pnpm exec tsx scripts/render-readme-screenshot.ts</code> 复现。</sub></p>
+  <p><sub>示例数据：结构取自真实项目，字面内容全部重写。用 <code>pnpm exec tsx scripts/render-readme-screenshot.ts</code> 复现。</sub></p>
 </div>
 
 ---
 
-Agent 写代码不难，难的是**换一次 Session 就忘了项目到哪儿了**。上下文被压缩、进程重启、换个 Agent 接手——项目历史只活在聊天记录里，于是每次开工都要重新翻一遍，翻完还未必翻对。
+Agent 写代码不难，难的是**换一次 Session 就忘了项目到哪儿了**。上下文被压缩、进程重启、换一个 Agent 接手，项目历史只留在聊天记录里，每次开工都得重新翻一遍，翻完还未必翻对。
 
-AyanamiTaskManager（ATM）把计划、任务、进度、阻塞、长期记录、证据和 Session 交接收进一个稳定的事实源，Agent 开工时读一份 brief 就能接着干。它不是另一份待办清单，也不保存整段对话，只保留真正会影响项目推进的结构化事实。桌面 UI、MCP、CLI 与本地 HTTP 共用同一套事务应用服务——你在界面上看到的，和 Agent 读到的，永远是同一份数据。
+AyanamiTaskManager（ATM）把计划、任务、进度、阻塞、长期记录、证据和 Session 交接放进一个本地事实源。Agent 开工时读一份 brief 就能接着做。它不保存整段对话，只留下会影响项目推进的结构化事实。桌面界面、MCP、CLI 和本地 HTTP 读写的是同一个数据库，你在界面上看到的就是 Agent 读到的。
 
-## 3.0.0 · 单进程原生宿主，数据换到新目录
+## 三步用起来
 
-这一版把 2.x 的 Electron + Node 换成**一个 Rust 原生宿主进程**：窗口、托盘、本地服务与 Agent 接入都在这一个进程里，界面由系统自带的 WebView2 渲染，安装包不再携带 Node。
+1. 从 [Latest Release](https://github.com/ayanamislover/AyanamiTaskManager/releases/latest) 下载 `atm-setup.exe` 并运行。支持 Windows 10/11 x64；界面用系统自带的 WebView2 渲染，一般已经预装。不想安装就用 `AyanamiTaskManager-*-win-x64-portable.zip`。
+2. 打开 ATM，进入「设置 → Agent 接入」，给要用的客户端点「安装」：Codex、Claude Desktop、Claude Code、Kimi Code。ATM 只合并自己的条目，写入前先备份原配置。装完重启客户端。
+3. 对 Agent 说一句：
 
-- **数据换到新目录。** 3.0 的数据位于 `%LOCALAPPDATA%\AyanamiTaskManager3`，所有项目、共享知识与设置都在一个数据库 `data\atm.sqlite` 里。
-- **首次启动自动转换 2.x 数据。** 3.0 第一次启动时把 `%LOCALAPPDATA%\AyanamiTaskManager` 里的 2.x 数据转换到新目录；旧目录保持不动。
-- **1.x 要先升级到 2.x。** 3.0 只从 2.x 的数据转换，仍在用 1.x 时先升级到 2.x，再升级到 3.0。
-- **可以经安装器回退到 2.x。** 2.x 数据原样可用，但 3.0 期间的写入不会带回 2.x；回退后再升级的处理见[用户指南](./docs/user-guide.md#从-2x-升级与回退)。
-- **数据库读不出时有恢复页。** ATM 不服务，也不改写数据库和备份（只记下这一状态、照常写日志），窗口列出整库备份并给出恢复命令；步骤见[排障指南](./docs/troubleshooting.md#数据库读不出)。
+   > 执行项目前先访问 ATM 工具，并阅读 `%LOCALAPPDATA%\AyanamiTaskManager\ATM_AGENT_GUIDE.md`；受管开发任务的计划、进度、证据和交接均通过 ATM 管理。
 
-正式发布状态和制品证据以 [GitHub Release](https://github.com/ayanamislover/AyanamiTaskManager/releases) 为准。
+之后 Agent 会自己开项目、拆任务、写进度、交接。项目还没登记时自动创建，只有名字、代码或目录拿不准时才问你。
 
-## 1.1.5 · 知识能完整读回，交接更稳
+已经在用 2.x 或 1.x，先看[升级与回退](#升级与回退)。
 
-这一轮聚焦知识工作流的可靠性：**合法内容读得全，保存重试不重复，长历史也能找到最初的版本。**
+## Agent 怎么用它
 
-- **大元数据也能完整回读。** 长来源、标签和适用条件按固定修订分页返回，编辑前能拿到完整内容，不把截断预览当成原文覆盖。
-- **会话结束，已成功的写入仍可安全重试。** 完全相同的原请求返回原回执；新操作仍需要活动会话，不会复活已关闭 Session。
-- **编辑不再被慢响应覆盖。** 保存过程中锁定竞争入口；标签连续输入保留分隔符，修订历史可翻页，满 30 条来源的导出导入仍能保存。
-- **历史列表更轻。** SQLite 先去掉不需要的正文再返回历史；新回执引用不可变修订，避免重复保存大正文。
-- **实时连接有明确退路。** 增量发送串行补齐，异常、发送超时和断开清理均有回归覆盖；慢客户端可按已处理序号重新连接。
+一次 Session 的最短路径：
 
-保留 Agent 直接发布知识和原有桌面设计，不增加逐篇人工审批。升级前请保留备份；如需退回不支持紧凑回执的旧版本，应恢复对应备份。查看[审计修复与验收说明](./docs/audit-1.1.4-remediation.md)；正式发布状态和制品证据以 [GitHub Release](https://github.com/ayanamislover/AyanamiTaskManager/releases) 为准。
+1. `atm_begin` 开工，直接用返回的 brief。
+2. 挑一个 READY 的叶子 WorkItem，`atm_task_patch(operation: "start")` 领取。
+3. 状态真的变了才写 progress；决策、事实、风险和证据写 record。
+4. 验证完 `complete`（可以带上证据），收工 `atm_end`。
 
-### 共享知识库 · 让经验跨项目复用
-
-**项目事实留在项目里，通用知识按需读取。** 共享知识与项目数据在同一个本地数据库里，作为独立范围保存、备份与恢复；项目归档后，已经发布的知识修订仍可引用。
-
-- **先筛选，再读正文。** `atm_knowledge_search` 返回摘要、使用场景和适用范围；`atm_knowledge_get` 再读取选中条目或指定章节。不把整库塞进开工 brief。
-- **引用不随编辑漂移。** 使用不可变的 `id@revisionId`，正文可按字符预算分页读取；条目修改后，旧修订仍有自己的身份。
-- **Agent 直接沉淀，不用手工搬运。** MCP 可检索、读取、发布和更新共享知识，自动记录会话作者、固定修订与防覆盖基线；桌面端仍可管理、归档和导入／导出。参考资料不授予新的执行权限。
-
-同时改进了 Session 身份与角色恢复、批量操作 ACK 的最终版本回执、幂等请求一致性，以及启动和长正文读取的开销。安装包携带更新后的 Agent Guide、完整文档与 `atm-knowledge` Skill。
-
-查看[知识库使用说明](./docs/local-knowledge.md) · [版本与下载](https://github.com/ayanamislover/AyanamiTaskManager/releases)。正式发布状态以 Release 页面为准。
-
-## 为什么需要 ATM
-
-| 能力             | ATM 提供的结果                                                                                                                       |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
-| **一份事实源**   | 目标、里程碑、叶子 WorkItem、依赖、验收标准与证据始终一致；界面和 Agent 读同一份数据                                                 |
-| **Agent 原生**   | Codex、Claude Desktop、Claude Code、Kimi Code 经 MCP 直接领取、推进、交接，不需要人来转述                                            |
-| **压缩后可恢复** | brief / delta / 精确读取 + 长期 records，开工读一份摘要即可续上，不重扫历史                                                          |
-| **跨项目知识**   | 本地共享知识库、不可变修订和按需读取，让通用经验复用而不淹没开工 brief                                                               |
-| **并发不打架**   | Session 领取、幂等 mutation、乐观并发版本号、租约过期接管、Review 状态全程可追溯                                                     |
-| **工程可见**     | 项目时间线、Session 的 Git 上下文、工程统计、在线备份恢复与发布证据同屏呈现                                                          |
-| **完全本地**     | 全部数据在一个本地 SQLite 库，仅监听 loopback，令牌每次启动轮换，不需要任何云端账号                                                  |
-| **手机随身**     | 手机 App 看任务、发任务，勾一下「交给 Claude」就自动领取、完善目标并开工；中继服务器像 RustDesk 一样自己配，内容端到端加密，默认关闭 |
-
-## 用 ATM 开发 ATM
-
-这个项目自己的规划、任务拆分、跨 Agent 交接与验收，也由 ATM 管理。我们在日常开发中验证的，不只是能不能记下一条任务，而是**换一个 Session 后，能否准确接着做**。
-
-<details>
-<summary>展开历史实战快照 · 2026-08-29（不是当前版本统计）</summary>
-
-ATM 自己就是用 ATM 管的。下面是本机 SQLite 里的真实计数，截至 2026-08-29：
-
-| 指标          | ATM 自身开发                | 本机全部 11 个受管项目 |
-| ------------- | --------------------------- | ---------------------- |
-| 工作项        | 300（282 完成 / 18 取消）   | 1,129（871 完成）      |
-| Agent Session | 273，来自 117 个 Agent 身份 | 819                    |
-| 进度更新      | 399                         | 1,304                  |
-| 长期记录      | 130                         | 1,019                  |
-| 事件          | 3,038                       | 11,659                 |
-| 时间跨度      | 22 天（8/7 – 8/29）         | —                      |
-
-值得看的不是总量，是**平均每个 Session 只推进约 1.1 个工作项**——273 次开工分布在 117 个不同的 Agent 身份上：Codex 系 144 次、CLI 71 次、Claude Code 30 次，其余为子 Agent 与本地工具。这正是 Agent 开发的常态：单次会话很短，换手极其频繁。同一段时间里，这些 Session 产出了 47,184 行生产代码与 45,314 行测试代码，分布在 648 个文件中。
-
-支撑这个节奏的不是更长的上下文，是每次开工都能拿到一份可信的 brief。
-
-</details>
-
-## 性能与交付证据
-
-事实源必须足够轻，才能成为每次开工的习惯。[性能基准](./scripts/benchmark.ts) 使用真实 SQLite，以下是验收上限，不是当前设备上的实测承诺：
-
-| 场景                        | 门禁上限   |
-| --------------------------- | ---------- |
-| 应用服务打开数据库          | 3,000 ms   |
-| 100 个项目的总览            | p95 200 ms |
-| 10,000 条任务的筛选列表     | p95 200 ms |
-| 50,000 篇项目文档的中文检索 | p95 300 ms |
-| 单次写入并落事件            | p95 100 ms |
-| 增量拉取 100 条事件         | p95 100 ms |
-| 隔离服务探针的空闲 RSS      | 150 MB     |
-
-服务启动时间不等于桌面首屏时间，服务 RSS 也不是整个桌面应用（宿主进程与 WebView2 进程）的内存总量。知识库检索与这里的项目文档检索是不同入口；每个版本的实际结果请看对应发行报告。
-
-每个版本还带一份可核对的证据包：候选先算指纹（gitHead、工作区脏状态哈希、源码哈希、lockfile 哈希、各阶段哈希），再逐层验证，每层记录产物的 SHA-256——
-
-**SOURCE_DONE → CI_VERIFIED → PACKAGED_VERIFIED → INSTALLED_VERIFIED**
-
-任一层哈希对不上，流水线就停在那一层。源码测试、打包运行、安装／升级／卸载和本机部署是不同证据，不能互相代替。测试数量与实测值由当轮报告生成，不把旧版本的绿灯贴到新候选上。完整规则见[发布检查表](./docs/release-checklist.md)。
-
-## 产品结构
-
-<div align="center">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/architecture-dark.svg" />
-    <img src="./docs/assets/architecture-light.svg" alt="AI Agents 经 MCP 连接本地动态 bridge，与桌面 UI（WebView2）、CLI 共用同一套应用服务，写入本地 SQLite" width="100%" />
-  </picture>
-</div>
-
-正式桌面 daemon 每次启动都会轮换本地鉴权令牌。Agent 配置连接的是动态 bridge，而不是把 endpoint 或 token 固定写进长期配置；完整边界见[本地安全模型](./docs/security-model.md)。
-
-## 安装
-
-当前稳定版支持 Windows 10/11 x64。
-
-1. 打开 [Latest Release](https://github.com/ayanamislover/AyanamiTaskManager/releases/latest)。
-2. 日常使用选择 `atm-setup.exe`；需要免安装时选择 `AyanamiTaskManager-*-win-x64-portable.zip`。
-3. 启动 ATM，在“设置 → Agent 接入”中安装 Codex、Claude Desktop、Claude Code 或 Kimi Code 配置。
-4. 开启“登录启动”后，ATM 会在 Windows 登录后随机延迟后台启动；关闭窗口只会收进托盘。
-
-3.0 的应用数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager3`（数据库为 `data\atm.sqlite`）。`%LOCALAPPDATA%\AyanamiTaskManager` 保留 2.x 数据（3.0 只读不写，供回退），安装版还会把精简 Agent Guide 与完整文档同步到这里，换设备后仍能从同一路径发现使用说明。
-
-下载后可用 Release 附带的 `SHA256SUMS.txt` 核对文件。Setup 与 portable 是两种分发方式，使用差异见[便携版说明](./docs/portable-usage.md)；`atm-*-win-x64.zip` 与同名 `.json` 是安装版的更新包和清单，由安装器读取，不是另一个需要手动安装的应用。
-
-> [!IMPORTANT]
-> 不要把 `%LOCALAPPDATA%\AyanamiTaskManager3\runtime\daemon.json`、Bearer token、`data\atm.sqlite` 或 `backups\` 提交到仓库。ATM 的运行时发现文件只服务当前 Windows 用户和当前 daemon 实例。
-
-## Agent 接入
-
-ATM 会最小合并现有配置，并在写入前创建备份：
-
-| 客户端         | MCP 配置                                      | 规则与技能                                      |
-| -------------- | --------------------------------------------- | ----------------------------------------------- |
-| Codex          | `~/.codex/config.toml`                        | `~/.codex/AGENTS.md`、`~/.codex/skills`         |
-| Claude Desktop | `%APPDATA%/Claude/claude_desktop_config.json` | `~/.claude/CLAUDE.md`、`~/.claude/skills`       |
-| Claude Code    | 由官方 `claude` CLI 注册                      | 与 Claude Desktop 共用                          |
-| Kimi Code      | `~/.kimi-code/mcp.json`                       | `~/.kimi-code/AGENTS.md`、`~/.kimi-code/skills` |
-
-最短工作流：
-
-1. `atm_begin` 开工，并直接使用返回的 brief。
-2. 按需读取 READY 叶子 WorkItem，`atm_task_patch(operation: "start")` 领取并开工。
-3. 只在状态真正变化时写 progress；长期事实、决策、风险和证据写 record。
-4. 验证后 `complete`（可同时带证据），会话结束调用 `atm_end`。
-
-只有上下文压缩、长时间离开或明确恢复 working set 时才调用 `atm_brief`（Claude Code、Codex 上可以不带参数）。出错时照错误里的 `fix` 执行。任务过大时，应先按“可交付结果 + 可验证验收”拆成独立叶子 WorkItem。
-
-安装后让 Agent 从这里开始，无需记住源码仓库在哪：
-
-> 执行项目前先访问 ATM 工具，并阅读 `%LOCALAPPDATA%\AyanamiTaskManager\ATM_AGENT_GUIDE.md`；受管开发任务的计划、进度、证据和交接均通过 ATM 管理。
-
-完整规则和字段约定见 [Agent 接入指南](./docs/agent-integration.md) 与 [Agent Guide 在线版](./ATM_AGENT_GUIDE.md)。受管项目未注册时自动创建；只有无法可靠确定项目名称、代码或目录时才请求确认。
+上下文被压缩或离开很久，再调一次 `atm_brief` 取回 working set，不用重扫历史。出错时照着错误里的 `fix` 改。任务太大时先按「可交付结果 + 可验证的验收」拆成叶子 WorkItem。
 
 | Profile  | 做什么                                         | 工具                                                                                                                                        |
 | -------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
 | `core`   | 开工、找任务、拆任务、改状态、进度与记录、交接 | `atm_begin`、`atm_brief`、`atm_task_list`、`atm_task_get`、`atm_task_create`、`atm_task_patch`、`atm_progress_add`、`atm_record`、`atm_end` |
-| `memory` | 搜索与跨项目共享知识                           | `atm_search`、`atm_knowledge_search` → `atm_knowledge_get`、`atm_knowledge_save`（先查重，更新带旧修订 ID）                                 |
+| `memory` | 搜索，以及跨项目共享的知识                     | `atm_search`、`atm_knowledge_search` → `atm_knowledge_get`、`atm_knowledge_save`                                                            |
 
-需要参考通用经验时，先搜索知识摘要，再按适用范围读取正文；重要结论保留 `id@revisionId` 引用。有可复用结论时由 Agent 直接发布，不要求用户逐篇导入。更新前用 `atm_knowledge_get(for_edit=true)` 读取完整正文和编辑元数据。项目 Record 只存项目事实，不复制整篇知识。若升级后看不到新工具，请重载客户端 MCP。
+**共享知识库**放跨项目的规范、接口约定和排障经验。Agent 先用 `atm_knowledge_search` 看摘要和适用范围，再用 `atm_knowledge_get` 读选中的那篇；引用写成不可变的 `id@revisionId`，原文以后再改也不会漂。有可复用的结论时，Agent 直接发布，不用你逐篇导入。项目 Record 只放项目自己的事实。
 
-旧配置里的 `actions` profile 是 core 的别名，照常可用；`atm_delta`、`atm_feedback` 并入了 `atm_brief(since_seq)` 与 `atm_record(kind: "ATM_FEEDBACK")`，旧名仍可调用。下面的工具数、字节数、预算与余量由代码生成，避免文档数字漂移。
+旧配置里的 `actions` profile 是 core 的别名，照常可用；`atm_delta`、`atm_feedback` 分别并入了 `atm_brief(since_seq)` 与 `atm_record(kind: "ATM_FEEDBACK")`，旧名仍能调用。完整规则见 [Agent 接入指南](./docs/agent-integration.md) 与 [Agent Guide](./ATM_AGENT_GUIDE.md)。
 
 <!-- MCP_TOOL_STATS:BEGIN -->
 
@@ -222,31 +97,106 @@ ATM 会最小合并现有配置，并在写入前创建备份：
 
 <!-- MCP_TOOL_STATS:END -->
 
-## 日常使用
+## 桌面端
 
 <div align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/screenshot-overview-dark.png" />
-    <img src="./docs/assets/screenshot-overview-light.png" alt="ATM 总览页：跨项目 KPI、等你处理清单、各项目健康度与最近变化时间线" width="100%" />
+    <img src="./docs/assets/screenshot-overview-light.png" alt="ATM 总览页：跨项目 KPI、等你处理清单、各项目健康度与最近变化" width="100%" />
   </picture>
-  <p><sub>总览把所有受管项目的进行中、受阻、等待和在线 Agent 汇到一屏。</sub></p>
+  <p><sub>总览把所有受管项目的进行中、受阻、等待和在线 Agent 放在一屏。</sub></p>
 </div>
 
-桌面端提供：
+- **总览与项目**：健康度、里程碑、目标日期、进度来源，「等你处理」逐条列出等你回复、受阻和待验收的任务。
+- **任务**：列表、看板、时间线、层级四种视图，加上长期记录；筛选组合可以存成视图。
+- **Agent**：按项目聚合在线与历史 Session，显示每个 Session 的 Git 分支、HEAD 和工作区状态，同一分支上有多个 Session 时提醒。
+- **知识库**：修订历史、归档，Markdown 导入导出。
+- **数据安全**：在线备份与恢复、导入导出；数据库读不出时进入恢复页，列出可用的整库备份。
+- **常驻**：关窗收进托盘，服务和 Agent 接入照常运行；可以开机后台启动。安装版还登记一个「AyanamiTaskManager 保活」计划任务，ATM 意外退出后约 5 分钟内自动拉起。
+- **手机同步（可选，默认关闭）**：在手机上看任务、发任务，勾「交给 Claude」就自动领取开工。ATM 不内置任何服务器，需要你自建 [atm-relay](./apps/relay/README.md)；内容端到端加密，见[手机同步说明](./docs/mobile-sync.md)。
 
-- 总览、项目、任务列表/看板/时间线/层级和长期记录；
-- Agent 按项目聚合、Session Git 上下文、claim 与交接；
-- 临时任务晋升、保存视图和中文搜索；
-- 在线备份恢复、导入导出、工程统计与托盘通知；
-- 本地共享知识库、修订历史、归档与 Markdown 导入／导出；
-- 开机随机延迟后台启动，以及关闭到托盘的常驻模式。
-- 可选的手机同步与 Claude 自动开工：ATM 不内置任何服务器，需要你自建 [atm-relay](./apps/relay/README.md)（或任何兼容同一 HTTP 子集的服务）；设计与安全边界见[手机同步说明](./docs/mobile-sync.md)。
+操作细节见[用户指南](./docs/user-guide.md)，遇到问题看[排障指南](./docs/troubleshooting.md)，便携版的差异见[便携版说明](./docs/portable-usage.md)。
 
-更完整的操作说明见[用户指南](./docs/user-guide.md)，故障定位见[排障指南](./docs/troubleshooting.md)，便携版差异见[便携版说明](./docs/portable-usage.md)。
+## 3.0：一个进程
+
+3.0 把核心从 Node 用 Rust 重写了。窗口、托盘、本地服务、MCP 和 CLI 都在一个 `AyanamiTaskManager.exe` 进程里，安装包里不再有 Node。下表是 3.0.0 候选在发布链里的实测值，每一条都是发布门禁，超线就不出包：
+
+| 项目                       | 门禁线              | 3.0.0 实测 |
+| -------------------------- | ------------------- | ---------: |
+| 装好后的程序目录           | ≤ 20 MiB            |   16.0 MiB |
+| 更新包                     | ≤ 10 MiB            |    7.7 MiB |
+| 后台空闲内存（Private）    | ≤ 40 MiB            |    7.3 MiB |
+| Agent 调用之后             | ≤ 60 MiB            |    9.4 MiB |
+| 关窗之后                   | ≤ 后台空闲 + 50 MiB |   22.1 MiB |
+| 反复关开窗口               | 不上涨超过 5 MiB    |   +1.1 MiB |
+| 冷启动到后台可用           | ≤ 500 ms            |     132 ms |
+| 冷启动到窗口出现           | ≤ 1200 ms           |     621 ms |
+| 2.x 数据首次转换（样本库） | ≤ 60 s              |     12.6 s |
+
+内存是 Windows 的 Private 字节，中位数，取 5 轮；体积和转换各量一次。每个版本的实测值在它的 Release 附带的 test-report 里。
+
+## 升级与回退
+
+- **数据在哪**：3.0 的数据在 `%LOCALAPPDATA%\AyanamiTaskManager3`，项目、共享知识和设置都在 `data\atm.sqlite` 一个库里。`%LOCALAPPDATA%\AyanamiTaskManager` 留着 2.x 的数据（3.0 只读不写），还有 ATM 同步过去的 Agent Guide、文档与 Skills。
+- **从 2.x 升级**：直接装 3.0。第一次启动时把 2.x 的数据转换进新目录，旧目录不动；转换失败会自动撤回到 2.x。
+- **从 1.x 升级**：先装 [v2.0.0](https://github.com/ayanamislover/AyanamiTaskManager/releases/tag/v2.0.0)，再装 3.0。3.0 只认 2.x 的数据。
+- **Agent 配置不用改**：3.0 把新的 `atm-mcp.exe` 放在原来的位置，启动时也会修正指向旧版本的条目。升级后重启客户端即可。
+- **回退**：开始菜单里的「ATM 修复」可以回到升级前的 2.x，2.x 的数据原样可用，3.0 期间的写入不会带回去。之后再升级时，回退期间没在 2.x 里写过东西就无损接回；写过的话以 2.x 为准重新转换，3.0 的数据整份封存在 `AyanamiTaskManager3\superseded\`，不删除。细节见[用户指南](./docs/user-guide.md#从-2x-升级与回退)。
+
+> [!IMPORTANT]
+> 不要把 `%LOCALAPPDATA%\AyanamiTaskManager3\runtime\daemon.json`、Bearer token、`data\atm.sqlite` 或 `backups\` 提交到仓库，也不要贴进对话或 ATM Record。
+
+## 安全边界
+
+- **只在本机**：服务只监听 loopback，不需要任何云端账号。
+- **令牌不落进配置**：每次启动生成新的 Bearer token，写进只给当前 Windows 用户用的发现文件；Agent 配置连的是 stdio bridge，它每次请求都重新读发现文件，所以配置里既没有端口也没有 token。
+- **Agent 替不了你**：Agent 持有的凭证做不了只属于用户的操作（比如授权、改设置）。调用了会得到 403，什么都不变。
+- **手机同步不信任中继**：内容在本机加密后才发出去，中继只看得到键名、大小和时间；中继 token 和空间密钥经 Windows DPAPI 加密保存，不会退回明文。
+
+完整的威胁模型和非目标见[本地安全模型](./docs/security-model.md)。
+
+<div align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./docs/assets/architecture-dark.svg" />
+    <img src="./docs/assets/architecture-light.svg" alt="AI Agents 经 MCP 连接本地动态 bridge，与桌面 UI（WebView2）、CLI 共用同一套应用服务，写入本地 SQLite" width="100%" />
+  </picture>
+</div>
+
+## 每个版本怎么验证
+
+候选先算指纹：gitHead、工作区状态、源码与 lockfile 的哈希、各阶段输入的哈希。然后逐层验证，每层记下产物的 SHA-256：
+
+**SOURCE_DONE → CI_VERIFIED → PACKAGED_VERIFIED → INSTALLED_VERIFIED**
+
+任何一层的哈希对不上，流水线就停在那一层。源码测试、打包后运行、在干净机器上安装 / 升级 / 卸载，是三种不同的证据，不能互相顶替。测试数量和实测值由当轮报告生成，旧版本的绿灯不会贴到新候选上。每个 Release 附带 test-report、`release.json` 与 `SHA256SUMS.txt`，写明这一版走到了哪一层。
+
+发布链本身的规则见[发布检查表](./docs/release-checklist.md)。
+
+## 用 ATM 开发 ATM
+
+这个项目自己的规划、任务拆分、跨 Agent 交接和验收也由 ATM 管理。我们每天验证的不是「能不能记下一条任务」，而是**换一个 Session 之后，能不能准确地接着做**。3.0 的 Rust 重写就是这样做完的：每个阶段由 Claude 实现、Codex 独立评审，迭代到通过为止，中间换了无数次 Session。
+
+<details>
+<summary>展开历史快照 · 2026-08-29（不是当前统计）</summary>
+
+截至 2026-08-29，本机 SQLite 里的真实计数：
+
+| 指标          | ATM 自身开发                | 本机全部 11 个受管项目 |
+| ------------- | --------------------------- | ---------------------- |
+| 工作项        | 300（282 完成 / 18 取消）   | 1,129（871 完成）      |
+| Agent Session | 273，来自 117 个 Agent 身份 | 819                    |
+| 进度更新      | 399                         | 1,304                  |
+| 长期记录      | 130                         | 1,019                  |
+| 事件          | 3,038                       | 11,659                 |
+| 时间跨度      | 22 天（8/7 – 8/29）         | —                      |
+
+值得看的不是总量，而是**平均每个 Session 只推进约 1.1 个工作项**：273 次开工分布在 117 个 Agent 身份上，Codex 系 144 次、CLI 71 次、Claude Code 30 次，其余是子 Agent 与本地工具。单次会话很短、换手极频繁，这是 Agent 开发的常态。撑住这个节奏的不是更长的上下文，而是每次开工都拿得到一份可信的 brief。
+
+</details>
 
 ## 本地开发
 
-需要 Node.js `>=22.13.0`、pnpm `11.16.0` 与 Rust 工具链（版本钉在 `apps/desktop/native/rust-toolchain.toml`，rustup 在该目录首次构建时自动安装）：
+需要 Node.js `>=22.13.0`、pnpm `11.16.0` 和 Rust 工具链。Rust 版本钉在 `apps/desktop/native/rust-toolchain.toml`，第一次在该目录构建时 rustup 会自动安装。
 
 ```powershell
 git clone https://github.com/ayanamislover/AyanamiTaskManager.git
@@ -256,9 +206,9 @@ pnpm install --frozen-lockfile
 pnpm dev
 ```
 
-`pnpm dev` 先构建 debug 原生宿主，再用 Vite 持续构建界面到 `apps/desktop/dist/renderer`，由宿主直接加载；`pnpm test:e2e` 用的 Vite 开发服务器固定监听 `http://127.0.0.1:9999`。本地服务 API 使用运行时发现文件声明的独立 loopback 端口。`pnpm dev` 默认把两个数据根都放在 `output/` 下、与本机正在用的 ATM 分开：2.x 源根 `ATM_DATA_DIR` 是 `output/dev-data`，3.0 数据根 `ATM3_DATA_DIR` 是 `output/dev-data3`；启动前设置这两个变量可以换成别的目录。
+`pnpm dev` 先构建 debug 版的原生宿主，再用 Vite 持续构建界面，由宿主直接加载。开发时的两个数据根都放在 `output/` 下，和本机正在用的 ATM 分开：2.x 源根 `ATM_DATA_DIR` 是 `output/dev-data`，3.0 数据根 `ATM3_DATA_DIR` 是 `output/dev-data3`；启动前设置这两个变量可以换成别的目录。`pnpm test:e2e` 用的 Vite 开发服务器固定在 `http://127.0.0.1:9999`。
 
-六道质量门禁，缺一道都不算过：
+提交前要过的门禁：
 
 ```powershell
 pnpm format:check
@@ -269,9 +219,9 @@ pnpm build
 pnpm test:e2e
 ```
 
-发布流水线在这之上继续：生成并验证原生安装器、更新包与 portable ZIP，跑 packaged / distribution smoke、性能 benchmark 和安装态验收，最后把上面那份四层证据包落盘。维护者流程见[发布检查表](./docs/release-checklist.md)。
+Rust 一侧在 `apps/desktop/native` 下跑 `cargo fmt --check`、`cargo clippy --workspace --all-targets` 与 `cargo test --workspace`。发布链在这些之上还会打包，跑 packaged / distribution smoke、安装演练、掉电演练和预算测量，最后落一份四层证据包，见[发布检查表](./docs/release-checklist.md)。
 
-README 里的图和截图都由脚本生成，不手工维护：
+README 里的图和截图都由脚本生成：
 
 ```powershell
 pnpm exec tsx scripts/render-architecture-diagram.ts
@@ -280,11 +230,11 @@ pnpm exec tsx scripts/render-readme-screenshot.ts
 
 ## 参与贡献
 
-欢迎提交问题、文档改进和经过验证的修复。开始前请阅读[贡献指南](./CONTRIBUTING.md)与[行为准则](./CODE_OF_CONDUCT.md)。安全问题不要公开提交 Issue，请按[安全策略](./SECURITY.md)私下报告。
+欢迎提交问题、文档改进和经过验证的修复。开始前请读[贡献指南](./CONTRIBUTING.md)和[行为准则](./CODE_OF_CONDUCT.md)。安全问题请不要公开提 Issue，按[安全策略](./SECURITY.md)私下报告。
 
 ## 开源许可
 
-AyanamiTaskManager 以 [GNU Affero General Public License v3.0 only](./LICENSE) 发布。项目 logo 与视觉资产的来源说明见[视觉资产来源](./docs/asset-provenance.md)；第三方依赖继续遵循各自许可证。
+AyanamiTaskManager 以 [GNU Affero General Public License v3.0 only](./LICENSE) 发布。logo 与视觉资产的来源见[视觉资产来源](./docs/asset-provenance.md)；第三方依赖遵循各自的许可证。
 
 <div align="center">
   <sub>Local-first · Agent-native · Built with care by Ayanami, Codex and Claude.</sub>
