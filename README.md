@@ -1,7 +1,7 @@
 <div align="center">
   <img src="./logo.png" width="128" alt="AyanamiTaskManager logo" />
   <h1>绫波任务管理器</h1>
-  <p><strong>让 Codex、Claude 与每一次开发 Session，共享同一份可信项目事实。</strong></p>
+  <p><strong>让 Codex、Claude、Kimi 与每一次开发 Session，共享同一份可信项目事实。</strong></p>
   <p>Local-first tasks, handoffs and shared knowledge for AI agents on Windows.</p>
 
   <p>
@@ -53,6 +53,15 @@ AyanamiTaskManager（ATM）把计划、任务、进度、阻塞、长期记录�
 已经在用 2.x 或 1.x，先看[升级与回退](#升级与回退)。
 
 ## Agent 怎么用它
+
+支持四个客户端，各自的配置落点不同，ATM 分别写：
+
+| 客户端         | MCP 注册                                      | 规则与技能                                      |
+| -------------- | --------------------------------------------- | ----------------------------------------------- |
+| Codex          | `~/.codex/config.toml`                        | `~/.codex/AGENTS.md`、`~/.codex/skills`         |
+| Claude Desktop | `%APPDATA%/Claude/claude_desktop_config.json` | `~/.claude/CLAUDE.md`、`~/.claude/skills`       |
+| Claude Code    | 由官方 `claude` CLI 注册                      | 与 Claude Desktop 共用                          |
+| Kimi Code      | `~/.kimi-code/mcp.json`                       | `~/.kimi-code/AGENTS.md`、`~/.kimi-code/skills` |
 
 一次 Session 的最短路径：
 
