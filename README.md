@@ -246,5 +246,5 @@ pnpm exec tsx scripts/render-readme-screenshot.ts
 AyanamiTaskManager 以 [GNU Affero General Public License v3.0 only](./LICENSE) 发布。logo 与视觉资产的来源见[视觉资产来源](./docs/asset-provenance.md)；第三方依赖遵循各自的许可证。
 
 <div align="center">
-  <sub>Local-first · Agent-native · Built with care by Ayanami, Codex and Claude.</sub>
+  <sub>Local-first · Agent-native · Built with care by Ayanami, Codex, Claude and Kimi.</sub>
 </div>
