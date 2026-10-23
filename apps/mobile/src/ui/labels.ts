@@ -73,7 +73,8 @@ export function dispatchBlocker(
   task: TaskCard,
   dispatchEnabled: boolean | undefined,
 ): string | null {
-  if (!dispatchEnabled) return "电脑端未开启 Claude 派单，请在电脑 ATM「设置 → Claude 派单」里打开";
+  if (!dispatchEnabled)
+    return "电脑端未开启 Claude 派单，请在电脑 ATM「设置 → Claude 自动开工」里打开";
   if (task.dispatch && (task.dispatch.state === "queued" || task.dispatch.state === "running")) {
     return "已经交给 Claude 了";
   }

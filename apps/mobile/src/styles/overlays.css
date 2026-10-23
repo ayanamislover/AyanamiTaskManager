@@ -149,7 +149,7 @@
 /* ─── 胶囊分段（桌面端 .atm-tabs 的触屏版） ─── */
 .segmented {
   display: grid;
-  grid-auto-columns: 1fr;
+  grid-auto-columns: minmax(0, 1fr);
   grid-auto-flow: column;
   gap: 2px;
   padding: 4px;

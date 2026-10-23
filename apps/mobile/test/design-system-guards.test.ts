@@ -573,6 +573,40 @@ export function forcedColorsStateViolations(sources: readonly CssSourceFile[]): 
   ];
 }
 
+/*
+ * 没写列模板的 grid，隐式列默认 auto，最小宽度是内容的 min-content：一行不换行的长项目名
+ * 会把整列连同同列的卡片撑出屏幕（MIX4 真机上总览和项目下拉都是这样）。所以全局 `*`
+ * 把隐式列定成 minmax(0, 1fr)，任何地方另写 grid-auto-columns 也必须能缩到 0。
+ */
+const SHRINKABLE_TRACK = /^minmax\(\s*0(?:px)?\s*,/u;
+
+export function implicitColumnViolations(sources: readonly CssSourceFile[]): string[] {
+  const rules = parseCssRules(sources);
+  const problems: string[] = [];
+  const universal = rules.some(
+    (rule) =>
+      rule.conditions.length === 0 &&
+      rule.selectorText.trim() === "*" &&
+      rule.declarations.some(
+        (d) => d.property === "grid-auto-columns" && SHRINKABLE_TRACK.test(d.value.trim()),
+      ),
+  );
+  if (!universal) problems.push("全局 * 没有把 grid 隐式列定成 minmax(0, 1fr)");
+  for (const rule of rules) {
+    for (const d of rule.declarations) {
+      if (d.property !== "grid-auto-columns") continue;
+      for (const track of d.value.trim().split(/\s+(?![^(]*\))/u)) {
+        if (!SHRINKABLE_TRACK.test(track)) {
+          problems.push(
+            `${rule.source}:${rule.line} ${rule.selectorText.trim()}：隐式列 ${track} 会被长内容撑开`,
+          );
+        }
+      }
+    }
+  }
+  return problems;
+}
+
 /* ─── 变异工具：把根因写回真实 CSS，确认守卫真的会红 ─── */
 
 function mutate(
@@ -729,6 +763,10 @@ describe("手机端设计系统守卫", () => {
 
   it("forced-colors 下选中、开启、禁用看得出来，只靠底色画的进度条与状态灯也还画得出来", () => {
     expect(forcedColorsStateViolations(mobileCssSources())).toEqual([]);
+  });
+
+  it("grid 的隐式列都能缩到 0：长项目名只出省略号，不把卡片和下拉撑出屏幕", () => {
+    expect(implicitColumnViolations(mobileCssSources())).toEqual([]);
   });
 
   describe("阳性对照：逐条把根因写回去，守卫必须变红", () => {
@@ -978,6 +1016,22 @@ describe("手机端设计系统守卫", () => {
       );
       expect(forcedColorsStateViolations(segments)).toEqual([
         expect.stringMatching(/^项目分段条的一段：forced-colors 下什么都画不出来/u),
+      ]);
+    });
+
+    it("隐式列：删掉全局 minmax(0, 1fr) / 分段胶囊写回 1fr", () => {
+      const universal = mutate(sources, "base.css", "  grid-auto-columns: minmax(0, 1fr);\n", "");
+      expect(implicitColumnViolations(universal)).toEqual([
+        "全局 * 没有把 grid 隐式列定成 minmax(0, 1fr)",
+      ]);
+      const segmented = mutate(
+        sources,
+        "overlays.css",
+        "  grid-auto-columns: minmax(0, 1fr);\n  grid-auto-flow: column;",
+        "  grid-auto-columns: 1fr;\n  grid-auto-flow: column;",
+      );
+      expect(implicitColumnViolations(segmented)).toEqual([
+        expect.stringMatching(/overlays\.css:\d+ \.segmented：隐式列 1fr 会被长内容撑开$/u),
       ]);
     });
 

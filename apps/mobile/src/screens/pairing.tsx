@@ -157,7 +157,7 @@ export function PairingScreen() {
                 </li>
                 <li>
                   <span className="step-index">2</span>
-                  <span>点「配对手机」，屏幕上会出现二维码</span>
+                  <span>点「添加手机」，屏幕上会出现二维码</span>
                 </li>
                 <li>
                   <span className="step-index">3</span>

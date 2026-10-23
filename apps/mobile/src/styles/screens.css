@@ -283,23 +283,33 @@
   font-weight: 650;
   line-height: 1.35;
 }
+/*
+ * 分隔点跟着后一段走，折行时不会有一个孤零零的「·」挂在行尾；每段前面都有一个 18px 宽的点，
+ * 再裁掉左边 18px，每行打头那一段的点落在裁掉的区域里，也不会以「·」起头。
+ * 第一行的点正好占住原来对齐状态灯的 18px 缩进。
+ */
 .host-meta {
   display: flex;
   flex-wrap: wrap;
-  padding-left: 18px;
+  clip-path: inset(0 0 0 18px);
   color: var(--atm-text-muted);
   font-size: 13px;
   line-height: 1.5;
 }
-/* 分隔点跟着后一段走：折行时不会有一个孤零零的「·」挂在行尾。 */
-.host-meta > span + span::before {
-  padding: 0 6px;
+.host-meta > span::before {
+  display: inline-block;
+  width: 18px;
   color: var(--atm-text-faint);
+  text-align: center;
   content: "·";
 }
 .project-counts i {
+  width: 18px;
+  /* 抵掉 span 的 gap：点两侧留白相等，整项正好多出 18px。 */
+  margin-right: -6px;
   color: var(--atm-text-faint);
   font-style: normal;
+  text-align: center;
 }
 .host-icon {
   flex: none;
@@ -372,10 +382,15 @@
   flex: none;
   color: var(--atm-text-faint);
 }
+/*
+ * 每项前面都有一个 18px 宽、居中的分隔点。整行左移 18px 再裁掉左边 18px：
+ * 每一行打头那一项的分隔点正好落在裁掉的区域里，折行后不会以「·」起头。
+ */
 .project-counts {
   display: flex;
   flex-wrap: wrap;
-  column-gap: 6px;
+  margin-left: -18px;
+  clip-path: inset(0 0 0 18px);
   color: var(--atm-text-muted);
   font-size: 13px;
   line-height: 1.5;

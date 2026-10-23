@@ -18,6 +18,12 @@
 * {
   box-sizing: border-box;
   -webkit-tap-highlight-color: transparent;
+  /*
+   * 没写列模板的 grid 只有一条隐式列，默认 auto：最小宽度跟着内容走，一行不换行的长标题
+   * （项目名、下拉选项）会把整列连同同列的卡片撑出屏幕，省略号也就不生效。
+   * 隐式列一律可以缩到 0；要按内容排宽的 grid 自己写列模板。
+   */
+  grid-auto-columns: minmax(0, 1fr);
 }
 
 html,
