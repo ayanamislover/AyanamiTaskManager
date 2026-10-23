@@ -122,7 +122,7 @@ AyanamiTaskManager（ATM）把计划、任务、进度、阻塞、长期记录�
 - **知识库**：修订历史、归档，Markdown 导入导出。
 - **数据安全**：在线备份与恢复、导入导出；数据库读不出时进入恢复页，列出可用的整库备份。
 - **常驻**：关窗收进托盘，服务和 Agent 接入照常运行；可以开机后台启动。安装版还登记一个「AyanamiTaskManager 保活」计划任务，ATM 意外退出后约 5 分钟内自动拉起。
-- **手机同步（可选，默认关闭）**：在手机上看任务、发任务，勾「交给 Claude」就自动领取开工。ATM 不内置任何服务器，需要你自建 [atm-relay](./apps/relay/README.md)；内容端到端加密，见[手机同步说明](./docs/mobile-sync.md)。
+- **手机同步（可选，默认关闭）**：在手机上看任务、发任务，勾「交给 Claude」就自动领取开工。ATM 不内置任何服务器，需要你自建 [atm-relay](./apps/relay/README.md)；内容端到端加密。从部署中继到手机配对的步骤见[手机端部署](./docs/mobile-deploy.md)，设计见[手机同步说明](./docs/mobile-sync.md)。
 
 操作细节见[用户指南](./docs/user-guide.md)，遇到问题看[排障指南](./docs/troubleshooting.md)，便携版的差异见[便携版说明](./docs/portable-usage.md)。
 
