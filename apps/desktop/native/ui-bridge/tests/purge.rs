@@ -1,6 +1,7 @@
 mod support;
 
 use serde_json::json;
+use std::fs;
 use support::{agent, world};
 
 #[test]
@@ -12,6 +13,9 @@ fn only_the_user_can_permanently_delete_a_confirmed_trashed_project() {
         Some(json!({"name":"Old","code":"OLD","sourcePath":null})),
         201,
     );
+    let old_attachment = w.dir.join("artifacts").join(old["id"].as_str().unwrap());
+    fs::create_dir_all(&old_attachment).unwrap();
+    fs::write(old_attachment.join("private.txt"), "backup attachment").unwrap();
     w.ok(
         "POST",
         "/api/v1/projects/OLD/ui/records",
@@ -69,6 +73,7 @@ fn only_the_user_can_permanently_delete_a_confirmed_trashed_project() {
     );
     assert_eq!(removed["deleted"], true);
     assert_eq!(removed["id"], old["id"]);
+    assert!(!old_attachment.exists());
     assert_eq!(w.get("/api/v1/trash/projects").as_array().unwrap().len(), 0);
     assert_eq!(
         w.get("/api/v1/backups"),
@@ -113,6 +118,15 @@ fn only_the_user_can_permanently_delete_a_confirmed_trashed_project() {
     assert_ne!(imported["projectId"], old["id"]);
     assert_ne!(imported["projectId"], fresh["id"]);
     assert_eq!(imported["code"], suggested);
+    let new_attachment = w
+        .dir
+        .join("artifacts")
+        .join(imported["projectId"].as_str().unwrap())
+        .join("private.txt");
+    assert_eq!(
+        fs::read_to_string(new_attachment).unwrap(),
+        "backup attachment"
+    );
     let recovered_records = w.get(&format!("/api/v1/projects/{suggested}/records?limit=100"));
     assert!(
         recovered_records
