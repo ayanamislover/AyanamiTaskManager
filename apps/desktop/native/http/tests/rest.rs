@@ -60,7 +60,7 @@ fn parse(text: &str) -> Value {
 #[test]
 fn the_route_table_is_06_section_2_with_c07() {
     let ns: Vec<u16> = ROUTES.iter().map(|r| r.n).collect();
-    assert_eq!(ns, (1..=112).collect::<Vec<u16>>());
+    assert_eq!(ns, (1..=115).collect::<Vec<u16>>());
     assert_eq!(
         numbers(|d| *d == Disp::A),
         [16, 51, 52, 64, 65, 66, 70, 74, 75, 80, 81]
@@ -73,14 +73,14 @@ fn the_route_table_is_06_section_2_with_c07() {
         numbers(|d| matches!(d, Disp::UStar(_))),
         [
             6, 8, 10, 13, 14, 19, 20, 21, 23, 24, 26, 27, 39, 40, 45, 47, 50, 53, 54, 55, 56, 59,
-            76, 82, 83, 89, 90, 91, 93, 94, 95, 96, 112
+            76, 82, 83, 89, 90, 91, 93, 94, 95, 96, 112, 113, 115
         ]
     );
     assert_eq!(
         numbers(|d| *d == Disp::U),
         [
             2, 5, 9, 12, 18, 28, 29, 30, 32, 33, 36, 42, 44, 48, 49, 60, 61, 62, 63, 86, 88, 92,
-            110, 111
+            110, 111, 114
         ]
     );
     assert_eq!(
@@ -315,8 +315,8 @@ fn every_user_only_route_is_refused_without_side_effects() {
         assert_eq!(v["fix"]["kind"], "ask_user", "#{}: {text}", r.n);
         denied += 1;
     }
-    // 2.0 的 32 条，加 W6c 的 #112（项目包导入）。
-    assert_eq!(denied, 33);
+    // 2.0 的 32 条，加 W6c 的 #112 与用户专属的 #113（永久删除）。
+    assert_eq!(denied, 35);
     let after = print(&w, &project_dir);
     assert!(before.0 == after.0, "NS-1/NS-2: the database changed");
     assert!(

@@ -12,12 +12,14 @@ use crate::fp::{self, JsValue};
 use crate::receipts::{self, CallKey, Candidate, NewReceipt, Rebuilt, ReceiptScope, Verdict};
 use crate::write::{Family, FpInput, Rebind, Service, WriteCtx, WriteRequest, Written, internal};
 use atm_domain::capability::{self, Capability};
+use atm_domain::error::Committed;
 use atm_domain::error::{DomainError, ErrorCode};
 use atm_domain::keys;
 use atm_domain::principal::{Principal, PrincipalKind};
 use atm_domain::text::{js_trim, utf16_len};
 use atm_store::events::{self as store_events};
 use atm_store::paths::path_key;
+use atm_store::purge::PurgeError;
 use atm_store::{ReadError, WriteError};
 use rusqlite::{OptionalExtension, Transaction, params};
 use serde_json::{Map, Value, json};
@@ -814,6 +816,58 @@ fn apply_lifecycle(
 }
 
 impl Service {
+    /// User-only permanent removal of a TRASHED project. Confirmation is exact, not normalized:
+    /// typing another project's code, or confirming a stale version, never starts file staging.
+    /// Old whole-database backups remain unchanged for explicit User recovery.
+    pub fn purge_project(
+        &self,
+        principal: &Principal,
+        project: &str,
+        confirm_code: &str,
+        expected_version: i64,
+    ) -> Result<Value, DomainError> {
+        capability::require(principal, Capability::ProjectPurge)?;
+        if expected_version < 0 {
+            return Err(invalid("expectedVersion", "expectedVersion 必须是非负整数"));
+        }
+        let id = self.project_scope(project)?;
+        let key = id.clone();
+        let code: String = self
+            .store()
+            .read(move |tx| project_row(tx, &key).map(|p| p.code))
+            .map_err(dom_read_error)?;
+        if confirm_code != code {
+            return Err(invalid("confirmCode", "请完整输入项目代码以确认永久删除"));
+        }
+        let outcome = atm_store::purge::purge_project(self.store(), &id, &code, expected_version)
+            .map_err(|e| match e {
+            PurgeError::NotFound => DomainError::new(ErrorCode::PROJECT_NOT_FOUND, "项目不存在"),
+            PurgeError::NotTrashed => DomainError::new(
+                ErrorCode::PROJECT_LIFECYCLE_CONFLICT,
+                "只有垃圾箱项目可永久删除",
+            ),
+            PurgeError::VersionChanged => DomainError::new(
+                ErrorCode::VERSION_CONFLICT,
+                "项目在确认后发生变化，请刷新再试",
+            ),
+            PurgeError::ActiveDispatch => DomainError::new(
+                ErrorCode::PROJECT_LIFECYCLE_CONFLICT,
+                "项目还有正在执行或排队的派单，请先停止",
+            ),
+            PurgeError::SyncEnabled => DomainError::new(
+                ErrorCode::PROJECT_LIFECYCLE_CONFLICT,
+                "请先关闭手机同步，再永久删除项目",
+            ),
+            PurgeError::CleanupPending(message) => DomainError::new(
+                ErrorCode::INTERNAL_ERROR,
+                format!("项目已删除，文件清理会在启动时重试：{message}"),
+            )
+            .committed(Committed::Yes),
+            PurgeError::Storage(message) => DomainError::new(ErrorCode::INTERNAL_ERROR, message),
+        })?;
+        Ok(json!({ "deleted": true, "id": outcome.id, "code": outcome.code }))
+    }
+
     /// 换备份目录（生命周期迁移前的 PRE_* 备份写在这里）。
     pub fn with_backups_root(mut self, root: PathBuf) -> Self {
         self.backups_root = Some(root);

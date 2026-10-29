@@ -45,6 +45,7 @@ fn m05_user_only_snapshot() {
         "notification.mode_set",
         "project.archive",
         "project.path_attach",
+        "project.purge",
         "project.restore_request.decide",
         "project.trash",
         "project.unarchive",
@@ -243,6 +244,7 @@ fn m12_system_job_snapshot() {
     for cap in [
         Capability::BackupRestoreScope,
         Capability::ProjectTrash,
+        Capability::ProjectPurge,
         Capability::BackupCreateManual,
     ] {
         let err = require(&m, cap).unwrap_err();

@@ -117,6 +117,19 @@ pub fn publish(p: &Publish<'_>) -> Result<Entries, String> {
     let at = atm_install_state::startup::iso_utc(atm_install_state::handoff::now_ms());
     atm_store::recover::settle(&store, p.layout, &at)
         .map_err(|e| format!("settle the offline recovery: {e}"))?;
+    // A previous permanent deletion may have committed while its marker/attachment cleanup was
+    // interrupted. Finish or roll it back before Agent, HTTP or the UI can observe this store.
+    match atm_store::purge::finish_pending(&store) {
+        Ok(_) => {}
+        // The SQL deletion is committed; an AV/file handle may delay removing quarantined
+        // attachments. Keep the service available and retry at the next startup.
+        Err(atm_store::purge::PurgeError::CleanupPending(e)) => {
+            eprintln!("ATM project deletion cleanup pending: {e}");
+        }
+        // Before commit, restoring staged attachments is essential: exposing the project now
+        // would let Agent reads see a database whose external files are temporarily elsewhere.
+        Err(e) => return Err(format!("settle pending project deletion: {e}")),
+    }
     let svc = Arc::new(
         Service::new(store)
             .with_backups_root(p.layout.root.join("backups"))

@@ -5,8 +5,10 @@ import { ArrowRightIcon as ArrowRight } from "@phosphor-icons/react/dist/icons/A
 import { CaretDownIcon as CaretDown } from "@phosphor-icons/react/dist/icons/CaretDown";
 import { PlusIcon as Plus } from "@phosphor-icons/react/dist/icons/Plus";
 import { XIcon as X } from "@phosphor-icons/react/dist/icons/X";
+import { TrashIcon as Trash } from "@phosphor-icons/react/dist/icons/Trash";
 import type { AyanamiClient } from "@ayanami-task/client";
 import { AtmSelect } from "../components/atm-select.js";
+import { useDialogs } from "../components/atm-dialogs.js";
 import {
   Empty,
   ErrorState,
@@ -20,6 +22,7 @@ import type { DesktopBridge, McpClient, Notify } from "../contracts.js";
 import { useDialogAccessibility } from "../hooks/use-dialog-accessibility.js";
 import { Status, formatTime, statusLabels } from "../presentation.js";
 import { useProjectOrder, useProjectReorder } from "../project-order.js";
+import { DeletedBackupRecovery } from "./deleted-backup-recovery.js";
 
 export function ProjectWizard({
   client,
@@ -368,6 +371,7 @@ export function ProjectsPage({
         </section>
       )}
       <ProjectTrash client={client} notify={notify} />
+      <DeletedBackupRecovery client={client} notify={notify} onProject={onProject} />
       <Presence present={wizard} inertWhenClosing>
         {wizard ? (
           <ProjectWizard
@@ -392,6 +396,7 @@ export function ProjectsPage({
  */
 export function ProjectTrash({ client, notify }: { client: AyanamiClient; notify: Notify }) {
   const queryClient = useQueryClient();
+  const dialogs = useDialogs();
   // null = 用户还没动过：有 Agent 等着授权时默认展开，否则默认折叠（ATM-T-0494）。
   const [collapsedChoice, setCollapsed] = useState<boolean | null>(null);
   const trashed = useQuery({
@@ -405,6 +410,30 @@ export function ProjectTrash({ client, notify }: { client: AyanamiClient; notify
       notify(`已从垃圾箱恢复 ${project.code}`);
     },
   });
+  const purge = useMutation({
+    mutationFn: ({ code, version }: { code: string; version: number }) =>
+      client.projects.purge(code, version, code),
+    onSuccess: async ({ code }) => {
+      await queryClient.invalidateQueries();
+      notify(`已永久删除 ${code}；旧整库备份仍可由用户手动恢复`);
+    },
+  });
+  const confirmPurge = async (project: { code: string; name: string; version: number }) => {
+    const typed = await dialogs.prompt({
+      title: `永久删除 ${project.name}`,
+      label: `当前项目、任务、记录及目录关联将从 ATM 删除，Agent 无法恢复。旧整库备份保留，仅用户可手动恢复。请输入项目代码 ${project.code} 确认：`,
+      placeholder: project.code,
+      maxLength: 40,
+      confirmLabel: "永久删除",
+      tone: "danger",
+    });
+    if (typed === null) return;
+    if (typed !== project.code) {
+      notify("项目代码不匹配，未删除任何内容");
+      return;
+    }
+    purge.mutate({ code: project.code, version: project.version });
+  };
   const decide = useMutation({
     mutationFn: ({ id, approve }: { id: string; approve: boolean }) =>
       approve
@@ -426,7 +455,7 @@ export function ProjectTrash({ client, notify }: { client: AyanamiClient; notify
   // 首读失败时数量未知：默认展开把错误亮出来，计数写「—」而不是「0」。
   const unreadable = Boolean(trashed.error) && trashed.data === undefined;
   const collapsed = collapsedChoice ?? (pending === 0 && !unreadable);
-  const busy = restore.isPending || decide.isPending;
+  const busy = restore.isPending || decide.isPending || purge.isPending;
   if (!trashed.error && projects.length === 0) return null;
   return (
     <section
@@ -492,7 +521,7 @@ export function ProjectTrash({ client, notify }: { client: AyanamiClient; notify
                           : ""}
                       </span>
                     </div>
-                    <div className="atm-actions atm-restore-request-actions">
+                    <div className="atm-actions atm-trash-card-actions">
                       <button
                         className="atm-button primary"
                         aria-label={`授权恢复 ${project.name}`}
@@ -515,24 +544,44 @@ export function ProjectTrash({ client, notify }: { client: AyanamiClient; notify
                         <X size={16} />
                         拒绝
                       </button>
+                      <button
+                        className="atm-button danger"
+                        aria-label={`永久删除项目 ${project.name}`}
+                        disabled={busy}
+                        onClick={() => void confirmPurge(project)}
+                      >
+                        <Trash size={16} />
+                        永久删除
+                      </button>
                     </div>
                   </>
                 ) : (
-                  <button
-                    className="atm-button"
-                    aria-label={`恢复项目 ${project.name}`}
-                    disabled={busy}
-                    onClick={() => restore.mutate(project.code)}
-                  >
-                    <ArrowCounterClockwise size={16} />
-                    恢复项目
-                  </button>
+                  <div className="atm-actions atm-trash-card-actions">
+                    <button
+                      className="atm-button"
+                      aria-label={`恢复项目 ${project.name}`}
+                      disabled={busy}
+                      onClick={() => restore.mutate(project.code)}
+                    >
+                      <ArrowCounterClockwise size={16} />
+                      恢复项目
+                    </button>
+                    <button
+                      className="atm-button danger"
+                      aria-label={`永久删除项目 ${project.name}`}
+                      disabled={busy}
+                      onClick={() => void confirmPurge(project)}
+                    >
+                      <Trash size={16} />
+                      永久删除
+                    </button>
+                  </div>
                 )}
               </article>
             ))}
           </div>
         )}
-        <MutationErrorAlert error={restore.error ?? decide.error} />
+        <MutationErrorAlert error={restore.error ?? decide.error ?? purge.error} />
       </div>
     </section>
   );

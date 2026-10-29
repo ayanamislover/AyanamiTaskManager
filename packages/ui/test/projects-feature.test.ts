@@ -8,6 +8,14 @@ import { describe, expect, it, vi } from "vitest";
 import { ProjectWizard, ProjectsPage } from "../src/features/projects.js";
 
 const sourcePath = join(process.cwd(), "packages", "ui", "src", "features", "projects.tsx");
+const backupRecoveryPath = join(
+  process.cwd(),
+  "packages",
+  "ui",
+  "src",
+  "features",
+  "deleted-backup-recovery.tsx",
+);
 
 function client(): AyanamiClient {
   return {
@@ -48,6 +56,9 @@ function missingProjectContracts(source: string): string[] {
     "client.projects.createObjectiveAsUser(project.code, {",
     "client.projects.createMilestoneAsUser(project.code, {",
     "client.projects.restore(code)",
+    "client.projects.purge(code, version, code)",
+    "client.backups.deletedProjects(selectedBackup!)",
+    "client.backups.importDeletedProject(backupId, projectId, code)",
     'queryKey: ["projects", "trash"]',
     "client.projects.trashed()",
     "client.projects.approveRestoreRequest(id)",
@@ -101,6 +112,9 @@ describe("Projects feature", () => {
     expect(projectsMarkup).toContain("恢复项目");
     expect(projectsMarkup).toContain("垃圾箱（1）");
     expect(projectsMarkup).toContain('aria-label="恢复项目 旧项目"');
+    expect(projectsMarkup).toContain('aria-label="永久删除项目 旧项目"');
+    expect(projectsMarkup).toContain('aria-label="历史备份恢复"');
+    expect(projectsMarkup).toContain('id="deleted-backup-recovery-content" hidden=""');
     // 垃圾箱默认折叠；恢复按钮在分区里，不在正常项目网格里。
     expect(projectsMarkup).toMatch(/id="project-trash-content" hidden=""/u);
     const [grid, trash] = projectsMarkup.split('aria-label="垃圾箱"');
@@ -151,9 +165,11 @@ describe("Projects feature", () => {
     expect(trash).toContain("共 3 次");
     expect(trash).toContain('aria-label="授权恢复 被请求项目"');
     expect(trash).toContain('aria-label="拒绝恢复 被请求项目"');
+    expect(trash).toContain('aria-label="永久删除项目 被请求项目"');
     // 挂着请求的卡片用「授权恢复」代替「恢复项目」；没请求的卡片照旧。
     expect(trash).not.toContain('aria-label="恢复项目 被请求项目"');
     expect(trash).toContain('aria-label="恢复项目 安静项目"');
+    expect(trash).toContain('aria-label="永久删除项目 安静项目"');
     expect(trash).not.toContain('aria-label="授权恢复 安静项目"');
   });
 
@@ -169,12 +185,14 @@ describe("Projects feature", () => {
   });
 
   it("创建、恢复、桌面接入与路由契约有阳性变异红灯", () => {
-    const source = readFileSync(sourcePath, "utf8");
+    const source = `${readFileSync(sourcePath, "utf8")}\n${readFileSync(backupRecoveryPath, "utf8")}`;
     expect(missingProjectContracts(source)).toEqual([]);
 
     for (const contract of [
       "sourcePath: form.path.trim() || null",
       "client.projects.restore(code)",
+      "client.projects.purge(code, version, code)",
+      "client.backups.importDeletedProject(backupId, projectId, code)",
       "desktop!.installMcp!(target)",
       "onCreated(project.code)",
     ]) {

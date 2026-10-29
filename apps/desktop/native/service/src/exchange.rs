@@ -13,6 +13,7 @@ use atm_domain::error::{DomainError, ErrorCode};
 use atm_domain::keys;
 use atm_domain::principal::Principal;
 use atm_domain::time::Timestamp;
+use atm_store::backup::{side_reader, verify_backup};
 use atm_store::package::{self, ExportOptions, Format, ImportOptions, ImportSource, PackageError};
 use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
@@ -149,6 +150,112 @@ fn file_name_ok(name: &str) -> bool {
 }
 
 impl Service {
+    /// Only the User may inspect which deleted identities are contained in a verified whole-DB
+    /// backup. Agent-facing backup metadata never includes this per-project catalog.
+    pub fn backup_deleted_projects(
+        &self,
+        principal: &Principal,
+        backup_id: &str,
+    ) -> Result<Value, DomainError> {
+        capability::require(principal, Capability::BackupRestoreScope)?;
+        let backup =
+            verify_backup(self.store(), backup_id).map_err(crate::backups::backup_error)?;
+        let side = side_reader(&backup.source_db()).map_err(crate::backups::backup_error)?;
+        let rows: Vec<(String, String, String)> = side
+            .prepare("SELECT id,code,name FROM projects ORDER BY code LIMIT 201")
+            .map_err(|e| internal(e.to_string()))?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .map_err(|e| internal(e.to_string()))?
+            .collect::<rusqlite::Result<_>>()
+            .map_err(|e| internal(e.to_string()))?;
+        if rows.len() > 200 {
+            return Err(DomainError::new(
+                ErrorCode::INVALID_ARGUMENT,
+                "这份备份有超过 200 个项目，请使用数据修复工具处理",
+            ));
+        }
+        let mut items = Vec::new();
+        for (id, code, name) in rows {
+            let key = id.clone();
+            let present: bool = self
+                .store()
+                .read(move |tx| {
+                    tx.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
+                        [&key],
+                        |r| r.get(0),
+                    )
+                })
+                .map_err(|e| internal(format!("{e:?}")))?;
+            if present {
+                continue;
+            }
+            let suggested = package::code_status(self.store(), &code).map_err(package_error)?;
+            items.push(json!({
+                "id": id, "code": code, "name": name,
+                "codeTaken": suggested.is_some(), "suggestedCode": suggested,
+            }));
+        }
+        Ok(json!({"backupId": backup.id, "projects": items}))
+    }
+
+    /// Import one deleted identity from a verified old whole-DB backup as a new project. This is
+    /// not scope rollback: it cannot overwrite a project created after the deletion.
+    pub fn import_deleted_project_from_backup(
+        &self,
+        principal: &Principal,
+        backup_id: &str,
+        source_project_id: &str,
+        code: Option<&str>,
+    ) -> Result<Value, DomainError> {
+        capability::require(principal, Capability::BackupRestoreScope)?;
+        capability::require(principal, Capability::ImportApply)?;
+        let backup =
+            verify_backup(self.store(), backup_id).map_err(crate::backups::backup_error)?;
+        let key = source_project_id.to_owned();
+        let present: bool = self
+            .store()
+            .read(move |tx| {
+                tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM projects WHERE id = ?1)",
+                    [&key],
+                    |r| r.get(0),
+                )
+            })
+            .map_err(|e| internal(format!("{e:?}")))?;
+        if present {
+            return Err(DomainError::new(
+                ErrorCode::PROJECT_ALREADY_EXISTS,
+                "这个项目身份仍在当前数据库中，不能作为已删除项目导入",
+            ));
+        }
+        let code = code.map(keys::normalize);
+        if code
+            .as_deref()
+            .is_some_and(|c| !crate::project::valid_code(c))
+        {
+            return Err(DomainError::new(
+                ErrorCode::INVALID_ARGUMENT,
+                "新项目代码须以大写字母开头，2–12 位大写字母、数字或连字符",
+            ));
+        }
+        let exchange = self.exchange()?;
+        let at = now().to_string();
+        project_view(package::import_project(
+            self.store(),
+            ImportSource::WholeBackupProject {
+                backup: &backup,
+                project_id: source_project_id,
+            },
+            &ImportOptions {
+                exports_dir: &exchange.exports,
+                at: &at,
+                code: code.as_deref(),
+                source_label: &format!("whole-backup/{backup_id}/{source_project_id}"),
+            },
+        ))
+    }
+
     /// 数据交换的位置（见 [`ExchangeConfig`]）。没给时导出与导入报内部错误。
     pub fn with_exchange(mut self, config: ExchangeConfig) -> Self {
         self.exchange = Some(config);

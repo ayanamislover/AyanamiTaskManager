@@ -79,6 +79,59 @@ fn count_where(w: &World, table: &str, cond: &str) -> i64 {
     w.count(&format!("SELECT count(*) FROM {table} WHERE {cond}"))
 }
 
+#[test]
+fn permanent_delete_is_user_only_confirmed_and_releases_code_and_path() {
+    let w = world("pj-permanent-delete");
+    w.lifecycle_projects();
+    // Never let this test inspect or remove a real source directory. The fixture's R:\\Trash is
+    // replaced with a uniquely owned directory under the test data root.
+    let source = w.dir.join("source");
+    std::fs::create_dir(&source).unwrap();
+    let marker_dir = source.join(".ayanami-task");
+    std::fs::create_dir(&marker_dir).unwrap();
+    std::fs::write(marker_dir.join("project.json"), r#"{"project_id":"PT"}"#).unwrap();
+    let source_text = source.to_string_lossy().into_owned();
+    w.svc.store().write(move |tx| tx.execute(
+        "UPDATE project_paths SET canonical_path = ?1, path_key = 'test-purge-path' WHERE project_id = 'PT'",
+        [source_text],
+    )).unwrap();
+
+    let before = w.count("SELECT count(*) FROM projects WHERE id='PT'");
+    let e = w.svc.purge_project(&agent(), "TRS", "TRS", 0).unwrap_err();
+    assert_eq!(e.code, ErrorCode::USER_AUTHORIZATION_REQUIRED);
+    let e = w.svc.purge_project(&user(), "TRS", "WRONG", 0).unwrap_err();
+    assert_eq!(e.code, ErrorCode::VALIDATION_ERROR);
+    let e = w.svc.purge_project(&user(), "TRS", "TRS", 99).unwrap_err();
+    assert_eq!(e.code, ErrorCode::VERSION_CONFLICT);
+    assert_eq!(
+        w.count("SELECT count(*) FROM projects WHERE id='PT'"),
+        before
+    );
+    assert!(marker_dir.join("project.json").exists());
+
+    let result = w.svc.purge_project(&user(), "TRS", "TRS", 0).unwrap();
+    assert_eq!(result["deleted"], true);
+    assert_eq!(w.count("SELECT count(*) FROM projects WHERE id='PT'"), 0);
+    assert!(!marker_dir.join("project.json").exists());
+    assert_eq!(
+        w.count("SELECT count(*) FROM settings WHERE key='internal.purged-project.PT'"),
+        1
+    );
+    let made = w
+        .svc
+        .create_project(
+            &user(),
+            CreateProjectRequest {
+                code: Some("TRS".into()),
+                path: at(&source.to_string_lossy()),
+                ..create("New from zero")
+            },
+        )
+        .unwrap();
+    assert_ne!(made.result["project"]["id"], "PT");
+    assert_eq!(made.result["project"]["code"], "TRS");
+}
+
 // ================= L-001 / L-012：创建 =================
 
 /// L-001：一个事务里写 project、世代、计数器、路径与全局事件，提交后就是 ACTIVE；marker 交给调用方写（C-L03）。

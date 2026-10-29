@@ -167,6 +167,23 @@ export class AyanamiClient {
         `/api/v1/backups/${encodeURIComponent(id)}/restore`,
         target,
       ),
+    deletedProjects: (id: string) =>
+      this.request<{
+        backupId: string;
+        projects: Array<{
+          id: string;
+          code: string;
+          name: string;
+          codeTaken: boolean;
+          suggestedCode: string | null;
+        }>;
+      }>("GET", `/api/v1/backups/${encodeURIComponent(id)}/deleted-projects`),
+    importDeletedProject: (id: string, projectId: string, code?: string) =>
+      this.request<Record<string, any>>(
+        "POST",
+        `/api/v1/backups/${encodeURIComponent(id)}/import-project`,
+        { projectId, ...(code ? { code } : {}) },
+      ),
   };
 
   readonly data = {

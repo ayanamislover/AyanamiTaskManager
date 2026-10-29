@@ -464,6 +464,19 @@ fn route_call(ui: &Ui, p: &Principal, n: u16, i: &Input) -> Out {
         110 => ok(s.import_sources(p)),
         111 => ok(s.preview_import_source(p, &import_from(i)?)),
         112 => ok(s.import_source(p, &import_from(i)?, i.str("code").as_deref())),
+        113 => ok(s.purge_project(
+            p,
+            i.param("code"),
+            &i.need_str("confirmCode")?,
+            i.need_i64("expectedVersion")?,
+        )),
+        114 => ok(s.backup_deleted_projects(p, i.param("id"))),
+        115 => ok(s.import_deleted_project_from_backup(
+            p,
+            i.param("id"),
+            &i.need_str("projectId")?,
+            i.str("code").as_deref(),
+        )),
         29 => ok(s.ui_milestones(p, i.param("code"), i.q("objective"))),
         30 => ok(s.ui_sessions(
             p,

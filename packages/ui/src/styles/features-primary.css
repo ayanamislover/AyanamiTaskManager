@@ -53,6 +53,27 @@
 .atm-restore-request-actions {
   margin-top: 10px;
 }
+.atm-trash-card-actions {
+  align-self: end;
+  margin-top: 12px;
+}
+.atm-deleted-backup-recovery {
+  margin-top: 18px;
+}
+.atm-deleted-backup-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.atm-deleted-backup-list .atm-button.is-selected {
+  color: var(--atm-primary);
+  background: color-mix(in srgb, var(--atm-primary) 14%, var(--atm-control-fill));
+}
+.atm-deleted-backup-project {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+}
 @media (hover: hover) and (pointer: fine) {
   .atm-project:hover {
     border-color: color-mix(in srgb, var(--atm-primary) 44%, var(--atm-border));

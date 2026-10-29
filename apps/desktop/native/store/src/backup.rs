@@ -967,7 +967,7 @@ impl VerifiedBackup {
     }
 
     /// 校验过的库文件：钉住的备份目录里的真实位置。
-    pub(crate) fn source_db(&self) -> PathBuf {
+    pub fn source_db(&self) -> PathBuf {
         self.source.root.join(DB_FILE)
     }
 

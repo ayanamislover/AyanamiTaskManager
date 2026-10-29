@@ -33,6 +33,8 @@ export type PromptOptions = {
   placeholder?: string;
   multiline?: boolean;
   maxLength?: number;
+  /** 对必须输入确认词的不可撤销操作使用现有危险按钮样式。 */
+  tone?: "danger" | "primary";
 };
 
 export type Dialogs = {
@@ -119,7 +121,7 @@ function RequestDialog({
   const trimmed = value.trim();
   const titleId = `atm-dialog-title-${request.id}`;
   const bodyId = `atm-dialog-body-${request.id}`;
-  const danger = request.kind === "confirm" && request.tone === "danger";
+  const danger = request.tone === "danger";
   const submit = () => {
     if (request.kind === "confirm") settle(true);
     else if (trimmed) settle(trimmed);
@@ -196,7 +198,7 @@ function RequestDialog({
               className="atm-button"
               type="button"
               onClick={cancel}
-              {...(danger ? { "data-dialog-autofocus": true } : {})}
+              {...(danger && request.kind === "confirm" ? { "data-dialog-autofocus": true } : {})}
             >
               取消
             </button>
