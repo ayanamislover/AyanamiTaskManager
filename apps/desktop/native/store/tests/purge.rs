@@ -2,7 +2,7 @@ use atm_store::purge::{PROJECT_ROWS, PurgeError, delete_live_rows, finish_pendin
 use atm_store::{Config, Store};
 use rusqlite::{Connection, OptionalExtension, params};
 use std::fs;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 fn database() -> Connection {
     let db = Connection::open_in_memory().unwrap();
@@ -51,6 +51,13 @@ fn count(db: &Connection, table: &str, predicate: &str) -> i64 {
 #[test]
 fn removes_only_the_old_identity_and_leaves_other_projects_untouched() {
     let mut db = database();
+    // GLOBAL receipts hold copies of the promoted quick task; an unrelated one must stay.
+    db.execute_batch(
+        "INSERT INTO idempotency_receipts(scope_kind,scope_id,ns_kind,ns_id,op_id,operation,fp_v,fp_family,fingerprint,receipt_json)
+         VALUES ('GLOBAL','GLOBAL','GLOBAL','GLOBAL','op-q1','quick.create',2,'canon-v2','f','{\"quick\":{\"id\":\"Q1\",\"title\":\"Old promoted\"}}'),
+                ('GLOBAL','GLOBAL','GLOBAL','GLOBAL','op-q2','quick.create',2,'canon-v2','f','{\"quick\":{\"id\":\"Q12\",\"title\":\"Other\"}}');",
+    )
+    .unwrap();
     let tx = db.transaction().unwrap();
     assert!(delete_live_rows(&tx, "OLD").unwrap());
     tx.commit().unwrap();
@@ -73,6 +80,8 @@ fn removes_only_the_old_identity_and_leaves_other_projects_untouched() {
     }
     assert_eq!(count(&db, "quick_tasks", "id = 'Q1'"), 0);
     assert_eq!(count(&db, "quick_task_updates", "id = 'QU1'"), 0);
+    assert_eq!(count(&db, "idempotency_receipts", "op_id = 'op-q1'"), 0);
+    assert_eq!(count(&db, "idempotency_receipts", "op_id = 'op-q2'"), 1);
     assert_eq!(count(&db, "global_feed", "aggregate_id = 'OLD'"), 0);
     assert_eq!(count(&db, "global_feed", "aggregate_id = 'KEEP'"), 1);
     assert_eq!(count(&db, "sync_published", "project_code = 'OLD'"), 0);
@@ -117,6 +126,9 @@ fn every_project_id_table_has_an_explicit_purge_policy() {
         .unwrap()
         .collect::<rusqlite::Result<_>>()
         .unwrap();
+    // quick_tasks / global_feed: deleted by promoted_project_id / aggregate_id in delete_live_rows.
+    // legacy_backups: the read-only 2.x catalog is kept for the User's manual import; the purge
+    // tombstone hides its rows from Agent-readable backup lists (service `list_backups`).
     let handled_elsewhere = ["quick_tasks", "global_feed", "legacy_backups"];
     for table in tables {
         let mut statement = db.prepare(&format!("PRAGMA table_info({table})")).unwrap();
@@ -145,12 +157,23 @@ fn every_project_id_table_has_an_explicit_purge_policy() {
 }
 
 fn file_world() -> (Store, std::path::PathBuf, std::path::PathBuf) {
-    let stamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_nanos();
-    let root = std::env::temp_dir().join(format!("atm-purge-test-{}-{stamp}", std::process::id()));
-    fs::create_dir(&root).unwrap();
+    // Under the build directory like the other store tests, named after the running test and
+    // cleared first, so a failed run never leaves directories behind in %TEMP%.
+    let test = std::thread::current()
+        .name()
+        .unwrap_or("purge")
+        .replace("::", "-");
+    let target = std::env::var_os("CARGO_TARGET_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .parent()
+                .unwrap()
+                .join("target")
+        });
+    let root = target.join("store-tests").join(format!("purge-{test}"));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
     let source = root.join("source");
     fs::create_dir(&source).unwrap();
     let store = Store::open(
@@ -205,7 +228,7 @@ fn file_cleanup_removes_only_owned_marker_and_attachments_but_keeps_backup() {
         "source survives"
     );
     assert_eq!(fs::read_dir(&backup_root).unwrap().count(), backup_files);
-    assert_eq!(finish_pending(&store).unwrap(), 0);
+    assert_eq!(finish_pending(&store).unwrap().finished, 0);
     let exists: bool = store
         .read(|tx| {
             tx.query_row(
@@ -256,7 +279,7 @@ fn enabled_sync_blocks_purge_without_moving_attachments() {
         Err(PurgeError::SyncEnabled)
     ));
     assert!(attachment.join("keep.txt").exists());
-    assert_eq!(finish_pending(&store).unwrap(), 0);
+    assert_eq!(finish_pending(&store).unwrap().finished, 0);
     assert!(
         store
             .read(
@@ -289,7 +312,7 @@ fn queued_dispatch_blocks_purge_without_moving_attachments() {
         Err(PurgeError::ActiveDispatch)
     ));
     assert!(attachment.join("keep.txt").exists());
-    assert_eq!(finish_pending(&store).unwrap(), 0);
+    assert_eq!(finish_pending(&store).unwrap().finished, 0);
     assert!(
         store
             .read(
@@ -316,7 +339,7 @@ fn interrupted_before_commit_puts_staged_attachments_back() {
         .to_string(),
     )
     .unwrap();
-    assert_eq!(finish_pending(&store).unwrap(), 1);
+    assert_eq!(finish_pending(&store).unwrap().finished, 1);
     assert_eq!(
         fs::read_to_string(root.join("artifacts").join("OLD").join("keep.txt")).unwrap(),
         "recover me"
@@ -345,10 +368,89 @@ fn interrupted_after_commit_finishes_only_deleted_projects_files() {
     )
     .unwrap();
     store.write(|tx| delete_live_rows(tx, "OLD")).unwrap();
-    assert_eq!(finish_pending(&store).unwrap(), 1);
+    assert_eq!(finish_pending(&store).unwrap().finished, 1);
     assert!(!staging.join("OLD").exists());
     assert!(!marker.exists());
     assert!(source.exists());
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Make `dispatch/logs/<run>.jsonl` impossible to remove (a directory), so that run's cleanup
+/// stays pending the way a file held open by an AV scanner would.
+fn stuck_log(root: &std::path::Path, run: &str) {
+    fs::create_dir_all(
+        root.join("dispatch")
+            .join("logs")
+            .join(format!("{run}.jsonl")),
+    )
+    .unwrap();
+}
+
+#[test]
+fn an_earlier_stuck_cleanup_neither_blocks_nor_becomes_this_deletions_result() {
+    let (store, root, _) = file_world();
+    let staging = root.join("artifacts").join(".purge-staging");
+    fs::create_dir_all(&staging).unwrap();
+    fs::write(
+        staging.join("GONE.json"),
+        r#"{"id":"GONE","paths":[],"currentRuns":["RUN-GONE"]}"#,
+    )
+    .unwrap();
+    stuck_log(&root, "RUN-GONE");
+
+    assert_eq!(purge_project(&store, "OLD", "OLD", 0).unwrap().code, "OLD");
+    let exists: bool = store
+        .read(|tx| {
+            tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM projects WHERE id='OLD')",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert!(!exists);
+    assert!(!staging.join("OLD.json").exists());
+    // The earlier deletion is still waiting for its own retry.
+    assert!(staging.join("GONE.json").exists());
+    let settled = finish_pending(&store).unwrap();
+    assert_eq!(settled.finished, 0);
+    assert_eq!(
+        settled
+            .pending
+            .iter()
+            .map(|(id, _)| id.as_str())
+            .collect::<Vec<_>>(),
+        ["GONE"]
+    );
+    drop(store);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn this_deletions_own_stuck_cleanup_is_reported_as_committed() {
+    let (store, root, _) = file_world();
+    store.write(|tx| tx.execute("INSERT INTO dispatch_runs(run,project_code,task_key,title,origin,state,session_id,created_at,cwd,log_root) VALUES ('RUN-OLD','OLD','OLD-T-1','Old work','desktop','succeeded','S','2026-01-01','source','CURRENT')", [])).unwrap();
+    stuck_log(&root, "RUN-OLD");
+    assert!(matches!(
+        purge_project(&store, "OLD", "OLD", 0),
+        Err(PurgeError::CleanupPending(_))
+    ));
+    let exists: bool = store
+        .read(|tx| {
+            tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM projects WHERE id='OLD')",
+                [],
+                |r| r.get(0),
+            )
+        })
+        .unwrap();
+    assert!(
+        !exists,
+        "the rows are gone even though a file is still pending"
+    );
+    fs::remove_dir_all(root.join("dispatch").join("logs").join("RUN-OLD.jsonl")).unwrap();
+    assert_eq!(finish_pending(&store).unwrap().finished, 1);
     drop(store);
     fs::remove_dir_all(root).unwrap();
 }

@@ -118,6 +118,11 @@ fn only_the_user_can_permanently_delete_a_confirmed_trashed_project() {
     assert_ne!(imported["projectId"], old["id"]);
     assert_ne!(imported["projectId"], fresh["id"]);
     assert_eq!(imported["code"], suggested);
+    // The catalog still offers the old identity, but says where it already went.
+    let after = w.get(&format!("/api/v1/backups/{backup_id}/deleted-projects"));
+    assert_eq!(after["projects"][0]["id"], old["id"]);
+    assert_eq!(after["projects"][0]["importedAs"], suggested);
+    assert!(catalog["projects"][0]["importedAs"].is_null());
     let new_attachment = w
         .dir
         .join("artifacts")

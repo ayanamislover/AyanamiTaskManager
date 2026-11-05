@@ -191,9 +191,27 @@ impl Service {
                 continue;
             }
             let suggested = package::code_status(self.store(), &code).map_err(package_error)?;
+            // 已经从备份导回过的（导回的项目还在）：标出来，免得用户以为还没导、再导出一份副本。
+            let key = id.clone();
+            let imported_as: Option<String> = self
+                .store()
+                .read(move |tx| {
+                    tx.query_row(
+                        "SELECT p.code FROM global_feed g JOIN projects p ON p.id = g.aggregate_id
+                         WHERE g.type = 'project.imported'
+                           AND json_valid(g.payload_json)
+                           AND json_extract(g.payload_json, '$.sourceProjectId') = ?1
+                         ORDER BY g.global_seq DESC LIMIT 1",
+                        [&key],
+                        |r| r.get(0),
+                    )
+                    .optional()
+                })
+                .map_err(|e| internal(format!("{e:?}")))?;
             items.push(json!({
                 "id": id, "code": code, "name": name,
                 "codeTaken": suggested.is_some(), "suggestedCode": suggested,
+                "importedAs": imported_as,
             }));
         }
         Ok(json!({"backupId": backup.id, "projects": items}))

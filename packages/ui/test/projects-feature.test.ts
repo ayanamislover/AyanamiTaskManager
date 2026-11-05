@@ -56,7 +56,7 @@ function missingProjectContracts(source: string): string[] {
     "client.projects.createObjectiveAsUser(project.code, {",
     "client.projects.createMilestoneAsUser(project.code, {",
     "client.projects.restore(code)",
-    "client.projects.purge(code, version, code)",
+    "client.projects.purge(code, version, typed)",
     "client.backups.deletedProjects(selectedBackup!)",
     "client.backups.importDeletedProject(backupId, projectId, code)",
     'queryKey: ["projects", "trash"]',
@@ -191,7 +191,7 @@ describe("Projects feature", () => {
     for (const contract of [
       "sourcePath: form.path.trim() || null",
       "client.projects.restore(code)",
-      "client.projects.purge(code, version, code)",
+      "client.projects.purge(code, version, typed)",
       "client.backups.importDeletedProject(backupId, projectId, code)",
       "desktop!.installMcp!(target)",
       "onCreated(project.code)",

@@ -120,11 +120,12 @@ pub fn publish(p: &Publish<'_>) -> Result<Entries, String> {
     // A previous permanent deletion may have committed while its marker/attachment cleanup was
     // interrupted. Finish or roll it back before Agent, HTTP or the UI can observe this store.
     match atm_store::purge::finish_pending(&store) {
-        Ok(_) => {}
-        // The SQL deletion is committed; an AV/file handle may delay removing quarantined
-        // attachments. Keep the service available and retry at the next startup.
-        Err(atm_store::purge::PurgeError::CleanupPending(e)) => {
-            eprintln!("ATM project deletion cleanup pending: {e}");
+        // A committed deletion whose files an AV/file handle still holds is only retried at the
+        // next startup; it does not belong to any live project, so the service stays available.
+        Ok(settled) => {
+            for (id, reason) in &settled.pending {
+                eprintln!("ATM project deletion cleanup pending for {id}: {reason}");
+            }
         }
         // Before commit, restoring staged attachments is essential: exposing the project now
         // would let Agent reads see a database whose external files are temporarily elsewhere.

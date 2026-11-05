@@ -411,28 +411,25 @@ export function ProjectTrash({ client, notify }: { client: AyanamiClient; notify
     },
   });
   const purge = useMutation({
-    mutationFn: ({ code, version }: { code: string; version: number }) =>
-      client.projects.purge(code, version, code),
+    // 用户输入的确认词原样交给服务端核对，不在界面里替用户填。
+    mutationFn: ({ code, version, typed }: { code: string; version: number; typed: string }) =>
+      client.projects.purge(code, version, typed),
     onSuccess: async ({ code }) => {
       await queryClient.invalidateQueries();
-      notify(`已永久删除 ${code}；旧整库备份仍可由用户手动恢复`);
+      notify(`已永久删除 ${code}`);
     },
   });
   const confirmPurge = async (project: { code: string; name: string; version: number }) => {
     const typed = await dialogs.prompt({
       title: `永久删除 ${project.name}`,
-      label: `当前项目、任务、记录及目录关联将从 ATM 删除，Agent 无法恢复。旧整库备份保留，仅用户可手动恢复。请输入项目代码 ${project.code} 确认：`,
+      label: `输入项目代码 ${project.code} 确认。任务、记录和目录关联会被永久删除，旧整库备份保留。`,
       placeholder: project.code,
       maxLength: 40,
       confirmLabel: "永久删除",
       tone: "danger",
     });
     if (typed === null) return;
-    if (typed !== project.code) {
-      notify("项目代码不匹配，未删除任何内容");
-      return;
-    }
-    purge.mutate({ code: project.code, version: project.version });
+    purge.mutate({ code: project.code, version: project.version, typed });
   };
   const decide = useMutation({
     mutationFn: ({ id, approve }: { id: string; approve: boolean }) =>

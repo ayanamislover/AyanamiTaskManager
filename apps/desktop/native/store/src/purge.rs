@@ -192,17 +192,33 @@ fn read_journal(path: &Path) -> Result<Plan, PurgeError> {
     })
 }
 
+/// What [`finish_pending`] did. `pending` lists deletions that are already committed but whose
+/// external files could not all be removed yet: `(project id, reason)`. None of them is a live
+/// project, so they are retried at the next start instead of blocking anything else.
+#[derive(Debug, Default)]
+pub struct Settled {
+    pub finished: usize,
+    pub pending: Vec<(String, String)>,
+}
+
 /// Called before the runtime publishes HTTP/MCP/UI entries, and after a purge attempt. If the
 /// project row survived, put its attachments back. If the row is gone, finish erasing only its
 /// own marker and staged attachment directory. An ambiguous pair of directories is left intact.
-pub fn finish_pending(store: &Store) -> Result<usize, PurgeError> {
+///
+/// An `Err` means a journal whose project may still be live could not be settled: exposing that
+/// project now would show it without its attachments.
+pub fn finish_pending(store: &Store) -> Result<Settled, PurgeError> {
     let mut guard = attachments_lock(store, "finish_project_purges").map_err(storage)?;
     finish_pending_locked(store, &mut guard)
 }
 
-fn finish_pending_locked(store: &Store, guard: &mut AttachmentsGuard) -> Result<usize, PurgeError> {
+fn finish_pending_locked(
+    store: &Store,
+    guard: &mut AttachmentsGuard,
+) -> Result<Settled, PurgeError> {
+    let mut settled = Settled::default();
     let Some(stage) = guard.existing(&[STAGING]).map_err(storage)? else {
-        return Ok(0);
+        return Ok(settled);
     };
     let mut journals = fs::read_dir(&stage)
         .map_err(storage)?
@@ -222,54 +238,66 @@ fn finish_pending_locked(store: &Store, guard: &mut AttachmentsGuard) -> Result<
                 )
             })
             .map_err(storage)?;
-        let staged = stage.join(&plan.id);
-        let live = guard.artifacts().join(&plan.id);
         if exists {
-            if present(&staged)? {
-                if present(&live)? {
-                    return Err(storage(format!(
-                        "both live and staged attachments exist for {}",
-                        plan.id
-                    )));
-                }
-                let source = guard
-                    .dir(&[STAGING])
-                    .ok_or_else(|| storage("purge staging not pinned"))?;
-                let movable =
-                    crate::pin::open_movable(source, OsStr::new(&plan.id)).map_err(storage)?;
-                let target = guard
-                    .dir(&[])
-                    .ok_or_else(|| storage("artifacts root not pinned"))?;
-                movable
-                    .move_into(target, OsStr::new(&plan.id))
-                    .map_err(storage)?;
-            }
+            restore_staged(guard, &stage, &plan.id)?;
+            fs::remove_file(path).map_err(storage)?;
+            settled.finished += 1;
         } else {
-            for p in &plan.paths {
-                remove_owned_marker(p, &plan.id);
-            }
-            remove_current_logs(store, &plan.current_runs)
-                .map_err(|e| PurgeError::CleanupPending(e.to_string()))?;
-            if present(&staged).map_err(|e| PurgeError::CleanupPending(e.to_string()))? {
-                let source = guard
-                    .dir(&[STAGING])
-                    .ok_or_else(|| PurgeError::CleanupPending("purge staging not pinned".into()))?;
-                let movable = crate::pin::open_movable(source, OsStr::new(&plan.id))
-                    .map_err(|e| PurgeError::CleanupPending(e.to_string()))?;
-                drop(movable);
-                fs::remove_dir_all(&staged)
-                    .map_err(|e| PurgeError::CleanupPending(e.to_string()))?;
+            // One committed deletion whose files are still held open must not stop the others,
+            // nor be reported as the outcome of a later, unrelated deletion.
+            match erase_deleted(store, guard, &stage, &plan, path) {
+                Ok(()) => settled.finished += 1,
+                Err(reason) => settled.pending.push((plan.id, reason)),
             }
         }
-        fs::remove_file(path).map_err(|e| {
-            if exists {
-                storage(e)
-            } else {
-                PurgeError::CleanupPending(e.to_string())
-            }
-        })?;
     }
-    Ok(journals.len())
+    Ok(settled)
+}
+
+/// The project row is still there: move its staged attachments back.
+fn restore_staged(guard: &mut AttachmentsGuard, stage: &Path, id: &str) -> Result<(), PurgeError> {
+    if !present(&stage.join(id))? {
+        return Ok(());
+    }
+    if present(&guard.artifacts().join(id))? {
+        return Err(storage(format!(
+            "both live and staged attachments exist for {id}"
+        )));
+    }
+    let source = guard
+        .dir(&[STAGING])
+        .ok_or_else(|| storage("purge staging not pinned"))?;
+    let movable = crate::pin::open_movable(source, OsStr::new(id)).map_err(storage)?;
+    let target = guard
+        .dir(&[])
+        .ok_or_else(|| storage("artifacts root not pinned"))?;
+    movable.move_into(target, OsStr::new(id)).map_err(storage)
+}
+
+/// The project row is gone: remove its own marker, current dispatch logs, staged attachments and
+/// finally the journal. Any failure leaves the journal for the next retry.
+fn erase_deleted(
+    store: &Store,
+    guard: &mut AttachmentsGuard,
+    stage: &Path,
+    plan: &Plan,
+    journal: &Path,
+) -> Result<(), String> {
+    for p in &plan.paths {
+        remove_owned_marker(p, &plan.id);
+    }
+    remove_current_logs(store, &plan.current_runs).map_err(|e| e.to_string())?;
+    let staged = stage.join(&plan.id);
+    if present(&staged).map_err(|e| e.to_string())? {
+        let source = guard
+            .dir(&[STAGING])
+            .ok_or_else(|| "purge staging not pinned".to_string())?;
+        let movable =
+            crate::pin::open_movable(source, OsStr::new(&plan.id)).map_err(|e| e.to_string())?;
+        drop(movable);
+        fs::remove_dir_all(&staged).map_err(|e| e.to_string())?;
+    }
+    fs::remove_file(journal).map_err(|e| e.to_string())
 }
 
 fn remove_current_logs(store: &Store, runs: &[String]) -> Result<(), PurgeError> {
@@ -351,6 +379,8 @@ pub fn purge_project(
     }
     let mut guard = attachments_lock(store, "purge_project").map_err(storage)?;
     refuse_pending_swaps(store, &mut guard).map_err(storage)?;
+    // Earlier deletions whose files are still held open stay pending for the next start; they
+    // neither block this deletion nor become its result.
     finish_pending_locked(store, &mut guard)?;
     let plan = plan(store, id, code, expected_version)?;
     let stage = guard.ensure(&[STAGING]).map_err(storage)?;
@@ -399,19 +429,31 @@ pub fn purge_project(
     });
     match result {
         Ok(()) => {
-            finish_pending_locked(store, &mut guard)
+            // Committed: from here on every failure is "deleted, cleanup pending", never a
+            // rolled-back deletion. Only this project's own leftovers are reported.
+            let settled = finish_pending_locked(store, &mut guard)
                 .map_err(|e| PurgeError::CleanupPending(e.to_string()))?;
+            if let Some((_, reason)) = settled.pending.iter().find(|(p, _)| p == id) {
+                return Err(PurgeError::CleanupPending(reason.clone()));
+            }
             Ok(PurgeOutcome {
                 id: id.into(),
                 code: code.into(),
             })
         }
         Err(e) => {
-            let _ = finish_pending_locked(store, &mut guard);
-            Err(match e {
+            let refused = match e {
                 crate::WriteError::Rejected(e) => e,
                 other => storage(format!("{other:?}")),
-            })
+            };
+            // Nothing was deleted, but the attachments were staged. If they cannot be put back
+            // now, say so instead of reporting only the refusal; startup puts them back.
+            match finish_pending_locked(store, &mut guard) {
+                Ok(_) => Err(refused),
+                Err(restore) => Err(storage(format!(
+                    "{refused}; staged attachments are put back at the next start: {restore}"
+                ))),
+            }
         }
     }
 }
@@ -472,6 +514,27 @@ pub fn delete_live_rows(tx: &Transaction<'_>, project_id: &str) -> rusqlite::Res
         return Err(rusqlite::Error::InvalidParameterName(
             "project has an active dispatch run".into(),
         ));
+    }
+
+    // GLOBAL receipts (quick task create/update/promote, begin's quick branch, saved views) carry
+    // copies of rows removed below: titles, notes, the promoted project. Ids are ULIDs, so a
+    // receipt that mentions one as a JSON string is that row's receipt. Remove it with the row
+    // instead of letting a replay of its op_id hand the old content back.
+    let mut owned: Vec<String> = tx
+        .prepare("SELECT id FROM quick_tasks WHERE promoted_project_id = ?1")?
+        .query_map([project_id], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    owned.extend(
+        tx.prepare("SELECT id FROM saved_views WHERE project_id = ?1")?
+            .query_map([project_id], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?,
+    );
+    owned.push(project_id.to_owned());
+    for id in &owned {
+        tx.execute(
+            "DELETE FROM idempotency_receipts WHERE scope_kind = 'GLOBAL' AND instr(receipt_json, ?1) > 0",
+            [format!("\"{id}\"")],
+        )?;
     }
 
     // A promoted quick task is a copy of project work. Remove it and its updates rather than

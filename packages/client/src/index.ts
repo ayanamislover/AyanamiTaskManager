@@ -176,6 +176,7 @@ export class AyanamiClient {
           name: string;
           codeTaken: boolean;
           suggestedCode: string | null;
+          importedAs: string | null;
         }>;
       }>("GET", `/api/v1/backups/${encodeURIComponent(id)}/deleted-projects`),
     importDeletedProject: (id: string, projectId: string, code?: string) =>

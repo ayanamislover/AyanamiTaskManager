@@ -3,6 +3,7 @@
 mod support;
 
 use atm_domain::error::ErrorCode;
+use atm_domain::principal::Principal;
 use atm_domain::work::Operation;
 use atm_service::backups::RestoreScope;
 use atm_service::project::{CreateProjectRequest, PathInfo, Transition};
@@ -109,8 +110,35 @@ fn permanent_delete_is_user_only_confirmed_and_releases_code_and_path() {
     );
     assert!(marker_dir.join("project.json").exists());
 
+    // A 2.x backup of this project stays in the read-only catalog for the User only (ATM-D-712).
+    w.exec(
+        "INSERT INTO legacy_backups (id, source, scope, project_id, legacy_path, sha256, size_bytes, reason,
+                                     schema_version, created_at, verified_at, importable)
+           VALUES ('CATALOG:backups/projects/PT/pre-trash.sqlite', 'CATALOG', 'PROJECT', 'PT',
+                   'C:\\legacy\\backups\\projects\\PT\\pre-trash.sqlite', 'abc', 10, 'PRE_TRASH',
+                   7, '2026-01-01T00:00:00.000Z', NULL, 'AS_PROJECT'),
+                  ('CATALOG:backups/registry.sqlite', 'CATALOG', 'REGISTRY', NULL,
+                   'C:\\legacy\\backups\\registry.sqlite', 'def', 10, NULL,
+                   7, '2026-01-01T00:00:00.000Z', NULL, 'NO');",
+    );
+    let legacy_ids = |p: &Principal| -> Vec<String> {
+        w.svc.list_backups(p, 100).unwrap()["legacyBackups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        legacy_ids(&agent()).len(),
+        2,
+        "visible while the project exists"
+    );
+
     let result = w.svc.purge_project(&user(), "TRS", "TRS", 0).unwrap();
     assert_eq!(result["deleted"], true);
+    assert_eq!(legacy_ids(&agent()), ["CATALOG:backups/registry.sqlite"]);
+    assert_eq!(legacy_ids(&user()).len(), 2);
     assert_eq!(w.count("SELECT count(*) FROM projects WHERE id='PT'"), 0);
     assert!(!marker_dir.join("project.json").exists());
     assert_eq!(

@@ -50,6 +50,20 @@ export function Status({ value }: { value: string }) {
   return <span className={`atm-badge ${statusClass(value)}`}>{statusLabels[value] ?? value}</span>;
 }
 
+/** 备份种类（`store::backup` 的 kind）的叫法；不认识的照原文显示。 */
+const backupKindLabels: Record<string, string> = {
+  MANUAL: "手动备份",
+  DAILY: "每日备份",
+  WEEKLY: "每周备份",
+  PRE_RESTORE: "恢复前的备份",
+  PRE_ARCHIVE: "归档项目前的备份",
+  PRE_TRASH: "删除项目前的备份",
+};
+
+export function backupKindLabel(kind?: string | null): string {
+  return (kind && backupKindLabels[kind]) || kind || "备份";
+}
+
 export function formatTime(value?: string | null): string {
   if (!value) return "暂无";
   const date = new Date(value);
