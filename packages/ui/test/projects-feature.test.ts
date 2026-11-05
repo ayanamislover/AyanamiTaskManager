@@ -57,6 +57,7 @@ function missingProjectContracts(source: string): string[] {
     "client.projects.createMilestoneAsUser(project.code, {",
     "client.projects.restore(code)",
     "client.projects.purge(code, version, typed)",
+    "verbatim: true",
     "client.backups.deletedProjects(selectedBackup!)",
     "client.backups.importDeletedProject(backupId, projectId, code)",
     'queryKey: ["projects", "trash"]',

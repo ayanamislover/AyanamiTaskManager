@@ -418,6 +418,11 @@ export function ProjectTrash({ client, notify }: { client: AyanamiClient; notify
       await queryClient.invalidateQueries();
       notify(`已永久删除 ${code}`);
     },
+    // 删除已经生效、只是有文件留到下次启动再清：刷新列表，错误条照常说明清理待重试。
+    onError: async (error) => {
+      const details = (error as { details?: { committed?: unknown } | null }).details;
+      if (details?.committed === true) await queryClient.invalidateQueries();
+    },
   });
   const confirmPurge = async (project: { code: string; name: string; version: number }) => {
     const typed = await dialogs.prompt({
@@ -427,6 +432,7 @@ export function ProjectTrash({ client, notify }: { client: AyanamiClient; notify
       maxLength: 40,
       confirmLabel: "永久删除",
       tone: "danger",
+      verbatim: true,
     });
     if (typed === null) return;
     purge.mutate({ code: project.code, version: project.version, typed });

@@ -54,6 +54,19 @@ fn only_the_user_can_permanently_delete_a_confirmed_trashed_project() {
         .status,
         422
     );
+    // The confirmation is compared exactly as typed: no trimming, no case folding.
+    for typed in [" OLD ", "old"] {
+        assert_eq!(
+            w.call(
+                "POST",
+                route,
+                Some(json!({"confirmCode":typed,"expectedVersion":version}))
+            )
+            .status,
+            422,
+            "{typed:?}"
+        );
+    }
     assert_eq!(
         w.call(
             "POST",
@@ -143,4 +156,44 @@ fn only_the_user_can_permanently_delete_a_confirmed_trashed_project() {
             .to_string()
             .contains("protected project detail")
     );
+}
+
+/// Peer r2 R2-4: a deletion that committed but could not remove one of its own files says so in
+/// the UI envelope, and is not offered as retryable.
+#[test]
+fn committed_deletion_with_pending_cleanup_is_reported_as_committed() {
+    let w = world("purge-ui-committed");
+    w.ok(
+        "POST",
+        "/api/v1/projects",
+        Some(json!({"name":"Old","code":"OLD","sourcePath":null})),
+        201,
+    );
+    w.svc
+        .store()
+        .write(|tx| {
+            tx.execute(
+                "INSERT INTO dispatch_runs(run,project_code,task_key,title,origin,state,session_id,created_at,cwd,log_root)
+                 VALUES ('RUN-OLD','OLD','OLD-T-1','Work','desktop','succeeded','S','2026-01-01','x','CURRENT')",
+                [],
+            )
+        })
+        .unwrap();
+    // A directory where the run's log file should be: removing it fails like a held-open file.
+    fs::create_dir_all(w.dir.join("dispatch").join("logs").join("RUN-OLD.jsonl")).unwrap();
+    w.ok("POST", "/api/v1/projects/OLD/trash", None, 200);
+    let version = w.get("/api/v1/trash/projects")[0]["version"]
+        .as_i64()
+        .unwrap();
+    let reply = w.call(
+        "POST",
+        "/api/v1/projects/OLD/purge",
+        Some(json!({"confirmCode":"OLD","expectedVersion":version})),
+    );
+    assert_eq!(reply.status, 500, "{}", reply.body);
+    let error = &reply.body["error"];
+    assert_eq!(error["details"]["committed"], true, "{}", reply.body);
+    assert_eq!(error["retryable"], false, "{}", reply.body);
+    assert!(error["message"].as_str().unwrap().contains("项目已删除"));
+    assert_eq!(w.get("/api/v1/trash/projects").as_array().unwrap().len(), 0);
 }

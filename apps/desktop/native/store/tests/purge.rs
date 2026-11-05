@@ -51,11 +51,25 @@ fn count(db: &Connection, table: &str, predicate: &str) -> i64 {
 #[test]
 fn removes_only_the_old_identity_and_leaves_other_projects_untouched() {
     let mut db = database();
-    // GLOBAL receipts hold copies of the promoted quick task; an unrelated one must stay.
+    // GLOBAL receipts and global events hold copies of the promoted quick task and the project's
+    // saved view. Records of *other* entities stay, even when their text mentions those ids.
     db.execute_batch(
-        "INSERT INTO idempotency_receipts(scope_kind,scope_id,ns_kind,ns_id,op_id,operation,fp_v,fp_family,fingerprint,receipt_json)
+        "INSERT INTO saved_views(id,scope,project_id,name,query_json,created_at,updated_at)
+         VALUES ('V1','PROJECT','OLD','Old view','{}','2026-01-01','2026-01-01'),
+                ('V2','PROJECT','KEEP','Mentions V1','{\"note\":\"V1\"}','2026-01-01','2026-01-01');
+         INSERT INTO idempotency_receipts(scope_kind,scope_id,ns_kind,ns_id,op_id,operation,fp_v,fp_family,fingerprint,receipt_json)
          VALUES ('GLOBAL','GLOBAL','GLOBAL','GLOBAL','op-q1','quick.create',2,'canon-v2','f','{\"quick\":{\"id\":\"Q1\",\"title\":\"Old promoted\"}}'),
-                ('GLOBAL','GLOBAL','GLOBAL','GLOBAL','op-q2','quick.create',2,'canon-v2','f','{\"quick\":{\"id\":\"Q12\",\"title\":\"Other\"}}');",
+                ('GLOBAL','GLOBAL','GLOBAL','GLOBAL','op-q1u','quick.update',2,'canon-v2','f','{\"quick\":{\"id\":\"Q1\"},\"changed\":true}'),
+                ('GLOBAL','GLOBAL','GLOBAL','GLOBAL','op-q2','quick.create',2,'canon-v2','f','{\"quick\":{\"id\":\"Q12\",\"title\":\"Other\"}}'),
+                ('GLOBAL','GLOBAL','GLOBAL','GLOBAL','op-q9','quick.create',2,'canon-v2','f','{\"quick\":{\"id\":\"Q9\",\"note\":\"Q1\",\"title\":\"OLD\"}}'),
+                ('GLOBAL','GLOBAL','GLOBAL','GLOBAL','op-v1','saved_view.create',2,'canon-v2','f','{\"view\":{\"id\":\"V1\",\"name\":\"Old view\"}}'),
+                ('GLOBAL','GLOBAL','GLOBAL','GLOBAL','op-v2','saved_view.create',2,'canon-v2','f','{\"view\":{\"id\":\"V2\",\"query\":{\"note\":\"V1\"}}}');
+         INSERT INTO global_feed(global_seq,type,aggregate_id,actor,payload_json,created_at)
+         VALUES (10,'quick.created','Q1','agent','{\"title\":\"Old promoted\"}','2026-01-01'),
+                (11,'quick.promoted','Q1','agent','{\"projectId\":\"OLD\"}','2026-01-01'),
+                (12,'quick.created','Q9','agent','{\"note\":\"Q1\"}','2026-01-01'),
+                (13,'saved_view.created','V1','USER','{\"projectId\":\"OLD\"}','2026-01-01'),
+                (14,'saved_view.created','V2','USER','{\"projectId\":\"KEEP\"}','2026-01-01');",
     )
     .unwrap();
     let tx = db.transaction().unwrap();
@@ -80,8 +94,24 @@ fn removes_only_the_old_identity_and_leaves_other_projects_untouched() {
     }
     assert_eq!(count(&db, "quick_tasks", "id = 'Q1'"), 0);
     assert_eq!(count(&db, "quick_task_updates", "id = 'QU1'"), 0);
-    assert_eq!(count(&db, "idempotency_receipts", "op_id = 'op-q1'"), 0);
-    assert_eq!(count(&db, "idempotency_receipts", "op_id = 'op-q2'"), 1);
+    for gone in ["op-q1", "op-q1u", "op-v1"] {
+        assert_eq!(
+            count(&db, "idempotency_receipts", &format!("op_id = '{gone}'")),
+            0,
+            "{gone}"
+        );
+    }
+    // Same id as a prefix, as a note/title, or inside another view's query: not the owner.
+    for kept in ["op-q2", "op-q9", "op-v2"] {
+        assert_eq!(
+            count(&db, "idempotency_receipts", &format!("op_id = '{kept}'")),
+            1,
+            "{kept}"
+        );
+    }
+    assert_eq!(count(&db, "global_feed", "aggregate_id IN ('Q1','V1')"), 0);
+    assert_eq!(count(&db, "global_feed", "aggregate_id IN ('Q9','V2')"), 2);
+    assert_eq!(count(&db, "saved_views", "id = 'V2'"), 1);
     assert_eq!(count(&db, "global_feed", "aggregate_id = 'OLD'"), 0);
     assert_eq!(count(&db, "global_feed", "aggregate_id = 'KEEP'"), 1);
     assert_eq!(count(&db, "sync_published", "project_code = 'OLD'"), 0);

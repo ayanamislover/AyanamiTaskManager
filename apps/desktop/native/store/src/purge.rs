@@ -516,25 +516,39 @@ pub fn delete_live_rows(tx: &Transaction<'_>, project_id: &str) -> rusqlite::Res
         ));
     }
 
-    // GLOBAL receipts (quick task create/update/promote, begin's quick branch, saved views) carry
-    // copies of rows removed below: titles, notes, the promoted project. Ids are ULIDs, so a
-    // receipt that mentions one as a JSON string is that row's receipt. Remove it with the row
-    // instead of letting a replay of its op_id hand the old content back.
-    let mut owned: Vec<String> = tx
+    // Quick tasks promoted into this project and its saved views are removed below. Their GLOBAL
+    // receipts and global events live outside the project scope and carry copies of them (titles,
+    // notes, queries, the promoted project), so remove those too. Ownership is matched only on the
+    // field that names the entity — `quick.id` / `view.id` in a receipt of that operation, and the
+    // event's aggregate — never on any string that happens to equal an id elsewhere in the JSON.
+    let quicks: Vec<String> = tx
         .prepare("SELECT id FROM quick_tasks WHERE promoted_project_id = ?1")?
         .query_map([project_id], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
-    owned.extend(
-        tx.prepare("SELECT id FROM saved_views WHERE project_id = ?1")?
-            .query_map([project_id], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<Vec<_>>>()?,
-    );
-    owned.push(project_id.to_owned());
-    for id in &owned {
+    let views: Vec<String> = tx
+        .prepare("SELECT id FROM saved_views WHERE project_id = ?1")?
+        .query_map([project_id], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    for id in &quicks {
         tx.execute(
-            "DELETE FROM idempotency_receipts WHERE scope_kind = 'GLOBAL' AND instr(receipt_json, ?1) > 0",
-            [format!("\"{id}\"")],
+            "DELETE FROM idempotency_receipts
+             WHERE scope_kind = 'GLOBAL'
+               AND operation IN ('quick.create','quick.update','quick.promote','session.recover-or-begin')
+               AND json_valid(receipt_json) AND json_extract(receipt_json, '$.quick.id') = ?1",
+            [id],
         )?;
+    }
+    for id in &views {
+        tx.execute(
+            "DELETE FROM idempotency_receipts
+             WHERE scope_kind = 'GLOBAL'
+               AND operation IN ('saved_view.create','saved_view.update')
+               AND json_valid(receipt_json) AND json_extract(receipt_json, '$.view.id') = ?1",
+            [id],
+        )?;
+    }
+    for id in quicks.iter().chain(&views) {
+        tx.execute("DELETE FROM global_feed WHERE aggregate_id = ?1", [id])?;
     }
 
     // A promoted quick task is a copy of project work. Remove it and its updates rather than

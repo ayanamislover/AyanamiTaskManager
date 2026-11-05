@@ -35,17 +35,26 @@ export type PromptOptions = {
   maxLength?: number;
   /** 对必须输入确认词的不可撤销操作使用现有危险按钮样式。 */
   tone?: "danger" | "primary";
+  /** 确认词要原样交给服务端核对：返回用户输入的原文，首尾空白也不去掉（空白只用于判空）。 */
+  verbatim?: boolean;
 };
 
 export type Dialogs = {
   confirm: (options: ConfirmOptions) => Promise<boolean>;
-  /** 取消返回 null；确认时返回去掉首尾空白后的非空文本。 */
+  /** 取消返回 null；确认时返回去掉首尾空白后的非空文本（`verbatim` 时返回原文）。 */
   prompt: (options: PromptOptions) => Promise<string | null>;
 };
 
 type DialogRequest =
   | ({ kind: "confirm"; id: number; resolve: (value: boolean) => void } & ConfirmOptions)
   | ({ kind: "prompt"; id: number; resolve: (value: string | null) => void } & PromptOptions);
+
+/** 输入框确认时交出去的值：全是空白算没填（null）；`verbatim` 交原文，否则交去掉首尾空白的文本。 */
+export function promptValue(value: string, verbatim?: boolean): string | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  return verbatim ? value : trimmed;
+}
 
 const missingProvider = () =>
   Promise.reject(new Error("DialogProvider 未挂载：确认框和输入框需要在应用根部提供"));
@@ -124,7 +133,10 @@ function RequestDialog({
   const danger = request.tone === "danger";
   const submit = () => {
     if (request.kind === "confirm") settle(true);
-    else if (trimmed) settle(trimmed);
+    else {
+      const result = promptValue(value, request.verbatim);
+      if (result !== null) settle(result);
+    }
   };
 
   return (

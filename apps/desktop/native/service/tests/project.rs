@@ -1341,3 +1341,98 @@ fn l002_withdrawal_that_cannot_move_files_keeps_the_backup_registered() {
     assert_eq!(list["withdrawals"]["recent"][0]["reason"], "FILES_IN_USE");
     assert_eq!(list["withdrawals"]["cleanupPending"], 0);
 }
+
+/// Peer r2 R2-1 / R2-2: purging a project removes the GLOBAL receipts and global events of the quick
+/// task promoted into it, but never those of another quick task that merely mentions its id.
+#[test]
+fn permanent_delete_clears_promoted_quick_history_but_not_other_receipts() {
+    use atm_service::quick::{QuickCreateRequest, QuickPromoteRequest};
+    let w = world("pj-permanent-delete-quick");
+    let quick = |title: &str, note: Option<String>, op: &str| {
+        w.svc
+            .quick_create(
+                &user(),
+                QuickCreateRequest {
+                    title: title.into(),
+                    note,
+                    ..QuickCreateRequest::default()
+                },
+                op,
+            )
+            .unwrap()
+    };
+    let promoted = quick("REVIEW_PRIVATE_OLD_TITLE", None, "q-old");
+    let quick_id = promoted.result["quick"]["id"].as_str().unwrap().to_owned();
+    let made = w
+        .svc
+        .quick_promote(
+            &user(),
+            &quick_id,
+            QuickPromoteRequest {
+                expected_version: promoted.result["quick"]["version"].as_i64().unwrap(),
+                ..QuickPromoteRequest::default()
+            },
+            "q-old-promote",
+        )
+        .unwrap();
+    let project_id = made.result["project"]["id"]
+        .as_str()
+        .or_else(|| made.result["quick"]["promotedProjectId"].as_str())
+        .unwrap()
+        .to_owned();
+    let code: String = {
+        let key = project_id.clone();
+        w.svc
+            .store()
+            .read(move |tx| {
+                tx.query_row("SELECT code FROM projects WHERE id = ?1", [&key], |r| {
+                    r.get(0)
+                })
+            })
+            .unwrap()
+    };
+    // Another quick task whose note is exactly the doomed project's id.
+    let bystander = quick("bystander", Some(project_id.clone()), "q-bystander");
+    let bystander_id = bystander.result["quick"]["id"].as_str().unwrap().to_owned();
+
+    w.svc
+        .set_lifecycle(&user(), &code, Transition::Trash, "trash-old")
+        .unwrap();
+    let version: i64 = {
+        let key = project_id.clone();
+        w.svc
+            .store()
+            .read(move |tx| {
+                tx.query_row("SELECT version FROM projects WHERE id = ?1", [&key], |r| {
+                    r.get(0)
+                })
+            })
+            .unwrap()
+    };
+    w.svc.purge_project(&user(), &code, &code, version).unwrap();
+
+    let again = quick("bystander", Some(project_id.clone()), "q-bystander");
+    assert!(again.replayed, "the bystander's receipt survives");
+    assert_eq!(again.result["quick"]["id"], bystander_id.as_str());
+    assert_eq!(
+        w.count("SELECT count(*) FROM quick_tasks WHERE title = 'bystander'"),
+        1
+    );
+    let overview = w.svc.ui_overview(&user()).unwrap().to_string();
+    assert!(
+        !overview.contains("REVIEW_PRIVATE_OLD_TITLE"),
+        "the promoted quick task's history is gone from the overview"
+    );
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM global_feed WHERE aggregate_id = '{quick_id}'"
+        )),
+        0
+    );
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM global_feed WHERE aggregate_id = '{bystander_id}'"
+        )),
+        1
+    );
+}
