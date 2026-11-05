@@ -1436,3 +1436,103 @@ fn permanent_delete_clears_promoted_quick_history_but_not_other_receipts() {
         1
     );
 }
+
+/// Peer r3 R3-1: a saved view the User deleted before the project still has receipts and events
+/// that name the project as owner; purging the project removes them. A global view that merely
+/// mentions the old view's id keeps its receipt and stays idempotent.
+#[test]
+fn permanent_delete_clears_history_of_views_deleted_earlier() {
+    use atm_service::views::{SavedViewCreate, SavedViewUpdate};
+    let w = world("pj-permanent-delete-retired-view");
+    let made = w
+        .svc
+        .create_project(
+            &user(),
+            CreateProjectRequest {
+                code: Some("SVP".into()),
+                ..create("Saved view owner")
+            },
+        )
+        .unwrap();
+    let project_id = made.result["project"]["id"].as_str().unwrap().to_owned();
+    let view = w
+        .svc
+        .create_saved_view(
+            &user(),
+            SavedViewCreate {
+                scope: "PROJECT".into(),
+                project: Some("SVP".into()),
+                name: "RETIRED_VIEW_NAME".into(),
+                query: Some(json!({"status": "READY"})),
+                sort: None,
+            },
+            "view-create",
+        )
+        .unwrap();
+    let view_id = view.result["view"]["id"].as_str().unwrap().to_owned();
+    w.svc
+        .update_saved_view(
+            &user(),
+            &view_id,
+            SavedViewUpdate {
+                expected_version: Some(view.result["view"]["version"].as_i64().unwrap()),
+                name: Some("RETIRED_VIEW_NAME_2".into()),
+                ..SavedViewUpdate::default()
+            },
+            "view-update",
+        )
+        .unwrap();
+    w.svc
+        .delete_saved_view(&user(), &view_id, Some(1), "view-delete")
+        .unwrap();
+    let global = |op: &str| {
+        w.svc
+            .create_saved_view(
+                &user(),
+                SavedViewCreate {
+                    scope: "GLOBAL".into(),
+                    project: None,
+                    name: "bystander view".into(),
+                    query: Some(json!({"note": view_id})),
+                    sort: None,
+                },
+                op,
+            )
+            .unwrap()
+    };
+    let first = global("view-global");
+
+    w.svc
+        .set_lifecycle(&user(), "SVP", Transition::Trash, "trash-svp")
+        .unwrap();
+    let version: i64 = {
+        let key = project_id.clone();
+        w.svc
+            .store()
+            .read(move |tx| {
+                tx.query_row("SELECT version FROM projects WHERE id = ?1", [&key], |r| {
+                    r.get(0)
+                })
+            })
+            .unwrap()
+    };
+    w.svc.purge_project(&user(), "SVP", "SVP", version).unwrap();
+
+    assert_eq!(
+        w.count(
+            "SELECT count(*) FROM idempotency_receipts WHERE op_id IN ('view-create','view-update','view-delete')"
+        ),
+        0
+    );
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM global_feed WHERE aggregate_id = '{view_id}'"
+        )),
+        0
+    );
+    let overview = w.svc.ui_overview(&user()).unwrap().to_string();
+    assert!(!overview.contains("RETIRED_VIEW_NAME"));
+    let again = global("view-global");
+    assert!(again.replayed, "the bystander view's receipt survives");
+    assert_eq!(again.result["view"]["id"], first.result["view"]["id"]);
+}

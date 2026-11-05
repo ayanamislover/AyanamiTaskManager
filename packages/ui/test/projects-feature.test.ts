@@ -5,7 +5,12 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { AyanamiClient, RegisteredProject } from "@ayanami-task/client";
 import { describe, expect, it, vi } from "vitest";
-import { ProjectWizard, ProjectsPage } from "../src/features/projects.js";
+import {
+  ProjectWizard,
+  ProjectsPage,
+  isCommittedError,
+  uncommittedError,
+} from "../src/features/projects.js";
 
 const sourcePath = join(process.cwd(), "packages", "ui", "src", "features", "projects.tsx");
 const backupRecoveryPath = join(
@@ -58,6 +63,9 @@ function missingProjectContracts(source: string): string[] {
     "client.projects.restore(code)",
     "client.projects.purge(code, version, typed)",
     "verbatim: true",
+    "if (!isCommittedError(error)) return;",
+    "notify(error.message);",
+    "uncommittedError(purge.error)",
     "client.backups.deletedProjects(selectedBackup!)",
     "client.backups.importDeletedProject(backupId, projectId, code)",
     'queryKey: ["projects", "trash"]',
@@ -77,6 +85,20 @@ function missingProjectContracts(source: string): string[] {
 }
 
 describe("Projects feature", () => {
+  it("已提交的删除错误按 details.committed 认出来，其他错误不算", () => {
+    expect(isCommittedError({ details: { committed: true } })).toBe(true);
+    expect(isCommittedError({ details: { committed: "unknown" } })).toBe(false);
+    expect(isCommittedError({ details: { committed: false } })).toBe(false);
+    expect(isCommittedError({ details: null })).toBe(false);
+    expect(isCommittedError(new Error("x"))).toBe(false);
+    expect(isCommittedError(null)).toBe(false);
+    const committed = { details: { committed: true } };
+    const failed = new Error("x");
+    expect(uncommittedError(committed)).toBeNull();
+    expect(uncommittedError(failed)).toBe(failed);
+    expect(uncommittedError(null)).toBeNull();
+  });
+
   it("保持项目列表、垃圾箱恢复入口与 ProjectWizard 初始 DOM", () => {
     // 夹具照真实接口的形状：list() 不含 TRASHED，垃圾箱单独取数。原来这里把 TRASHED 塞进
     // ["projects"]，于是测试里恢复按钮看得见、真实界面里永远看不见（ATM-T-0492）。

@@ -56,20 +56,31 @@ fn removes_only_the_old_identity_and_leaves_other_projects_untouched() {
     db.execute_batch(
         "INSERT INTO saved_views(id,scope,project_id,name,query_json,created_at,updated_at)
          VALUES ('V1','PROJECT','OLD','Old view','{}','2026-01-01','2026-01-01'),
-                ('V2','PROJECT','KEEP','Mentions V1','{\"note\":\"V1\"}','2026-01-01','2026-01-01');
+                ('V2','PROJECT','KEEP','Mentions V1','{\"note\":\"V1\"}','2026-01-01','2026-01-01'),
+                ('V4','PROJECT','KEEP','Moved from OLD','{}','2026-01-01','2026-01-01'),
+                ('V5','GLOBAL',NULL,'Mentions V3','{\"note\":\"V3\"}','2026-01-01','2026-01-01');
          INSERT INTO idempotency_receipts(scope_kind,scope_id,ns_kind,ns_id,op_id,operation,fp_v,fp_family,fingerprint,receipt_json)
          VALUES ('GLOBAL','GLOBAL','GLOBAL','GLOBAL','op-q1','quick.create',2,'canon-v2','f','{\"quick\":{\"id\":\"Q1\",\"title\":\"Old promoted\"}}'),
                 ('GLOBAL','GLOBAL','GLOBAL','GLOBAL','op-q1u','quick.update',2,'canon-v2','f','{\"quick\":{\"id\":\"Q1\"},\"changed\":true}'),
                 ('GLOBAL','GLOBAL','GLOBAL','GLOBAL','op-q2','quick.create',2,'canon-v2','f','{\"quick\":{\"id\":\"Q12\",\"title\":\"Other\"}}'),
                 ('GLOBAL','GLOBAL','GLOBAL','GLOBAL','op-q9','quick.create',2,'canon-v2','f','{\"quick\":{\"id\":\"Q9\",\"note\":\"Q1\",\"title\":\"OLD\"}}'),
                 ('GLOBAL','GLOBAL','GLOBAL','GLOBAL','op-v1','saved_view.create',2,'canon-v2','f','{\"view\":{\"id\":\"V1\",\"name\":\"Old view\"}}'),
-                ('GLOBAL','GLOBAL','GLOBAL','GLOBAL','op-v2','saved_view.create',2,'canon-v2','f','{\"view\":{\"id\":\"V2\",\"query\":{\"note\":\"V1\"}}}');
+                ('GLOBAL','GLOBAL','GLOBAL','GLOBAL','op-v2','saved_view.create',2,'canon-v2','f','{\"view\":{\"id\":\"V2\",\"query\":{\"note\":\"V1\"}}}'),
+                ('GLOBAL','GLOBAL','GLOBAL','GLOBAL','op-v3c','saved_view.create',2,'canon-v2','f','{\"view\":{\"id\":\"V3\",\"projectId\":\"OLD\",\"name\":\"Retired\"}}'),
+                ('GLOBAL','GLOBAL','GLOBAL','GLOBAL','op-v3u','saved_view.update',2,'canon-v2','f','{\"view\":{\"id\":\"V3\",\"projectId\":\"OLD\",\"name\":\"Retired 2\"}}'),
+                ('GLOBAL','GLOBAL','GLOBAL','GLOBAL','op-v3d','saved_view.delete',2,'canon-v2','f','{\"ok\":1,\"id\":\"V3\"}'),
+                ('GLOBAL','GLOBAL','GLOBAL','GLOBAL','op-v4','saved_view.create',2,'canon-v2','f','{\"view\":{\"id\":\"V4\",\"projectId\":\"OLD\"}}'),
+                ('GLOBAL','GLOBAL','GLOBAL','GLOBAL','op-v5','saved_view.create',2,'canon-v2','f','{\"view\":{\"id\":\"V5\",\"projectId\":null,\"name\":\"Mentions V3\"}}');
          INSERT INTO global_feed(global_seq,type,aggregate_id,actor,payload_json,created_at)
          VALUES (10,'quick.created','Q1','agent','{\"title\":\"Old promoted\"}','2026-01-01'),
                 (11,'quick.promoted','Q1','agent','{\"projectId\":\"OLD\"}','2026-01-01'),
                 (12,'quick.created','Q9','agent','{\"note\":\"Q1\"}','2026-01-01'),
                 (13,'saved_view.created','V1','USER','{\"projectId\":\"OLD\"}','2026-01-01'),
-                (14,'saved_view.created','V2','USER','{\"projectId\":\"KEEP\"}','2026-01-01');",
+                (14,'saved_view.created','V2','USER','{\"projectId\":\"KEEP\"}','2026-01-01'),
+                (15,'saved_view.created','V3','USER','{\"projectId\":\"OLD\"}','2026-01-01'),
+                (16,'saved_view.deleted','V3','USER','{\"projectId\":\"OLD\"}','2026-01-01'),
+                (17,'saved_view.created','V4','USER','{\"projectId\":\"OLD\"}','2026-01-01'),
+                (18,'saved_view.created','V5','USER','{\"projectId\":null}','2026-01-01');",
     )
     .unwrap();
     let tx = db.transaction().unwrap();
@@ -94,7 +105,8 @@ fn removes_only_the_old_identity_and_leaves_other_projects_untouched() {
     }
     assert_eq!(count(&db, "quick_tasks", "id = 'Q1'"), 0);
     assert_eq!(count(&db, "quick_task_updates", "id = 'QU1'"), 0);
-    for gone in ["op-q1", "op-q1u", "op-v1"] {
+    // V3 was deleted before the project: only its receipts and events remember the owner.
+    for gone in ["op-q1", "op-q1u", "op-v1", "op-v3c", "op-v3u", "op-v3d"] {
         assert_eq!(
             count(&db, "idempotency_receipts", &format!("op_id = '{gone}'")),
             0,
@@ -102,15 +114,22 @@ fn removes_only_the_old_identity_and_leaves_other_projects_untouched() {
         );
     }
     // Same id as a prefix, as a note/title, or inside another view's query: not the owner.
-    for kept in ["op-q2", "op-q9", "op-v2"] {
+    // V4 now lives under KEEP, V5 is a global view that only mentions V3 by name.
+    for kept in ["op-q2", "op-q9", "op-v2", "op-v4", "op-v5"] {
         assert_eq!(
             count(&db, "idempotency_receipts", &format!("op_id = '{kept}'")),
             1,
             "{kept}"
         );
     }
-    assert_eq!(count(&db, "global_feed", "aggregate_id IN ('Q1','V1')"), 0);
-    assert_eq!(count(&db, "global_feed", "aggregate_id IN ('Q9','V2')"), 2);
+    assert_eq!(
+        count(&db, "global_feed", "aggregate_id IN ('Q1','V1','V3')"),
+        0
+    );
+    assert_eq!(
+        count(&db, "global_feed", "aggregate_id IN ('Q9','V2','V4','V5')"),
+        4
+    );
     assert_eq!(count(&db, "saved_views", "id = 'V2'"), 1);
     assert_eq!(count(&db, "global_feed", "aggregate_id = 'OLD'"), 0);
     assert_eq!(count(&db, "global_feed", "aggregate_id = 'KEEP'"), 1);

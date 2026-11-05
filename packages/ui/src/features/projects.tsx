@@ -394,6 +394,17 @@ export function ProjectsPage({
  * TRASHED 项目——按钮永远渲染不出来，「移入垃圾箱」成了单向操作。垃圾箱单独取数，
  * 默认折叠，没有被删的项目时整块不出现。
  */
+/** 服务端确认这次写入已经生效（例如永久删除已提交、只是文件清理待重试）。 */
+export function isCommittedError(error: unknown): boolean {
+  const details = (error as { details?: { committed?: unknown } | null } | null)?.details;
+  return details?.committed === true;
+}
+
+/** A committed purge error is reported by toast, not left in the alert. */
+export function uncommittedError<E>(error: E | null): E | null {
+  return isCommittedError(error) ? null : error;
+}
+
 export function ProjectTrash({ client, notify }: { client: AyanamiClient; notify: Notify }) {
   const queryClient = useQueryClient();
   const dialogs = useDialogs();
@@ -418,10 +429,12 @@ export function ProjectTrash({ client, notify }: { client: AyanamiClient; notify
       await queryClient.invalidateQueries();
       notify(`已永久删除 ${code}`);
     },
-    // 删除已经生效、只是有文件留到下次启动再清：刷新列表，错误条照常说明清理待重试。
+    // 删除已经生效、只是有文件留到下次启动再清：刷新列表，并用通知说明清理待重试。
+    // 不放进垃圾箱面板的错误条：删的是最后一个项目时，面板会随列表清空一起消失。
     onError: async (error) => {
-      const details = (error as { details?: { committed?: unknown } | null }).details;
-      if (details?.committed === true) await queryClient.invalidateQueries();
+      if (!isCommittedError(error)) return;
+      await queryClient.invalidateQueries();
+      notify(error.message);
     },
   });
   const confirmPurge = async (project: { code: string; name: string; version: number }) => {
@@ -584,7 +597,9 @@ export function ProjectTrash({ client, notify }: { client: AyanamiClient; notify
             ))}
           </div>
         )}
-        <MutationErrorAlert error={restore.error ?? decide.error ?? purge.error} />
+        <MutationErrorAlert
+          error={restore.error ?? decide.error ?? uncommittedError(purge.error)}
+        />
       </div>
     </section>
   );

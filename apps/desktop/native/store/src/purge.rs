@@ -525,10 +525,38 @@ pub fn delete_live_rows(tx: &Transaction<'_>, project_id: &str) -> rusqlite::Res
         .prepare("SELECT id FROM quick_tasks WHERE promoted_project_id = ?1")?
         .query_map([project_id], |r| r.get(0))?
         .collect::<rusqlite::Result<_>>()?;
-    let views: Vec<String> = tx
-        .prepare("SELECT id FROM saved_views WHERE project_id = ?1")?
-        .query_map([project_id], |r| r.get(0))?
+    // Views the User already deleted have no row left; their create/update receipts and their
+    // events still name this project as the owner (`view.projectId`, event `projectId`). A view
+    // that now lives under another project or globally is not ours, whatever its history says.
+    let candidates: Vec<String> = tx
+        .prepare(
+            "SELECT id FROM saved_views WHERE project_id = ?1
+             UNION
+             SELECT json_extract(receipt_json, '$.view.id') FROM idempotency_receipts
+              WHERE scope_kind = 'GLOBAL'
+                AND operation IN ('saved_view.create','saved_view.update')
+                AND json_valid(receipt_json)
+                AND json_extract(receipt_json, '$.view.projectId') = ?1
+             UNION
+             SELECT aggregate_id FROM global_feed
+              WHERE type IN ('saved_view.created','saved_view.updated','saved_view.deleted')
+                AND json_valid(payload_json)
+                AND json_extract(payload_json, '$.projectId') = ?1",
+        )?
+        .query_map([project_id], |r| r.get::<_, Option<String>>(0))?
+        .filter_map(|id| id.transpose())
         .collect::<rusqlite::Result<_>>()?;
+    let mut views = Vec::new();
+    for id in candidates {
+        let elsewhere: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM saved_views WHERE id = ?1 AND project_id IS NOT ?2)",
+            [id.as_str(), project_id],
+            |r| r.get(0),
+        )?;
+        if !elsewhere {
+            views.push(id);
+        }
+    }
     for id in &quicks {
         tx.execute(
             "DELETE FROM idempotency_receipts
@@ -539,11 +567,14 @@ pub fn delete_live_rows(tx: &Transaction<'_>, project_id: &str) -> rusqlite::Res
         )?;
     }
     for id in &views {
+        // create/update answer with the view; delete answers `{ok, id}`.
         tx.execute(
             "DELETE FROM idempotency_receipts
-             WHERE scope_kind = 'GLOBAL'
-               AND operation IN ('saved_view.create','saved_view.update')
-               AND json_valid(receipt_json) AND json_extract(receipt_json, '$.view.id') = ?1",
+             WHERE scope_kind = 'GLOBAL' AND json_valid(receipt_json)
+               AND ((operation IN ('saved_view.create','saved_view.update')
+                     AND json_extract(receipt_json, '$.view.id') = ?1)
+                 OR (operation = 'saved_view.delete'
+                     AND json_extract(receipt_json, '$.id') = ?1))",
             [id],
         )?;
     }
