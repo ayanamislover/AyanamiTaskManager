@@ -85,6 +85,8 @@ describe("第三方许可证声明", () => {
     expect(bare).toContain(`${LICENSE_TEXT_PENDING}: no license file is shipped in this package`);
   });
 
+  // 两次 cargo metadata 加读几百个 crate 的许可文件：CI 上同一份代码量过 5 秒、21 秒、42 秒，
+  // 看 runner 的 cargo 缓存与负载，全局 30 秒不够。
   it("真实依赖图：五个 exe 的 crate、renderer bundle 里的 npm 包都在，每一项都有许可文本", () => {
     const text = buildThirdPartyNotices(process.cwd());
     for (const heading of [
@@ -114,7 +116,7 @@ describe("第三方许可证声明", () => {
     expect(text).not.toMatch(/^@ayanami-task\//mu);
     // 没有许可文本、也补不上标准 MIT 的组件要人工核对；现在一个都不能有。
     expect(text).not.toContain(LICENSE_TEXT_PENDING);
-  });
+  }, 120_000);
 
   it("bundle 的模块 id 归到包：pnpm 的 .pnpm 目录、scope 包、虚拟模块与查询串", () => {
     expect(packageOfModule("R:/x/node_modules/.pnpm/react@19/node_modules/react/index.js")).toEqual(
