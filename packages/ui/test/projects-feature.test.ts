@@ -5,12 +5,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { AyanamiClient, RegisteredProject } from "@ayanami-task/client";
 import { describe, expect, it, vi } from "vitest";
-import {
-  ProjectWizard,
-  ProjectsPage,
-  isCommittedError,
-  uncommittedError,
-} from "../src/features/projects.js";
+import { ProjectWizard, ProjectsPage } from "../src/features/projects.js";
+import { isCommittedError, uncommittedError } from "../src/components/async-state.js";
 
 const sourcePath = join(process.cwd(), "packages", "ui", "src", "features", "projects.tsx");
 const backupRecoveryPath = join(

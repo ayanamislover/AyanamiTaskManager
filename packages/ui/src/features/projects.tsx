@@ -12,10 +12,12 @@ import { useDialogs } from "../components/atm-dialogs.js";
 import {
   Empty,
   ErrorState,
+  isCommittedError,
   LoadingRows,
   MutationErrorAlert,
   PageHead,
   SectionLoadError,
+  uncommittedError,
 } from "../components/async-state.js";
 import { Presence, type PresenceRootProps } from "../components/presence.js";
 import type { DesktopBridge, McpClient, Notify } from "../contracts.js";
@@ -394,17 +396,6 @@ export function ProjectsPage({
  * TRASHED 项目——按钮永远渲染不出来，「移入垃圾箱」成了单向操作。垃圾箱单独取数，
  * 默认折叠，没有被删的项目时整块不出现。
  */
-/** 服务端确认这次写入已经生效（例如永久删除已提交、只是文件清理待重试）。 */
-export function isCommittedError(error: unknown): boolean {
-  const details = (error as { details?: { committed?: unknown } | null } | null)?.details;
-  return details?.committed === true;
-}
-
-/** A committed purge error is reported by toast, not left in the alert. */
-export function uncommittedError<E>(error: E | null): E | null {
-  return isCommittedError(error) ? null : error;
-}
-
 export function ProjectTrash({ client, notify }: { client: AyanamiClient; notify: Notify }) {
   const queryClient = useQueryClient();
   const dialogs = useDialogs();

@@ -95,6 +95,17 @@ export function ProjectsUnavailable({ error, onRetry }: { error: unknown; onRetr
   );
 }
 
+/** 服务端确认这次写入已经生效（例如永久删除已提交、只是文件清理待重试）。 */
+export function isCommittedError(error: unknown): boolean {
+  const details = (error as { details?: { committed?: unknown } | null } | null)?.details;
+  return details?.committed === true;
+}
+
+/** 已生效的写入错误交给外层通知，不再留在面板的错误条里。 */
+export function uncommittedError<E>(error: E | null): E | null {
+  return isCommittedError(error) ? null : error;
+}
+
 export function MutationErrorAlert({
   error,
   errors,
