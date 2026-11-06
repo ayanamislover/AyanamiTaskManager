@@ -2,7 +2,7 @@
 
 ## 安装与首次启动
 
-运行 Release 里的 `atm-setup.exe`（当前版本 3.0.0）完成当前用户安装，或解压 portable ZIP 后运行 `AyanamiTaskManager.exe`。界面由系统自带的 Microsoft Edge WebView2 运行时渲染，Windows 10/11 一般已预装；缺失或版本过旧时安装器会停在预检，报 `WEBVIEW2_RUNTIME_MISSING` 或 `WEBVIEW2_RUNTIME_TOO_OLD`，不改动任何文件。应用在本机启动内置服务，不需要云端账号。
+运行 Release 里的 `atm-setup.exe`（当前版本 3.0.1）完成当前用户安装，或解压 portable ZIP 后运行 `AyanamiTaskManager.exe`。界面由系统自带的 Microsoft Edge WebView2 运行时渲染，Windows 10/11 一般已预装；缺失或版本过旧时安装器会停在预检，报 `WEBVIEW2_RUNTIME_MISSING` 或 `WEBVIEW2_RUNTIME_TOO_OLD`，不改动任何文件。应用在本机启动内置服务，不需要云端账号。
 
 正式数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager3`，所有项目、共享知识与设置都在数据库 `data\atm.sqlite` 里。`%LOCALAPPDATA%\AyanamiTaskManager` 只保留 2.x 的旧数据（3.0 只读不写，供回退）以及 ATM 同步过去的 Agent Guide、文档与 Skills。portable 包与安装版使用同一个数据目录；如需完全隔离，启动前同时设置 `ATM3_DATA_DIR`（3.0 数据目录）与 `ATM_DATA_DIR`（2.x 数据目录）。旧版 `AYANAMI_TASK_DATA_DIR` 仅作为定位 2.x 数据的兼容 fallback，不应写入新配置。
 
