@@ -42,7 +42,7 @@ AyanamiTaskManager（ATM）把计划、任务、进度、阻塞、长期记录�
 
 ## 三步用起来
 
-1. 从 [Latest Release](https://github.com/ayanamislover/AyanamiTaskManager/releases/latest) 下载 `atm-setup.exe` 并运行。支持 Windows 10/11 x64；界面用系统自带的 WebView2 渲染，一般已经预装。不想安装就用 `AyanamiTaskManager-*-win-x64-portable.zip`。
+1. 从 [Latest Release](https://github.com/ayanamislover/AyanamiTaskManager/releases/latest) 把 `atm-setup.exe`、`atm-<版本>-win-x64.json`、`atm-<版本>-win-x64.zip` 下载到同一个文件夹，运行 `atm-setup.exe`。安装器从它所在的文件夹读取清单和安装包，只下载 `atm-setup.exe` 会报「没有找到安装包清单」。支持 Windows 10/11 x64；界面用系统自带的 WebView2 渲染，一般已经预装。不想安装就用 `AyanamiTaskManager-*-win-x64-portable.zip`。
 2. 打开 ATM，进入「设置 → Agent 接入」，给要用的客户端点「安装」：Codex、Claude Desktop、Claude Code、Kimi Code。ATM 只合并自己的条目，写入前先备份原配置。装完重启客户端。
 3. 对 Agent 说一句：
 
@@ -50,7 +50,7 @@ AyanamiTaskManager（ATM）把计划、任务、进度、阻塞、长期记录�
 
 之后 Agent 会自己开项目、拆任务、写进度、交接。项目还没登记时自动创建，只有名字、代码或目录拿不准时才问你。
 
-已经在用 2.x 或 1.x，先看[升级与回退](#升级与回退)。
+已经在用 3.x、2.x 或 1.x，先看[升级与回退](#升级与回退)。
 
 ## Agent 怎么用它
 
@@ -147,7 +147,8 @@ AyanamiTaskManager（ATM）把计划、任务、进度、阻塞、长期记录�
 ## 升级与回退
 
 - **数据在哪**：3.0 的数据在 `%LOCALAPPDATA%\AyanamiTaskManager3`，项目、共享知识和设置都在 `data\atm.sqlite` 一个库里。`%LOCALAPPDATA%\AyanamiTaskManager` 留着 2.x 的数据（3.0 只读不写），还有 ATM 同步过去的 Agent Guide、文档与 Skills。
-- **从 2.x 升级**：直接装 3.0。第一次启动时把 2.x 的数据转换进新目录，旧目录不动；转换失败会自动撤回到 2.x。
+- **从 3.x 升级**：把 `atm-setup.exe`、`atm-<版本>-win-x64.json`、`atm-<版本>-win-x64.zip` 下载到同一个文件夹，运行 `atm-setup.exe`。数据原地保留，不需要转换；升级失败会自动回到原来的版本。应用内的「立即更新」不联网，只读本机数据目录下的 `updates\`。
+- **从 2.x 升级**：同样把这三个文件下载到同一个文件夹，运行 `atm-setup.exe`。第一次启动时把 2.x 的数据转换进新目录，旧目录不动；转换失败会自动撤回到 2.x。
 - **从 1.x 升级**：先装 [v2.0.0](https://github.com/ayanamislover/AyanamiTaskManager/releases/tag/v2.0.0)，再装 3.0。3.0 只认 2.x 的数据。
 - **Agent 配置不用改**：3.0 把新的 `atm-mcp.exe` 放在原来的位置，启动时也会修正指向旧版本的条目。升级后重启客户端即可。
 - **回退**：开始菜单里的「ATM 修复」可以回到升级前的 2.x，2.x 的数据原样可用，3.0 期间的写入不会带回去。之后再升级时，回退期间没在 2.x 里写过东西就无损接回；写过的话以 2.x 为准重新转换，3.0 的数据整份封存在 `AyanamiTaskManager3\superseded\`，不删除。细节见[用户指南](./docs/user-guide.md#从-2x-升级与回退)。

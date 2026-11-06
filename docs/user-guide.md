@@ -2,7 +2,7 @@
 
 ## 安装与首次启动
 
-运行 Release 里的 `atm-setup.exe`（当前版本 3.0.1）完成当前用户安装，或解压 portable ZIP 后运行 `AyanamiTaskManager.exe`。界面由系统自带的 Microsoft Edge WebView2 运行时渲染，Windows 10/11 一般已预装；缺失或版本过旧时安装器会停在预检，报 `WEBVIEW2_RUNTIME_MISSING` 或 `WEBVIEW2_RUNTIME_TOO_OLD`，不改动任何文件。应用在本机启动内置服务，不需要云端账号。
+把 Release 里的 `atm-setup.exe`、`atm-<版本>-win-x64.json`、`atm-<版本>-win-x64.zip` 下载到同一个文件夹，运行 `atm-setup.exe`（当前版本 3.0.1）完成当前用户安装；安装器从它所在的文件夹读取清单和安装包，只有 `atm-setup.exe` 时会报「没有找到安装包清单」。也可以解压 portable ZIP 后运行 `AyanamiTaskManager.exe`。界面由系统自带的 Microsoft Edge WebView2 运行时渲染，Windows 10/11 一般已预装；缺失或版本过旧时安装器会停在预检，报 `WEBVIEW2_RUNTIME_MISSING` 或 `WEBVIEW2_RUNTIME_TOO_OLD`，不改动任何文件。应用在本机启动内置服务，不需要云端账号。
 
 正式数据默认位于 `%LOCALAPPDATA%\AyanamiTaskManager3`，所有项目、共享知识与设置都在数据库 `data\atm.sqlite` 里。`%LOCALAPPDATA%\AyanamiTaskManager` 只保留 2.x 的旧数据（3.0 只读不写，供回退）以及 ATM 同步过去的 Agent Guide、文档与 Skills。portable 包与安装版使用同一个数据目录；如需完全隔离，启动前同时设置 `ATM3_DATA_DIR`（3.0 数据目录）与 `ATM_DATA_DIR`（2.x 数据目录）。旧版 `AYANAMI_TASK_DATA_DIR` 仅作为定位 2.x 数据的兼容 fallback，不应写入新配置。
 
@@ -14,6 +14,7 @@
 
 ## 从 2.x 升级与回退
 
+- 升级（从 3.x 或 2.x）与首次安装一样：把 `atm-setup.exe`、`atm-<版本>-win-x64.json`、`atm-<版本>-win-x64.zip` 下载到同一个文件夹，运行 `atm-setup.exe`。从 3.x 升级时数据原地保留，升级失败会自动回到原来的版本。应用内的「立即更新」不联网，只读本机数据目录下的 `updates\`。
 - 3.0 只从 2.x 的数据转换。仍在用 1.x 时，先升级到 2.x，再升级到 3.0。
 - 升级后第一次启动时，3.0 把 `%LOCALAPPDATA%\AyanamiTaskManager` 里的 2.x 数据转换到 `%LOCALAPPDATA%\AyanamiTaskManager3`；2.x 的数据目录保持不动。
 - 经安装器回退到 2.x（回到升级前的版本）后，2.x 的数据原样可用，但 3.0 期间的写入不会带回 2.x。
