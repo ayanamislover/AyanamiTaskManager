@@ -286,3 +286,91 @@ fn names_and_aliases_are_unique_ignoring_case() {
         }
     }
 }
+
+/// Kimi 的工具 schema 规范化（Kimi Code `inferTypeFromValues`）：没写 `type` 的节点按 enum / const
+/// 推断类型，一个 enum 里混了两种类型就整组拒收；什么都没有的 `{}` 一律补成 `string`。
+/// 所以发布出去的每个节点都要有 `type` 或 `anyOf`，enum / const 只能有一种类型。
+fn kimi_problems(node: &Value, path: &str, out: &mut Vec<String>) {
+    let Some(map) = node.as_object() else {
+        return;
+    };
+    if !map.contains_key("type") && !map.contains_key("anyOf") {
+        out.push(format!("{path}: no type"));
+    }
+    let kind = |v: &Value| match v {
+        Value::Null => "null",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::String(_) => "string",
+        Value::Array(_) => "array",
+        Value::Object(_) => "object",
+    };
+    let mut values: Vec<&Value> = map
+        .get("enum")
+        .and_then(Value::as_array)
+        .map(|a| a.iter().collect())
+        .unwrap_or_default();
+    values.extend(map.get("const"));
+    if values
+        .iter()
+        .map(|v| kind(v))
+        .collect::<BTreeSet<_>>()
+        .len()
+        > 1
+    {
+        out.push(format!("{path}: mixed enum"));
+    }
+    if let Some(props) = map.get("properties").and_then(Value::as_object) {
+        for (name, child) in props {
+            kimi_problems(child, &format!("{path}.{name}"), out);
+        }
+    }
+    if let Some(items) = map.get("items") {
+        kimi_problems(items, &format!("{path}[]"), out);
+    }
+    for (i, branch) in map
+        .get("anyOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .enumerate()
+    {
+        kimi_problems(branch, &format!("{path}|{i}"), out);
+    }
+}
+
+#[test]
+fn published_schemas_survive_kimi_normalization() {
+    let mut problems = Vec::new();
+    for p in &PROFILES {
+        for t in &p.tools_json() {
+            let name = t["name"].as_str().unwrap();
+            kimi_problems(
+                &t["inputSchema"],
+                &format!("{}:{name}", p.name),
+                &mut problems,
+            );
+        }
+    }
+    assert_eq!(problems, Vec::<String>::new());
+
+    // 阳性对照：这两种形状正是修之前发布过的（resume 的 [true, false, "auto"]、candidate_hashes 的 `{}`）。
+    let mut caught = Vec::new();
+    kimi_problems(
+        &serde_json::json!({"type": "object", "properties": {
+            "resume": {"enum": [true, false, "auto"]},
+            "candidate_hashes": {},
+            "ok": {"anyOf": [{"type": "boolean"}, {"type": "string", "enum": ["auto"]}]},
+        }}),
+        "t",
+        &mut caught,
+    );
+    assert_eq!(
+        caught,
+        [
+            "t.resume: no type",
+            "t.resume: mixed enum",
+            "t.candidate_hashes: no type",
+        ]
+    );
+}

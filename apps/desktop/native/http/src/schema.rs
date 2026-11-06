@@ -48,7 +48,10 @@ pub enum Ty {
         max: usize,
         obj: &'static [Field],
     },
-    /// 任意 JSON，形状由 service 判断。
+    /// 一个对象，键和值由 service 判断（`candidate_hashes`：`{名称: 十六进制}`）。
+    Map,
+    /// 任意 JSON，形状由 service 判断。只给不发布的字段用：发布出去是不带类型的 `{}`，
+    /// Kimi 会把它补成 `string`。
     Any,
 }
 
@@ -378,13 +381,15 @@ fn type_schema(ty: &Ty) -> Value {
         Ty::Bool => json!({"type": "boolean"}),
         Ty::Enum(values) | Ty::EnumPlus(values, _) => json!({"type": "string", "enum": values}),
         Ty::TextOr { obj, .. } => json!({"anyOf": [{"type": "string"}, object_schema(obj)]}),
-        Ty::BoolOr(values) => {
-            let mut all = vec![json!(true), json!(false)];
-            all.extend(values.iter().map(|v| json!(v)));
-            json!({"enum": all})
-        }
+        // 一个 enum 里只放一种类型：Kimi 拒收混合类型的 enum（"Mixed JSON Schema enum or const
+        // types are not supported"），整组工具都发不出去。
+        Ty::BoolOr(values) => json!({"anyOf": [
+            {"type": "boolean"},
+            {"type": "string", "enum": values},
+        ]}),
         Ty::List { of, .. } => json!({"type": "array", "items": type_schema(of)}),
         Ty::Obj(fields) => object_schema(fields),
+        Ty::Map => json!({"type": "object"}),
         Ty::Any => json!({}),
     }
 }
@@ -656,6 +661,10 @@ impl Validation {
                 Value::Object(m) => Value::Object(self.object(obj, m, path)),
                 Value::String(_) => self.value(&Ty::Text { max: *max }, value, path),
                 _ => mismatch(self, "string or object"),
+            },
+            Ty::Map => match value {
+                Value::Object(_) => value.clone(),
+                _ => mismatch(self, "object"),
             },
             Ty::Any => value.clone(),
         }

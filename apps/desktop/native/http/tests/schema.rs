@@ -381,7 +381,7 @@ fn the_schema_is_flat_and_complete() {
     assert_eq!(s["properties"]["limit"], json!({"type": "integer"}));
     assert_eq!(
         s["properties"]["resume"],
-        json!({"enum": [true, false, "auto"]})
+        json!({"anyOf": [{"type": "boolean"}, {"type": "string", "enum": ["auto"]}]})
     );
     assert_eq!(
         s["properties"]["items"]["items"]["required"],
@@ -416,4 +416,32 @@ fn nullable_fields_keep_an_explicit_null() {
         json!(["string", "null"])
     );
     assert_eq!(s["properties"]["title"]["type"], "string");
+}
+
+/// `Map`：发布成 `{"type": "object"}`（不能是不带类型的 `{}`，Kimi 会把它补成 string）；
+/// 对象原样交给 service，别的形状在这里就拒。
+#[test]
+fn map_fields_take_any_object_and_nothing_else() {
+    static MAP: [Field; 1] = [Field::new("candidate_hashes", Ty::Map)];
+    static T: Tool = Tool {
+        name: "atm_map",
+        summary: "演示。",
+        fields: &MAP,
+        check: None,
+        read_only: false,
+        destructive: false,
+    };
+    let hashes = json!({"src/a.rs": "ab12", "README.md": "cd34"});
+    let ok = T.validate(&json!({"candidate_hashes": hashes})).unwrap();
+    assert_eq!(ok.args["candidate_hashes"], hashes);
+    let r = T
+        .validate(&json!({"candidate_hashes": "ab12"}))
+        .unwrap_err();
+    assert_eq!(r.problems[0].path, "candidate_hashes");
+    assert_eq!(r.problems[0].problem, ProblemKind::Pattern);
+    assert_eq!(r.problems[0].allowed, Some(json!("object")));
+    assert_eq!(
+        T.input_schema()["properties"]["candidate_hashes"],
+        json!({"type": "object"})
+    );
 }

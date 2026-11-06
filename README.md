@@ -98,9 +98,9 @@ AyanamiTaskManager（ATM）把计划、任务、进度、阻塞、长期记录�
 
 | Profile | 工具数 | tools 字节 | 预算 | 余量 |
 | --- | ---: | ---: | ---: | ---: |
-| core | 9 | 16,018 bytes | 16,180 bytes | 162 bytes |
+| core | 9 | 16,069 bytes | 16,180 bytes | 111 bytes |
 | memory | 4 | 4,280 bytes | 9,728 bytes | 5,448 bytes |
-| actions | 1 | 4,178 bytes | 9,728 bytes | 5,550 bytes |
+| actions | 1 | 4,193 bytes | 9,728 bytes | 5,535 bytes |
 
 <!-- prettier-ignore-end -->
 
