@@ -12,9 +12,9 @@
 
 | Profile | 发布 | 只收不发布 | 字节 | 预算 | 余量 | tools SHA-256 |
 | --- | ---: | ---: | ---: | ---: | ---: | --- |
-| `core` | 9 | 2 | 16,018 | 16,180 | 162 | `893c52592553e6fc02171b60d0a3609b22b9d80b6e3fff5ada5c20cac25dfe49` |
+| `core` | 9 | 2 | 16,069 | 16,180 | 111 | `ac223569f4b5f8f3981d9242c03fcb8253813ff2dd94721efbad0d129c31bf70` |
 | `memory` | 4 | 2 | 4,280 | 9,728 | 5,448 | `27562ff43277e6af819ac1a18d5020bc1a90bb4e17570688e087017b99d6dfdf` |
-| `actions` | 1 | 10 | 4,178 | 9,728 | 5,550 | `2321da0384e3ee0bb7c493b8686b2e7d07954b8315a7c068804cbcaf889986f9` |
+| `actions` | 1 | 10 | 4,193 | 9,728 | 5,535 | `f9ac663af45d987a6cbd6ff575eb15ea58ac01c8ce45990b83542137b05b3e2a` |
 
 ## instructions
 
@@ -34,12 +34,12 @@
 
 | Profile | 工具 | 只读 | destructive | schema hash |
 | --- | --- | --- | --- | --- |
-| `core` | `atm_begin` | false | false | `f1759c507b0316a3` |
+| `core` | `atm_begin` | false | false | `2b3c652ab9399364` |
 | `core` | `atm_brief` | true | false | `5a022233884e0633` |
 | `core` | `atm_task_list` | true | false | `bec8ff335f7c040b` |
 | `core` | `atm_task_get` | true | false | `82c8e634a4e084a9` |
 | `core` | `atm_task_create` | false | false | `2501824e6ed6fe88` |
-| `core` | `atm_task_patch` | false | true | `a5d9b201ad79412d` |
+| `core` | `atm_task_patch` | false | true | `2090bcdc5e9ce40f` |
 | `core` | `atm_progress_add` | false | false | `ac2befed3341bdd8` |
 | `core` | `atm_record` | false | false | `1ad851873902768d` |
 | `core` | `atm_end` | false | false | `cc6d57ee8dda65bc` |
@@ -47,7 +47,7 @@
 | `memory` | `atm_knowledge_search` | true | false | `b798d26d59d59ce9` |
 | `memory` | `atm_knowledge_get` | true | false | `993fc40d68457c40` |
 | `memory` | `atm_knowledge_save` | false | false | `130abddab77956e3` |
-| `actions` | `atm_task_patch` | false | true | `a5d9b201ad79412d` |
+| `actions` | `atm_task_patch` | false | true | `2090bcdc5e9ce40f` |
 
 只收不发布：
 

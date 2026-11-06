@@ -35,10 +35,16 @@
           ]
         },
         "resume": {
-          "enum": [
-            true,
-            false,
-            "auto"
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string",
+              "enum": [
+                "auto"
+              ]
+            }
           ]
         },
         "session": {
@@ -104,7 +110,7 @@
     },
     "_meta": {
       "surface_version": "v6",
-      "schema_hash": "f1759c507b0316a3"
+      "schema_hash": "2b3c652ab9399364"
     }
   },
   {
@@ -633,7 +639,9 @@
             "CHANGES_REQUESTED"
           ]
         },
-        "candidate_hashes": {},
+        "candidate_hashes": {
+          "type": "object"
+        },
         "parent_checklist_id": {
           "type": "string"
         },
@@ -663,7 +671,7 @@
     },
     "_meta": {
       "surface_version": "v6",
-      "schema_hash": "a5d9b201ad79412d"
+      "schema_hash": "2090bcdc5e9ce40f"
     }
   },
   {

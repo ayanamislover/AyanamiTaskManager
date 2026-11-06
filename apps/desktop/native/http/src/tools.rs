@@ -499,7 +499,7 @@ const fn patch_item() -> [Field; PATCH_ITEM_LEN] {
         Field::new("expected_fields", Ty::Obj(&EXPECTED_FIELDS)),
         Field::new("request_key", Ty::Text { max: 128 }),
         Field::new("verdict", Ty::Enum(&["APPROVED", "CHANGES_REQUESTED"])),
-        Field::new("candidate_hashes", Ty::Any),
+        Field::new("candidate_hashes", Ty::Map),
         Field::new("parent_checklist_id", Ty::Text { max: 128 }),
         Field::new(
             "expected_parent_checklist_version",
