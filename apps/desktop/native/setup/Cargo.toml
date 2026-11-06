@@ -22,7 +22,7 @@ atm-install-state = { path = "../install-state" }
 serde.workspace = true
 serde_json.workspace = true
 sha2 = "0.10"
-zip = { version = "4.6", default-features = false, features = ["deflate"] }
+zip = { version = "9.0", default-features = false, features = ["deflate"] }
 # 快捷方式（IShellLink + AppUserModel 属性）。与宿主同一版本，不引入第二份 windows crate。
 windows = { version = "0.61", features = [
   "Win32_Foundation",
