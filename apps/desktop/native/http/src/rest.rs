@@ -428,6 +428,21 @@ pub const ROUTES: &[Route] = &[
         "/api/v1/imports/packages/apply",
         UStar(Cap(C::ImportApply)),
     ),
+    // 永久删除只由可信 ui-bridge 调用；Agent HTTP 拿到明确的 403 拒绝桩。
+    r(
+        113,
+        "POST",
+        "/api/v1/projects/:code/purge",
+        UStar(Cap(C::ProjectPurge)),
+    ),
+    // 旧整库快照中已删项目的逐项预览仅给用户；导回也由用户显式触发。
+    r(114, "GET", "/api/v1/backups/:id/deleted-projects", U),
+    r(
+        115,
+        "POST",
+        "/api/v1/backups/:id/import-project",
+        UStar(Cap(C::BackupRestoreScope)),
+    ),
 ];
 
 /// 运行时补进 `/api/v1/system/status` 的部分（产品版本、启动时间、转换状态……）。服务层不知道这些。

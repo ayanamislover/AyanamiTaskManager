@@ -23,6 +23,7 @@ pub mod paths;
 mod pin;
 pub mod probe;
 pub mod progress;
+pub mod purge;
 pub mod recover;
 pub mod restore;
 pub mod search;

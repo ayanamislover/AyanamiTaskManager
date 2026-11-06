@@ -1,18 +1,8 @@
 import { Empty, ErrorState, LoadingRows, PageHead } from "../components/async-state.js";
 import type { DamagedBackup, DataSourceState } from "../contracts.js";
-import { formatTime } from "../presentation.js";
+import { backupKindLabel, formatTime } from "../presentation.js";
 
 type Damaged = Extract<DataSourceState, { state: "DAMAGED" }>;
-
-/** 备份种类（`store::backup` 的 kind）的叫法；不认识的照原文显示。 */
-const kindLabels: Record<string, string> = {
-  MANUAL: "手动备份",
-  DAILY: "每日备份",
-  WEEKLY: "每周备份",
-  PRE_RESTORE: "恢复前的备份",
-  PRE_ARCHIVE: "归档项目前的备份",
-  PRE_TRASH: "删除项目前的备份",
-};
 
 /**
  * 恢复命令能用的整库备份（W8h）。宿主在后台逐份核对，核对完才有列表；`recover --offline` 默认用第一份可用的，
@@ -42,7 +32,7 @@ function BackupList({ source }: { source: Damaged }) {
         <div className="atm-row" key={backup.id}>
           <div>
             <div className="atm-row-title">
-              {kindLabels[backup.kind] ?? (backup.kind || "备份")} · {formatTime(backup.createdAt)}
+              {backupKindLabel(backup.kind)} · {formatTime(backup.createdAt)}
             </div>
             <div className="atm-row-sub">
               ID <code>{backup.id}</code>

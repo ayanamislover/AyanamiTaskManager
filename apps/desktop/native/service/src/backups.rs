@@ -12,7 +12,7 @@
 use crate::write::{Service, internal};
 use atm_domain::capability::{self, Capability};
 use atm_domain::error::{DomainError, ErrorCode};
-use atm_domain::principal::Principal;
+use atm_domain::principal::{Principal, PrincipalKind};
 use atm_domain::text::js_trim;
 use atm_domain::time::Timestamp;
 use atm_store::backup::{BackupError, BackupInfo, StoreFailure, Withdrawal, create_backup};
@@ -141,6 +141,9 @@ impl Service {
             .map_err(|e| internal(format!("{e:?}")))?;
         // 06 #22：2.x 的备份只读登记（05 §2.2 `legacy_backups`），不受 3.0 保留策略管理，也不能按 3.0 的范围恢复；
         // 能导入的（AS_PROJECT / AS_KNOWLEDGE）在应用内作为项目或知识库导入。
+        // 永久删除过的项目（有 `internal.purged-project.<id>` 墓碑）的 2.x 备份只留给用户手动导回，
+        // 不出现在 Agent 能读的列表里（ATM-D-712）。
+        let user = principal.kind() == PrincipalKind::User;
         let legacy: Vec<Value> = self
             .store()
             .read(|tx| {
@@ -148,9 +151,11 @@ impl Service {
                     "SELECT l.id, l.source, l.scope, p.code, l.legacy_path, l.sha256, l.size_bytes, l.reason,
                             l.schema_version, l.created_at, l.verified_at, l.importable
                      FROM legacy_backups l LEFT JOIN projects p ON p.id = l.project_id
+                     WHERE ?2 OR l.project_id IS NULL OR NOT EXISTS (
+                       SELECT 1 FROM settings s WHERE s.key = 'internal.purged-project.' || l.project_id)
                      ORDER BY l.created_at DESC, l.id DESC LIMIT ?1",
                 )?
-                .query_map([limit], |r| {
+                .query_map(rusqlite::params![limit, user], |r| {
                     Ok(json!({
                         "id": r.get::<_, String>(0)?,
                         "source": r.get::<_, String>(1)?,

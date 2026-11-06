@@ -3,6 +3,7 @@
 mod support;
 
 use atm_domain::error::ErrorCode;
+use atm_domain::principal::Principal;
 use atm_domain::work::Operation;
 use atm_service::backups::RestoreScope;
 use atm_service::project::{CreateProjectRequest, PathInfo, Transition};
@@ -77,6 +78,86 @@ fn begin_at(agent_id: &str, canonical: &str) -> BeginRequest {
 
 fn count_where(w: &World, table: &str, cond: &str) -> i64 {
     w.count(&format!("SELECT count(*) FROM {table} WHERE {cond}"))
+}
+
+#[test]
+fn permanent_delete_is_user_only_confirmed_and_releases_code_and_path() {
+    let w = world("pj-permanent-delete");
+    w.lifecycle_projects();
+    // Never let this test inspect or remove a real source directory. The fixture's R:\\Trash is
+    // replaced with a uniquely owned directory under the test data root.
+    let source = w.dir.join("source");
+    std::fs::create_dir(&source).unwrap();
+    let marker_dir = source.join(".ayanami-task");
+    std::fs::create_dir(&marker_dir).unwrap();
+    std::fs::write(marker_dir.join("project.json"), r#"{"project_id":"PT"}"#).unwrap();
+    let source_text = source.to_string_lossy().into_owned();
+    w.svc.store().write(move |tx| tx.execute(
+        "UPDATE project_paths SET canonical_path = ?1, path_key = 'test-purge-path' WHERE project_id = 'PT'",
+        [source_text],
+    )).unwrap();
+
+    let before = w.count("SELECT count(*) FROM projects WHERE id='PT'");
+    let e = w.svc.purge_project(&agent(), "TRS", "TRS", 0).unwrap_err();
+    assert_eq!(e.code, ErrorCode::USER_AUTHORIZATION_REQUIRED);
+    let e = w.svc.purge_project(&user(), "TRS", "WRONG", 0).unwrap_err();
+    assert_eq!(e.code, ErrorCode::VALIDATION_ERROR);
+    let e = w.svc.purge_project(&user(), "TRS", "TRS", 99).unwrap_err();
+    assert_eq!(e.code, ErrorCode::VERSION_CONFLICT);
+    assert_eq!(
+        w.count("SELECT count(*) FROM projects WHERE id='PT'"),
+        before
+    );
+    assert!(marker_dir.join("project.json").exists());
+
+    // A 2.x backup of this project stays in the read-only catalog for the User only (ATM-D-712).
+    w.exec(
+        "INSERT INTO legacy_backups (id, source, scope, project_id, legacy_path, sha256, size_bytes, reason,
+                                     schema_version, created_at, verified_at, importable)
+           VALUES ('CATALOG:backups/projects/PT/pre-trash.sqlite', 'CATALOG', 'PROJECT', 'PT',
+                   'C:\\legacy\\backups\\projects\\PT\\pre-trash.sqlite', 'abc', 10, 'PRE_TRASH',
+                   7, '2026-01-01T00:00:00.000Z', NULL, 'AS_PROJECT'),
+                  ('CATALOG:backups/registry.sqlite', 'CATALOG', 'REGISTRY', NULL,
+                   'C:\\legacy\\backups\\registry.sqlite', 'def', 10, NULL,
+                   7, '2026-01-01T00:00:00.000Z', NULL, 'NO');",
+    );
+    let legacy_ids = |p: &Principal| -> Vec<String> {
+        w.svc.list_backups(p, 100).unwrap()["legacyBackups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|b| b["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+    assert_eq!(
+        legacy_ids(&agent()).len(),
+        2,
+        "visible while the project exists"
+    );
+
+    let result = w.svc.purge_project(&user(), "TRS", "TRS", 0).unwrap();
+    assert_eq!(result["deleted"], true);
+    assert_eq!(legacy_ids(&agent()), ["CATALOG:backups/registry.sqlite"]);
+    assert_eq!(legacy_ids(&user()).len(), 2);
+    assert_eq!(w.count("SELECT count(*) FROM projects WHERE id='PT'"), 0);
+    assert!(!marker_dir.join("project.json").exists());
+    assert_eq!(
+        w.count("SELECT count(*) FROM settings WHERE key='internal.purged-project.PT'"),
+        1
+    );
+    let made = w
+        .svc
+        .create_project(
+            &user(),
+            CreateProjectRequest {
+                code: Some("TRS".into()),
+                path: at(&source.to_string_lossy()),
+                ..create("New from zero")
+            },
+        )
+        .unwrap();
+    assert_ne!(made.result["project"]["id"], "PT");
+    assert_eq!(made.result["project"]["code"], "TRS");
 }
 
 // ================= L-001 / L-012：创建 =================
@@ -1259,4 +1340,199 @@ fn l002_withdrawal_that_cannot_move_files_keeps_the_backup_registered() {
     let list = svc.list_backups(&user(), 200).unwrap();
     assert_eq!(list["withdrawals"]["recent"][0]["reason"], "FILES_IN_USE");
     assert_eq!(list["withdrawals"]["cleanupPending"], 0);
+}
+
+/// Peer r2 R2-1 / R2-2: purging a project removes the GLOBAL receipts and global events of the quick
+/// task promoted into it, but never those of another quick task that merely mentions its id.
+#[test]
+fn permanent_delete_clears_promoted_quick_history_but_not_other_receipts() {
+    use atm_service::quick::{QuickCreateRequest, QuickPromoteRequest};
+    let w = world("pj-permanent-delete-quick");
+    let quick = |title: &str, note: Option<String>, op: &str| {
+        w.svc
+            .quick_create(
+                &user(),
+                QuickCreateRequest {
+                    title: title.into(),
+                    note,
+                    ..QuickCreateRequest::default()
+                },
+                op,
+            )
+            .unwrap()
+    };
+    let promoted = quick("REVIEW_PRIVATE_OLD_TITLE", None, "q-old");
+    let quick_id = promoted.result["quick"]["id"].as_str().unwrap().to_owned();
+    let made = w
+        .svc
+        .quick_promote(
+            &user(),
+            &quick_id,
+            QuickPromoteRequest {
+                expected_version: promoted.result["quick"]["version"].as_i64().unwrap(),
+                ..QuickPromoteRequest::default()
+            },
+            "q-old-promote",
+        )
+        .unwrap();
+    let project_id = made.result["project"]["id"]
+        .as_str()
+        .or_else(|| made.result["quick"]["promotedProjectId"].as_str())
+        .unwrap()
+        .to_owned();
+    let code: String = {
+        let key = project_id.clone();
+        w.svc
+            .store()
+            .read(move |tx| {
+                tx.query_row("SELECT code FROM projects WHERE id = ?1", [&key], |r| {
+                    r.get(0)
+                })
+            })
+            .unwrap()
+    };
+    // Another quick task whose note is exactly the doomed project's id.
+    let bystander = quick("bystander", Some(project_id.clone()), "q-bystander");
+    let bystander_id = bystander.result["quick"]["id"].as_str().unwrap().to_owned();
+
+    w.svc
+        .set_lifecycle(&user(), &code, Transition::Trash, "trash-old")
+        .unwrap();
+    let version: i64 = {
+        let key = project_id.clone();
+        w.svc
+            .store()
+            .read(move |tx| {
+                tx.query_row("SELECT version FROM projects WHERE id = ?1", [&key], |r| {
+                    r.get(0)
+                })
+            })
+            .unwrap()
+    };
+    w.svc.purge_project(&user(), &code, &code, version).unwrap();
+
+    let again = quick("bystander", Some(project_id.clone()), "q-bystander");
+    assert!(again.replayed, "the bystander's receipt survives");
+    assert_eq!(again.result["quick"]["id"], bystander_id.as_str());
+    assert_eq!(
+        w.count("SELECT count(*) FROM quick_tasks WHERE title = 'bystander'"),
+        1
+    );
+    let overview = w.svc.ui_overview(&user()).unwrap().to_string();
+    assert!(
+        !overview.contains("REVIEW_PRIVATE_OLD_TITLE"),
+        "the promoted quick task's history is gone from the overview"
+    );
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM global_feed WHERE aggregate_id = '{quick_id}'"
+        )),
+        0
+    );
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM global_feed WHERE aggregate_id = '{bystander_id}'"
+        )),
+        1
+    );
+}
+
+/// Peer r3 R3-1: a saved view the User deleted before the project still has receipts and events
+/// that name the project as owner; purging the project removes them. A global view that merely
+/// mentions the old view's id keeps its receipt and stays idempotent.
+#[test]
+fn permanent_delete_clears_history_of_views_deleted_earlier() {
+    use atm_service::views::{SavedViewCreate, SavedViewUpdate};
+    let w = world("pj-permanent-delete-retired-view");
+    let made = w
+        .svc
+        .create_project(
+            &user(),
+            CreateProjectRequest {
+                code: Some("SVP".into()),
+                ..create("Saved view owner")
+            },
+        )
+        .unwrap();
+    let project_id = made.result["project"]["id"].as_str().unwrap().to_owned();
+    let view = w
+        .svc
+        .create_saved_view(
+            &user(),
+            SavedViewCreate {
+                scope: "PROJECT".into(),
+                project: Some("SVP".into()),
+                name: "RETIRED_VIEW_NAME".into(),
+                query: Some(json!({"status": "READY"})),
+                sort: None,
+            },
+            "view-create",
+        )
+        .unwrap();
+    let view_id = view.result["view"]["id"].as_str().unwrap().to_owned();
+    w.svc
+        .update_saved_view(
+            &user(),
+            &view_id,
+            SavedViewUpdate {
+                expected_version: Some(view.result["view"]["version"].as_i64().unwrap()),
+                name: Some("RETIRED_VIEW_NAME_2".into()),
+                ..SavedViewUpdate::default()
+            },
+            "view-update",
+        )
+        .unwrap();
+    w.svc
+        .delete_saved_view(&user(), &view_id, Some(1), "view-delete")
+        .unwrap();
+    let global = |op: &str| {
+        w.svc
+            .create_saved_view(
+                &user(),
+                SavedViewCreate {
+                    scope: "GLOBAL".into(),
+                    project: None,
+                    name: "bystander view".into(),
+                    query: Some(json!({"note": view_id})),
+                    sort: None,
+                },
+                op,
+            )
+            .unwrap()
+    };
+    let first = global("view-global");
+
+    w.svc
+        .set_lifecycle(&user(), "SVP", Transition::Trash, "trash-svp")
+        .unwrap();
+    let version: i64 = {
+        let key = project_id.clone();
+        w.svc
+            .store()
+            .read(move |tx| {
+                tx.query_row("SELECT version FROM projects WHERE id = ?1", [&key], |r| {
+                    r.get(0)
+                })
+            })
+            .unwrap()
+    };
+    w.svc.purge_project(&user(), "SVP", "SVP", version).unwrap();
+
+    assert_eq!(
+        w.count(
+            "SELECT count(*) FROM idempotency_receipts WHERE op_id IN ('view-create','view-update','view-delete')"
+        ),
+        0
+    );
+    assert_eq!(
+        w.count(&format!(
+            "SELECT count(*) FROM global_feed WHERE aggregate_id = '{view_id}'"
+        )),
+        0
+    );
+    let overview = w.svc.ui_overview(&user()).unwrap().to_string();
+    assert!(!overview.contains("RETIRED_VIEW_NAME"));
+    let again = global("view-global");
+    assert!(again.replayed, "the bystander view's receipt survives");
+    assert_eq!(again.result["view"]["id"], first.result["view"]["id"]);
 }

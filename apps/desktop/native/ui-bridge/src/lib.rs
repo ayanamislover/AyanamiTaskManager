@@ -95,12 +95,20 @@ pub(crate) fn error_reply(
 
 /// 服务的错误 → 2.0 信封（状态码按错误码）。
 pub(crate) fn domain_reply(e: DomainError) -> Reply {
+    use atm_domain::error::Committed;
     let status = e.code.http_status();
-    let retryable = e.code.retryable();
-    let details = if e.details.is_empty() {
+    let mut details = e.details;
+    // 服务确知已提交（或不确定）时照实带上，与 Agent 信封一致（envelope_reply）；
+    // 已提交的不再按错误码标成可重试，免得界面把一次已经生效的写入再发一遍。
+    let committed = e.committed.filter(|c| *c != Committed::No);
+    if let Some(c) = &committed {
+        details.insert("committed".into(), json!(c));
+    }
+    let retryable = e.code.retryable() && committed != Some(Committed::Yes);
+    let details = if details.is_empty() {
         None
     } else {
-        Some(Value::Object(e.details))
+        Some(Value::Object(details))
     };
     error_reply(status, e.code.as_str(), &e.message, retryable, details)
 }

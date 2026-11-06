@@ -414,6 +414,18 @@ fn locate(tx: &Transaction<'_>, s: &ProjectSelector) -> Result<Option<Project>, 
     if let Some(id) = &s.marker_project_id {
         return match project_by(tx, "p.id = ?1", id)? {
             Some(p) => Ok(Some(p)),
+            None if tx
+                .query_row(
+                    "SELECT 1 FROM settings WHERE key = ?1",
+                    [format!("internal.purged-project.{id}")],
+                    |r| r.get::<_, i64>(0),
+                )
+                .optional()
+                .map_err(db)?
+                .is_some() =>
+            {
+                Ok(None)
+            }
             // L-010：marker 指向的项目不存在，不能借此建项目，报 PROJECT_NOT_FOUND 并带诊断。
             None => Err(DomainError::new(
                 ErrorCode::PROJECT_NOT_FOUND,

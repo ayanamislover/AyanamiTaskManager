@@ -56,6 +56,12 @@ export function createProjectsSurface(request: ClientRequest) {
       request<RegisteredProject>("POST", `/api/v1/projects/${encodeURIComponent(code)}/restore`),
     trash: (code: string) =>
       request<RegisteredProject>("POST", `/api/v1/projects/${encodeURIComponent(code)}/trash`),
+    purge: (code: string, expectedVersion: number, confirmCode: string) =>
+      request<{ deleted: true; id: string; code: string }>(
+        "POST",
+        `/api/v1/projects/${encodeURIComponent(code)}/purge`,
+        { expectedVersion, confirmCode },
+      ),
     objectives: (code: string) =>
       request<Array<Record<string, any>>>(
         "GET",

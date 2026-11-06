@@ -108,6 +108,9 @@ pub const UI_ROUTES: &[UiRoute] = &[
     r(110, "GET", "/api/v1/imports/packages"),
     r(111, "POST", "/api/v1/imports/packages/preview"),
     r(112, "POST", "/api/v1/imports/packages/apply"),
+    r(113, "POST", "/api/v1/projects/:code/purge"),
+    r(114, "GET", "/api/v1/backups/:id/deleted-projects"),
+    r(115, "POST", "/api/v1/backups/:id/import-project"),
 ];
 
 /// 路径参数：`(名字, 已解码的值)`。

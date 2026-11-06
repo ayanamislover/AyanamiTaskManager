@@ -80,6 +80,7 @@ capabilities! {
     ProjectArchive => "project.archive", Write, U true, A false, P false, session false, S [];
     ProjectUnarchive => "project.unarchive", Write, U true, A false, P false, session false, S [];
     ProjectTrash => "project.trash", Write, U true, A false, P false, session false, S [];
+    ProjectPurge => "project.purge", Write, U true, A false, P false, session false, S [];
     ProjectUntrash => "project.untrash", Write, U true, A false, P false, session false, S [];
     // 只能经 begin 撞上 TRASHED 时隐式触发（服务保证没有别的入口）。
     ProjectRestoreRequestCreate => "project.restore_request.create", Write, U false, A true, P false, session false, S [];
@@ -176,6 +177,7 @@ impl Capability {
             ProjectArchive => "ATM 窗口 → 项目 → 归档",
             ProjectUnarchive => "ATM 窗口 → 项目 → 取消归档",
             ProjectTrash => "ATM 窗口 → 项目 → 移到垃圾箱",
+            ProjectPurge => "ATM 窗口 → 项目 → 垃圾箱 → 永久删除",
             ProjectUntrash => "ATM 窗口 → 项目列表 → 垃圾箱 → 恢复",
             ProjectRestoreRequestDecide => "ATM 窗口 → 项目列表 → 垃圾箱 → 恢复请求",
             ProjectUpdateDraft | ProjectUpdatePublish => "ATM 窗口 → 项目概览 → 发布项目进度",

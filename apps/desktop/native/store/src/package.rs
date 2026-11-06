@@ -1178,6 +1178,12 @@ pub enum ImportSource<'a> {
     Package(&'a Path),
     /// 2.x 的项目备份（单个项目库文件）。
     LegacyProject(&'a Path),
+    /// One project inside a verified ATM 3 whole-database backup. Import it as a *new* identity;
+    /// never roll back another current project or let the source's old Agent sessions resume.
+    WholeBackupProject {
+        backup: &'a crate::backup::VerifiedBackup,
+        project_id: &'a str,
+    },
 }
 
 /// 项目代码的规则（04 L-012，2.x `domain/src/index.ts`）：大写字母开头，2–12 位大写字母、数字或连字符。
@@ -1311,6 +1317,24 @@ fn import_in(
                 staging.join("artifacts"),
                 "2.x-project-backup".to_string(),
                 Some(sha),
+            )
+        }
+        ImportSource::WholeBackupProject { backup, project_id } => {
+            let db = staging.join(DB_ENTRY);
+            let recorded = crate::backup::artifacts_root(store.path()).join(project_id);
+            extract_project(&backup.source_db(), &db, project_id, &recorded)?;
+            if let Some(artifacts) = backup.source_artifacts() {
+                let relative = Path::new(project_id);
+                let mut pinned = crate::chain::pin_inside(artifacts, &[relative])?;
+                if let Some(source) = pinned.existing(relative)? {
+                    copy_tree(&source, &staging.join("artifacts"))?;
+                }
+            }
+            (
+                db,
+                staging.join("artifacts"),
+                "atm3-whole-backup".to_string(),
+                None,
             )
         }
     };

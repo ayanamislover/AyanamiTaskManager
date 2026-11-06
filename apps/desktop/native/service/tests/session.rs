@@ -310,6 +310,21 @@ fn l010_project_is_found_by_path_marker_or_common_dir() {
         )
     });
     assert_eq!(e.details["diagnostic"], "MARKER_PROJECT_MISSING");
+
+    // Only a marker for an identity ATM itself purged is safe to ignore. This is what lets a
+    // previously disconnected source directory start from zero after it reappears.
+    w.exec("INSERT INTO settings(key,value_json,updated_at) VALUES ('internal.purged-project.GONE','{}','2026-01-01')");
+    let fresh = w.begin(BeginRequest {
+        selector: ProjectSelector {
+            marker_project_id: Some("GONE".into()),
+            canonical_path: Some(w.dir.to_string_lossy().into_owned()),
+            ..ProjectSelector::default()
+        },
+        title: Some("从零开始".into()),
+        allow_project_create: true,
+        ..BeginRequest::new("claude")
+    });
+    assert_ne!(fresh.result["project"]["id"], "GONE");
 }
 
 /// S-006 + S-011：resume 接回同四元组唯一的未关闭 session；两条 → AMBIGUOUS。agents 每次都 upsert。
